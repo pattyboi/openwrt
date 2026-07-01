@@ -137,6 +137,10 @@ world: prepare $(target/stamp-compile) $(package/stamp-compile) $(package/stamp-
 ifneq ($(CONFIG_CCACHE),)
 	$(STAGING_DIR_HOST)/bin/ccache -s
 endif
+	@mkdir -p /home/pat/staging/latest-image
+	@find $(BIN_DIR) -maxdepth 1 -name "*sysupgrade.itb" -exec cp {} /home/pat/staging/latest-image/ \;
+	@find $(BIN_DIR) -maxdepth 1 -name "*recovery.itb" -exec cp {} /home/pat/staging/latest-image/ \;
+	@echo "Latest images copied to /home/pat/staging/latest-image/"
 
 .PHONY: clean dirclean prereq prepare world package/symlinks package/symlinks-install package/symlinks-clean
 
