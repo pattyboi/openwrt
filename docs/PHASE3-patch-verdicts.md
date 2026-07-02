@@ -155,7 +155,23 @@ promote to INVESTIGATE only if a PPPoE-WAN offload gap is measured.)*
 
 ---
 
-## Strategic note — WED patches may be unnecessary under the mainline strategy
+## WED empirical test result (2026-07-02, on live vanilla firmware) — CONFIRMED FAULT
+
+Tested on the running stock 25.12.4 image: `wed_enable=Y` on `mt7915e` +
+PCI unbind/rebind of `0000:01:00.0`. **Result: hard fault.** The `bind` write
+never returned, ethernet dropped, the box went unreachable, and the 31s
+`mtk-wdt` watchdog did **not** recover it (still down >90s → needs manual power
+cycle). This is the **same failure as the SDK build**, so the WED fault is a
+driver/hardware-level problem present in **stock mainline too**, not something
+the SDK patches introduced. Note the vanilla E8450 DTS wifi node
+(`wmac1: wifi@0,0`) has no `mediatek,wed` phandle, yet `wed_enable=Y` alone
+still triggers the faulting attach — mainline MT7622 mt7915 resolves WED via the
+hif/PCIe path, not the wifi-node phandle.
+
+**Decision:** WED is OFF THE TABLE. Do not apply any `wed-*` patch and do not
+enable `wed_enable`. Proceed with PPPQ only (no WED dependency).
+
+## Strategic note — WED patches unnecessary (superseded by test above)
 
 The Phase-4 Group-3 instruction (apply wed-02/10/13 first) originates from the
 **old** strategy of fixing the SDK's broken WED. Under the **new** mainline
