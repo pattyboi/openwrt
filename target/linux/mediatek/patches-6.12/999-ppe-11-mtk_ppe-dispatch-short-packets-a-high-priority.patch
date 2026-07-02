@@ -1,0 +1,211 @@
+From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Subject: [PATCH] net: ethernet: mtk_ppe: dispatch TCP-ACK to high-prio queue (PPPQ)
+
+Re-adapted for OpenWrt 25.12.4: the real tree's mtk_flow_entry_match() is
+4-arg (eth, entry, data, len) with a separate mtk_flow_entry_match_len().
+Both are un-static'd and declared in mtk_ppe.h so mtk_flow_get_ct_dir()
+(added to mtk_ppe_offload.c) can reuse them. Direction detection uses
+nf_ct_l3num(ct) directly, avoiding the static mtk_get_ib1_pkt_type().
+
+In the PPPQ path (qos_toggle==2) small (<=64B) TCP ACKs are bumped to a
+higher-priority queue (queue += 6); the ct_mark explicit-queue threshold
+is moved 9 -> 15 to stay clear of the bumped range.
+
+nf_conn_acct_find() pulls the nf_conntrack-module symbol __nf_ct_ext_find,
+which a built-in driver cannot link against when CONFIG_NF_CONNTRACK=m; an
+IS_REACHABLE(CONFIG_NF_CONNTRACK) guard lets the compiler drop that path
+(TCP-ACK prioritization is then active only with CONFIG_NF_CONNTRACK=y).
+Base PPPQ queue assignment (999-ppe-04) is unaffected. Applies on top of
+the adapted 999-ppe-04.
+
+Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.c
+@@ -488,28 +488,28 @@
+ 		*ib2 &= ~MTK_FOE_IB2_QID;
+ 		*ib2 |= FIELD_PREP(MTK_FOE_IB2_QID, queue);
+ 		*ib2 |= MTK_FOE_IB2_PSE_QOS;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+-static int
++int
+ mtk_flow_entry_match_len(struct mtk_eth *eth, struct mtk_foe_entry *entry)
+ {
+ 	int type = mtk_get_ib1_pkt_type(eth, entry->ib1);
+ 
+ 	if (type > MTK_PPE_PKT_TYPE_IPV4_DSLITE)
+ 		return offsetof(struct mtk_foe_entry, ipv6._rsv);
+ 	else
+ 		return offsetof(struct mtk_foe_entry, ipv4.ib2);
+ }
+ 
+-static bool
++bool
+ mtk_flow_entry_match(struct mtk_eth *eth, struct mtk_flow_entry *entry,
+ 		     struct mtk_foe_entry *data, int len)
+ {
+ 	if ((data->ib1 ^ entry->data.ib1) & MTK_FOE_IB1_UDP)
+ 		return false;
+ 
+ 	return !memcmp(&entry->data.data, &data->data, len - 4);
+ }
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.h
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.h
+@@ -397,12 +397,15 @@
+ int mtk_foe_entry_set_wdma(struct mtk_eth *eth, struct mtk_foe_entry *entry,
+ 			   int wdma_idx, int txq, int bss, int wcid,
+ 			   bool amsdu_en);
+ int mtk_foe_entry_set_queue(struct mtk_eth *eth, struct mtk_foe_entry *entry,
+ 			    unsigned int queue);
+ int mtk_foe_entry_commit(struct mtk_ppe *ppe, struct mtk_flow_entry *entry);
+ void mtk_foe_entry_clear(struct mtk_ppe *ppe, struct mtk_flow_entry *entry);
+ int mtk_ppe_debugfs_init(struct mtk_ppe *ppe, int index);
++int mtk_flow_entry_match_len(struct mtk_eth *eth, struct mtk_foe_entry *entry);
++bool mtk_flow_entry_match(struct mtk_eth *eth, struct mtk_flow_entry *entry,
++			  struct mtk_foe_entry *data, int len);
+ void mtk_foe_entry_get_stats(struct mtk_ppe *ppe, struct mtk_flow_entry *entry,
+ 			     int *idle);
+ 
+ #endif
+--- a/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
+@@ -185,16 +185,101 @@
+ 
+ 	return dp->index;
+ #else
+ 	return -ENODEV;
+ #endif
+ }
+ 
+ static int
++mtk_flow_get_ct_dir(struct mtk_eth *eth, struct mtk_foe_entry *foe,
++		    struct nf_conn *ct)
++{
++	const struct nf_conntrack_tuple *tuple;
++	struct mtk_flow_entry ct_entry;
++	struct mtk_foe_entry *ct_foe;
++	int i, j, len;
++
++	if (!eth || !foe || !ct)
++		return -EINVAL;
++
++	ct_foe = &ct_entry.data;
++	ct_foe->ib1 = foe->ib1;
++	len = mtk_flow_entry_match_len(eth, foe);
++
++	for (i = 0; i < IP_CT_DIR_MAX; i++) {
++		tuple = &ct->tuplehash[i].tuple;
++
++		if (nf_ct_l3num(ct) == AF_INET6) {
++			for (j = 0; j < 4; j++) {
++				ct_foe->ipv6.src_ip[j] = ntohl(tuple->src.u3.in6.s6_addr32[j]);
++				ct_foe->ipv6.dest_ip[j] = ntohl(tuple->dst.u3.in6.s6_addr32[j]);
++			}
++			ct_foe->ipv6.src_port = ntohs(tuple->src.u.tcp.port);
++			ct_foe->ipv6.dest_port = ntohs(tuple->dst.u.tcp.port);
++		} else {
++			ct_foe->ipv4.orig.src_ip = ntohl(tuple->src.u3.ip);
++			ct_foe->ipv4.orig.dest_ip = ntohl(tuple->dst.u3.ip);
++			ct_foe->ipv4.orig.src_port = ntohs(tuple->src.u.tcp.port);
++			ct_foe->ipv4.orig.dest_port = ntohs(tuple->dst.u.tcp.port);
++		}
++
++		if (mtk_flow_entry_match(eth, &ct_entry, foe, len))
++			return i;
++	}
++
++	return -EINVAL;
++}
++
++static bool
++mtk_flow_is_tcp_ack(struct mtk_eth *eth, struct mtk_foe_entry *foe,
++		    struct nf_conn *ct)
++{
++	const struct nf_conn_counter *counters;
++	struct nf_conn_acct *acct;
++	u64 packets[IP_CT_DIR_MAX], bytes[IP_CT_DIR_MAX], avg[IP_CT_DIR_MAX];
++	int dir;
++
++	if (!ct)
++		return false;
++
++	dir = mtk_flow_get_ct_dir(eth, foe, ct);
++	if (dir < 0 || dir >= IP_CT_DIR_MAX)
++		return false;
++
++	/* Conntrack accounting lives in the nf_conntrack module; when that is
++	 * modular and this driver is built-in, __nf_ct_ext_find is unreachable
++	 * at link time. IS_REACHABLE lets the compiler drop the call in that
++	 * case (TCP-ACK prioritization then needs CONFIG_NF_CONNTRACK=y).
++	 */
++	if (!IS_REACHABLE(CONFIG_NF_CONNTRACK))
++		return false;
++
++	acct = nf_conn_acct_find(ct);
++	if (!acct)
++		return false;
++
++	counters = acct->counter;
++	packets[dir] = atomic64_read(&counters[dir].packets);
++	bytes[dir] = atomic64_read(&counters[dir].bytes);
++	packets[!dir] = atomic64_read(&counters[!dir].packets);
++	bytes[!dir] = atomic64_read(&counters[!dir].bytes);
++
++	/* Avoid division by zero */
++	if (!packets[dir] || !packets[!dir])
++		return false;
++
++	avg[dir] = bytes[dir] / packets[dir];
++	avg[!dir] = bytes[!dir] / packets[!dir];
++
++	/* TCP ACKs are small (<= 64 bytes) compared to data packets */
++	return (avg[dir] <= 64 && avg[dir] < avg[!dir]);
++}
++
++static int
+ mtk_flow_set_output_device(struct mtk_eth *eth, struct mtk_foe_entry *foe,
+ 			   struct net_device *idev, struct net_device *odev,
+ 			   struct flow_cls_offload *f, const u8 *dest_mac,
+ 			   int *wed_index)
+ {
+ 	struct mtk_wdma_info info = {};
+ 	struct nf_conn *ct = NULL;
+ 	struct mtk_mac *mac;
+@@ -246,23 +331,30 @@
+ 		queue = (pse_port == PSE_GDM3_PORT) ? 2 : pse_port - 1;
+ 	}
+ 
+ 	if (f->flow && f->flow->ct) {
+ 		ct = f->flow->ct;
+ 		ct_mark = ct->mark;
+ 	}
+ 
+-	if (eth->qos_toggle == 2 && mtk_ppe_check_pppq_path(mac, idev, dsa_port))
++	if (eth->qos_toggle == 2 && mtk_ppe_check_pppq_path(mac, idev, dsa_port)) {
++		if (dsa_port >= 0 && ct && nf_ct_protonum(ct) == IPPROTO_TCP) {
++			/* Dispatch small (<=64B) IPv4/IPv6 TCP ACKs to a
++			 * higher-priority queue.
++			 */
++			if (mtk_flow_is_tcp_ack(eth, foe, ct))
++				queue += 6;
++		}
+ 		mtk_foe_entry_set_queue(eth, foe, queue);
+-	else if (eth->qos_toggle == 1 || (ct_mark & MTK_QDMA_QUEUE_MASK) >= 9) {
++	} else if (eth->qos_toggle == 1 || (ct_mark & MTK_QDMA_QUEUE_MASK) >= 15) {
+ 		u8 qos_ul_toggle;
+ 
+ 		if (eth->qos_toggle == 2)
+-			qos_ul_toggle = ((ct_mark >> 16) & MTK_QDMA_QUEUE_MASK) >= 9 ? 1 : 0;
++			qos_ul_toggle = ((ct_mark >> 16) & MTK_QDMA_QUEUE_MASK) >= 15 ? 1 : 0;
+ 		else
+ 			qos_ul_toggle = ((ct_mark >> 16) & MTK_QDMA_QUEUE_MASK) >= 1 ? 1 : 0;
+ 
+ 		if (qos_ul_toggle == 1) {
+ 			if (odev == eth->netdev[1])
+ 				mtk_foe_entry_set_queue(eth, foe, (ct_mark >> 16) & MTK_QDMA_QUEUE_MASK);
+ 			else
+ 				mtk_foe_entry_set_queue(eth, foe, ct_mark & MTK_QDMA_QUEUE_MASK);
