@@ -188,3 +188,59 @@ escape.
 `ppe-37` (printk) + `ppe-33` (memleak) + `ppe-10` (typo) + `eth-91` (RX ring).
 Build → flash → confirm `dmesg | grep -i "PPPQ\|offload"` and that WED still
 attaches, before touching DSCP/shaping or any wed-*.
+
+---
+
+# INVESTIGATE set — RESOLVED (post-build, 2026-07-02, against real build_dir source)
+
+Built set (validated on HW): `eth-91, ppe-04, ppe-10, ppe-11(guarded), ppe-36, zz`.
+`ppe-33`/`ppe-37` were SDK self-fixes N/A to vanilla (dropped/deferred). The
+remaining INVESTIGATE patches were read against the real 6.12.87 tree:
+
+**APPLY (the one clear win):**
+- `999-eth-07` fix panic with napi_enable — genuine SoC-agnostic **bugfix**:
+  reorders `register_netdev` to *after* `netif_napi_add`, guards `unregister_netdev`
+  by `reg_state`, adds `mtk_napi_del` + proper error-path cleanup. All anchors
+  present in vanilla mtk_probe/mtk_remove. Hardens a late-ETH-init boot race.
+  *Needs a build (touches mtk_probe; applies before ppe-36/eth-91 in series).*
+
+**Optional / trivial:** `999-wdt-01` (clamp mtk_wdt set_timeout) — harmless, ~0
+value; only worth folding into a batch, not its own cycle.
+
+**SKIP — v2/v3-guarded dead code on MT7622 v1:**
+- `999-ppe-09` (CS0_PIPE/SRH_CACHE_FIRST) — `if (netsys_v3_or_greater)`, MT7988 10G.
+- `999-ppe-03` (keep sp in info1) — src-port field is `_V2`; `mtk_get_ib1_sp`
+  returns 0 on v1; only a harmless `hwe` fetch reorder runs on v1.
+
+**SKIP — high-risk / violates CLAUDE.md guardrail:**
+- `999-ppe-14` (PPE cache preserved line lock) — 165 lines of new PPE cache
+  register-write state machine in the entry-clear path. Runs on v1 but is exactly
+  the "don't touch iowrite32 sequences / GC logic" code we're told to avoid, and
+  offload works with no observed symptom.
+
+**SKIP — WED-only / dependency / overhead:**
+- `999-ppe-08` (roaming handler) — depends on ppe-03's `mtk_get_ib1_sp`, only
+  tears down WDMA/WED FOE entries (WED off → inert), references dropped SDK
+  debugfs, adds a persistent netlink socket + workqueue.
+- `999-ppe-16` (nft WDMA path) — WED/WDMA offload path; moot with WED off.
+
+**SKIP — mainline already provides / not beneficial for a forwarding NAT box:**
+- HW-LRO set `999-eth-08/10/16/35` — mainline already sets `MT7622_CAPS|MTK_HWLRO`
+  and has hw_lro; LRO coalesces RX and is counterproductive for routed/forwarded
+  traffic (it's for local termination). Don't carry.
+
+**SKIP-for-now — diagnostic / no observed symptom:**
+- `999-eth-90` (proprietary mtk_eth_dbg debugfs) — large SDK tooling; add only if
+  deep PPE debugging is needed later.
+- `999-eth-18/19` (PSE-PPE port link-down refactor) — offload survived the link
+  flaps we saw; revisit only if link-flap offload issues appear.
+
+**DEFER — gated on the all-netfilter-builtin experiment (NF_KMOD):**
+DSCP/conntrack-qos: `999-ppe-15/17/19/23/24/27`, `999-eth-27` (skb-mark qos),
+`999-ppe-35` (conntrack-ext IS_REACHABLE). All read conntrack extensions
+(`nf_conntrack_qos`) from the built-in eth driver; inert with `NF_CONNTRACK=m`
+(same reason TCP-ACK is gated). Become functional only if netfilter is built in.
+
+**Net result:** from the whole INVESTIGATE set, only **eth-07** is worth adding to
+the current (modular-netfilter) build. Everything else is dead-on-v1, high-risk,
+WED-dependent, redundant with mainline, or gated on the netfilter-builtin decision.
