@@ -7,7 +7,11 @@
 #
 
 NF_MENU:=Netfilter Extensions
-NF_KMOD:=1
+# NF_KMOD empty = build all netfilter (incl nf_conntrack) INTO the kernel, so the
+# built-in mtk_eth_soc driver can call conntrack helpers (nf_conn_acct_find /
+# nf_conntrack_qos) for functional TCP-ACK + DSCP-qos PPE offload. Trade-off:
+# larger vmlinux, netfilter no longer modular. Was NF_KMOD:=1 (modular default).
+NF_KMOD:=
 include $(INCLUDE_DIR)/netfilter.mk
 
 

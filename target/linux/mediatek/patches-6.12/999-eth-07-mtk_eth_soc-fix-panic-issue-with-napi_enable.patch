@@ -1,0 +1,132 @@
+From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: fix panic issue with napi_enable in mtk_open
+
+If ETH is initialized late (close to when mtk_open runs), netif_napi_enable
+can be reached before netif_napi_add() was called -> kernel panic. Reorder so
+register_netdev() happens AFTER the dummy_dev + netif_napi_add(), guard
+unregister_netdev() by reg_state, and add mtk_napi_del() with proper
+error-path cleanup. SoC-agnostic robustness fix (applies on MT7622 v1).
+
+Regenerated against OpenWrt 25.12.4 mtk_eth_soc.c (fuzz 0).
+
+Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -4675,12 +4675,18 @@
+ 
+ 	mtk_wed_fe_reset_complete();
+ 
+ 	rtnl_unlock();
+ }
+ 
++static void mtk_napi_del(struct mtk_eth *eth)
++{
++	netif_napi_del(&eth->tx_napi);
++	netif_napi_del(&eth->rx_napi);
++}
++
+ static int mtk_free_dev(struct mtk_eth *eth)
+ {
+ 	int i;
+ 
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+ 		if (!eth->netdev[i])
+@@ -4705,13 +4711,14 @@
+ 		struct mtk_mac *mac;
+ 		if (!eth->netdev[i])
+ 			continue;
+ 		mac = netdev_priv(eth->netdev[i]);
+ 		if (MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA))
+ 			unregister_netdevice_notifier(&mac->device_notifier);
+-		unregister_netdev(eth->netdev[i]);
++		if (eth->netdev[i]->reg_state == NETREG_REGISTERED)
++			unregister_netdev(eth->netdev[i]);
+ 	}
+ 
+ 	return 0;
+ }
+ 
+ static void mtk_sgmii_destroy(struct mtk_eth *eth)
+@@ -5628,49 +5635,51 @@
+ 
+ 			if (err)
+ 				goto err_deinit_ppe;
+ 		}
+ 	}
+ 
+-	for (i = 0; i < MTK_MAX_DEVS; i++) {
+-		if (!eth->netdev[i])
+-			continue;
+-
+-		err = register_netdev(eth->netdev[i]);
+-		if (err) {
+-			dev_err(eth->dev, "error bringing up device\n");
+-			goto err_deinit_ppe;
+-		} else
+-			netif_info(eth, probe, eth->netdev[i],
+-				   "mediatek frame engine at 0x%08lx, irq %d\n",
+-				   eth->netdev[i]->base_addr, eth->irq[0]);
+-	}
+-
+ 	/* we run 2 devices on the same DMA ring so we need a dummy device
+ 	 * for NAPI to work
+ 	 */
+ 	eth->dummy_dev = alloc_netdev_dummy(0);
+ 	if (!eth->dummy_dev) {
+ 		err = -ENOMEM;
+ 		dev_err(eth->dev, "failed to allocated dummy device\n");
+-		goto err_unreg_netdev;
++		goto err_deinit_ppe;
+ 	}
+ 	eth->dummy_dev->threaded = 1;
+ 	strcpy(eth->dummy_dev->name, "mtk_eth");
+ 	netif_napi_add(eth->dummy_dev, &eth->tx_napi, mtk_napi_tx);
+ 	netif_napi_add(eth->dummy_dev, &eth->rx_napi, mtk_napi_rx);
+ 
++	for (i = 0; i < MTK_MAX_DEVS; i++) {
++		if (!eth->netdev[i])
++			continue;
++
++		err = register_netdev(eth->netdev[i]);
++		if (err) {
++			dev_err(eth->dev, "error bringing up device\n");
++			goto err_unreg_netdev;
++		} else
++			netif_info(eth, probe, eth->netdev[i],
++				   "mediatek frame engine at 0x%08lx, irq %d\n",
++				   eth->netdev[i]->base_addr, eth->irq[0]);
++	}
++
+ 	platform_set_drvdata(pdev, eth);
+ 	schedule_delayed_work(&eth->reset.monitor_work,
+ 			      MTK_DMA_MONITOR_TIMEOUT);
+ 
+ 	return 0;
+ 
+ err_unreg_netdev:
+ 	mtk_unreg_dev(eth);
++	free_netdev(eth->dummy_dev);
+ err_deinit_ppe:
++	mtk_napi_del(eth);
+ 	mtk_ppe_deinit(eth);
+ 	mtk_mdio_cleanup(eth);
+ err_free_dev:
+ 	mtk_free_dev(eth);
+ err_deinit_hw:
+ 	mtk_hw_deinit(eth);
+@@ -5702,14 +5711,13 @@
+ 			mtk_usxgmii_pcs_put(mac->usxgmii_pcs);
+ 	}
+ 
+ 	mtk_wed_exit();
+ 	mtk_hw_deinit(eth);
+ 
+-	netif_napi_del(&eth->tx_napi);
+-	netif_napi_del(&eth->rx_napi);
++	mtk_napi_del(eth);
+ 	mtk_cleanup(eth);
+ 	free_netdev(eth->dummy_dev);
+ 	mtk_mdio_cleanup(eth);
+ }
+ 
+ #define DESC_SIZE(struct_name)				\
