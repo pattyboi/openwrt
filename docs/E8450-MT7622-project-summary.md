@@ -51,7 +51,7 @@ flashed+validated.
 |---|---|---|
 | `999-ppe-04` internal QoS mode | Core PPPQ: writes per-DSA-port queue-id into FOE `ib2` (`queue = 3 + dsa_port`), sets PSE_QOS | **validated in HW** |
 | `999-ppe-36` enable PPPQ netsysv1 | Sets `eth->qos_toggle=2` at probe; dmesg `PPPQ QoS mode enabled` | **validated** |
-| `999-ppe-11` TCP-ACK → high queue | Re-adapted to real **4-arg** `mtk_flow_entry_match`; small TCP-ACKs `queue+=6`. Guarded `IS_REACHABLE(CONFIG_NF_CONNTRACK)` | **NOW FUNCTIONAL** with conntrack builtin (§5d), built build9; pending HW validation |
+| `999-ppe-11` TCP-ACK → high queue | Re-adapted to real **4-arg** `mtk_flow_entry_match`; small TCP-ACKs `queue+=6`. Guarded `IS_REACHABLE(CONFIG_NF_CONNTRACK)` | **FUNCTIONAL + HW-VALIDATED** (QID 9=3+6 observed) with conntrack builtin (§5d) |
 | **config: `CONFIG_NF_CONNTRACK=y`** (target/linux/mediatek/config-6.12) | Builds conntrack into vmlinux → TCP-ACK guard flips true (§5d) | **default, commit b80f868961** |
 | **`files/etc/sysctl.d/30-mediatek-ppe.conf`** | `net.netfilter.nf_conntrack_acct=1` by default → ACK heuristic gets counters | default (build9) |
 | `999-ppe-10` MIB-cache typo | Fixes a real vanilla bug (`MTK_PPE_MIB_CFG_RD_CLR`→`_CACHE_CTL_EN`); perf under accounting | applied |
@@ -59,13 +59,11 @@ flashed+validated.
 | `999-zz` lookup prefetch | Prefetch next entry `->data` in `__mtk_ppe_check_skb` (pre-offload SW window; the one genuinely per-packet spot) | applied |
 | `999-eth-07` napi_enable panic fix | Reorders `register_netdev` after `netif_napi_add`; boot-race hardening. SoC-agnostic | **built (build7), NOT flashed** |
 
-**Flash state:** router still runs **build5** (`sha256 80f1ff462c…`, the six patches
-w/o eth-07, conntrack modular) — the PPPQ-validated image. **Current
-`~/staging/latest-image/` = build9** (`sha256 1f9e771bd5…`): all 7 patches + eth-07
-+ **conntrack builtin + TCP-ACK-by-default** (acct sysctl baked in). Unflashed;
-flashing it would (a) add eth-07, (b) make TCP-ACK live — validate the `queue+6`
-bump then. Intermediate images (build7 `8f763f7344`, build8 `167199fe37`) are
-superseded.
+**Flash state:** router now runs **build9** (`sha256 1f9e771bd5…`, = `~/staging/
+latest-image/`): all 7 patches + eth-07 + **conntrack builtin + TCP-ACK
+functional-by-default** — flashed & HW-validated 2026-07-02 (PPPQ + PPE hw-NAT +
+TCP-ACK queue+6 all confirmed live; WED off; clean boot). Prior images (build5
+`80f1ff462c`, build7 `8f763f7344`, build8 `167199fe37`) are superseded.
 
 ---
 
@@ -131,9 +129,13 @@ ppe-11's `IS_REACHABLE(CONFIG_NF_CONNTRACK)` guard flips **true** and TCP-ACK
 conntrack unconditionally; enabled at runtime by `net.netfilter.nf_conntrack_acct=1`
 (baked in via `files/etc/sysctl.d/30-mediatek-ppe.conf`). Cost: slightly larger
 vmlinux, conntrack no longer modular. Core PPPQ + hw-NAT unaffected.
-**Status: built (build9, image `1f9e771bd5…`), NOT yet HW-validated** — needs
-flash + an ACK-heavy flow to confirm the `queue+6` bump actually appears
-(expect QID 9=3+6 on the LAN-egress ACK direction, vs the 3/7 baseline).
+**Status: HW-VALIDATED (2026-07-02, build9 flashed).** Under an ACK-heavy download
+through the E8450, the offloaded flow's LAN-egress entry showed **QID=9 = base 3 +
+6** (`ib2=007c0439`, PSE_QOS=1) vs the build5 baseline of 3 — the `queue+6` bump
+fires, programmed into hardware. `nf_conntrack_acct=1` confirmed set by default,
+`nf_conntrack` confirmed builtin (not a module). Clean boot, WED off, stable. (The
+bump lands on the LAN-egress direction per the SDK's get_ct_dir mapping, not WAN —
+a heuristic detail, not an enablement issue.)
 
 ---
 
