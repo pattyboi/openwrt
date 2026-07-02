@@ -51,15 +51,21 @@ flashed+validated.
 |---|---|---|
 | `999-ppe-04` internal QoS mode | Core PPPQ: writes per-DSA-port queue-id into FOE `ib2` (`queue = 3 + dsa_port`), sets PSE_QOS | **validated in HW** |
 | `999-ppe-36` enable PPPQ netsysv1 | Sets `eth->qos_toggle=2` at probe; dmesg `PPPQ QoS mode enabled` | **validated** |
-| `999-ppe-11` TCP-ACK → high queue | Re-adapted to real **4-arg** `mtk_flow_entry_match`; small TCP-ACKs `queue+=6`. Guarded `IS_REACHABLE(CONFIG_NF_CONNTRACK)` | applies+compiles; **ACK-bump INERT** (see §6) |
+| `999-ppe-11` TCP-ACK → high queue | Re-adapted to real **4-arg** `mtk_flow_entry_match`; small TCP-ACKs `queue+=6`. Guarded `IS_REACHABLE(CONFIG_NF_CONNTRACK)` | **NOW FUNCTIONAL** with conntrack builtin (§5d), built build9; pending HW validation |
+| **config: `CONFIG_NF_CONNTRACK=y`** (target/linux/mediatek/config-6.12) | Builds conntrack into vmlinux → TCP-ACK guard flips true (§5d) | **default, commit b80f868961** |
+| **`files/etc/sysctl.d/30-mediatek-ppe.conf`** | `net.netfilter.nf_conntrack_acct=1` by default → ACK heuristic gets counters | default (build9) |
 | `999-ppe-10` MIB-cache typo | Fixes a real vanilla bug (`MTK_PPE_MIB_CFG_RD_CLR`→`_CACHE_CTL_EN`); perf under accounting | applied |
 | `999-eth-91` MT7622 RX ring | RX DMA ring 512→1024 (`MTK_DMA_SIZE(1K)`), mt7622-anchored | applied |
 | `999-zz` lookup prefetch | Prefetch next entry `->data` in `__mtk_ppe_check_skb` (pre-offload SW window; the one genuinely per-packet spot) | applied |
 | `999-eth-07` napi_enable panic fix | Reorders `register_netdev` after `netif_napi_add`; boot-race hardening. SoC-agnostic | **built (build7), NOT flashed** |
 
-**Flash state:** router runs **build5** (`sha256 80f1ff462c…`, the six above w/o
-eth-07) — this is the PPPQ-validated image. **build7** (`sha256 8f763f7344…`, adds
-eth-07) is in `~/staging/latest-image/`, unflashed by choice (latent-race fix).
+**Flash state:** router still runs **build5** (`sha256 80f1ff462c…`, the six patches
+w/o eth-07, conntrack modular) — the PPPQ-validated image. **Current
+`~/staging/latest-image/` = build9** (`sha256 1f9e771bd5…`): all 7 patches + eth-07
++ **conntrack builtin + TCP-ACK-by-default** (acct sysctl baked in). Unflashed;
+flashing it would (a) add eth-07, (b) make TCP-ACK live — validate the `queue+6`
+bump then. Intermediate images (build7 `8f763f7344`, build8 `167199fe37`) are
+superseded.
 
 ---
 
@@ -110,12 +116,24 @@ un-statics both funcs, declares them in mtk_ppe.h, and detects v4/v6 via
   the mainline offload path. Moot.
 - The only *real* CLAUDE.md opts (DMA ring, prefetch) are already in (eth-91, zz).
 
-### 5d. netfilter-builtin is INFEASIBLE (blocks functional TCP-ACK/DSCP-qos)
-OpenWrt's `NF_KMOD` lever (`package/kernel/linux/modules/netfilter.mk`) is
-**bitrotted**: `NF_KMOD=` *disabled* `CONFIG_NF_CONNTRACK` entirely (not `=y`
-builtin) and broke the build. Building only conntrack in fights the kmod package
-system; alternatives (force `=y` in kernel config, or make `mtk_eth` a module) are
-invasive/risky. Reverted. Not worth it for a refinement the SDK shipped gated.
+### 5d. conntrack-builtin — SOLVED (2026-07-02, commit b80f868961)
+**This unblocks functional TCP-ACK (and the whole DSCP-qos class).** The correct
+lever is NOT `NF_KMOD` (that's a "is-conntrack-a-kmod-package" switch — empty just
+*removes* it → disabled → build broke). The real lever is the **kernel config
+symbol** `CONFIG_NF_CONNTRACK=y`, set persistently in
+`target/linux/mediatek/config-6.12` (the `kernel_menuconfig` equivalent). It
+**overrides the kmod `=m` cleanly**; kmod-nf-conntrack becomes a builtin/empty
+package (now carries only `nf_defrag_ipv4/6.ko`), `nf_conntrack` goes into vmlinux.
+`NF_FLOW_TABLE`/`NF_NAT` stay `=m` (modules can call builtin symbols — fine).
+Result: `__nf_ct_ext_find` is linkable from the built-in `mtk_eth_soc`, so
+ppe-11's `IS_REACHABLE(CONFIG_NF_CONNTRACK)` guard flips **true** and TCP-ACK
+`queue+6` compiles in. Accounting (`nf_conntrack_acct.o`) is compiled into
+conntrack unconditionally; enabled at runtime by `net.netfilter.nf_conntrack_acct=1`
+(baked in via `files/etc/sysctl.d/30-mediatek-ppe.conf`). Cost: slightly larger
+vmlinux, conntrack no longer modular. Core PPPQ + hw-NAT unaffected.
+**Status: built (build9, image `1f9e771bd5…`), NOT yet HW-validated** — needs
+flash + an ACK-heavy flow to confirm the `queue+6` bump actually appears
+(expect QID 9=3+6 on the LAN-egress ACK direction, vs the 3/7 baseline).
 
 ---
 
@@ -131,8 +149,13 @@ guard → returns false) or **won't link**. This gates:
 
 The SDK build hit the exact same wall (commit `7d39162e` used IS_REACHABLE guards;
 its own `0fd28370` admits ACK detection "silently never fires"). **So these were
-inert on the SDK too** — the SDK's shipped MT7622 value was core PPPQ + hw-NAT,
-which we already have. Unlocking them requires §5d (infeasible cleanly).
+inert on the SDK too** — the SDK's shipped MT7622 value was core PPPQ + hw-NAT.
+
+**UPDATE (§5d, commit b80f868961): the wall is now BROKEN.** `CONFIG_NF_CONNTRACK=y`
+makes conntrack builtin → `__nf_ct_ext_find` linkable → the IS_REACHABLE guards
+flip true. **TCP-ACK is now functional-by-default** (with the acct sysctl baked
+in). This goes BEYOND what the SDK ever shipped functional on MT7622. The
+DSCP/conntrack-qos class is likewise **no longer gated** — see §7.
 
 ---
 
@@ -146,15 +169,21 @@ breaks down as:
 - **WED bundle:** off the table (§5a). All `wed-*`, `94x-mtk_wed`, `198-dts-wed`.
 - **iptables (`xt_FLOWOFFLOAD`) variants:** dead (box is nftables). Only `nft_`
   twins could ever matter.
-- **Gated on netfilter-builtin (§5d/§6):** DSCP-qos class. Only reachable if the
-  netfilter-builtin problem is solved — revisit only if that's worth real effort.
-- **Genuinely applicable & not-yet-taken:** essentially **only eth-07** (done).
-  Possibly `wdt-01` (trivial clamp, ~0 value).
+- **DSCP / conntrack-qos class — NOW UNBLOCKED (§5d done):** with conntrack
+  builtin these can link & function. **This is the clear next target** if more QoS
+  is wanted: `ppe-05` (nf_conntrack_qos ext + DSCP learning — the foundation; also
+  needs `net.netfilter.nf_conntrack_qos=1`), then consumers `ppe-17/23/27` (nft
+  DSCP learning / keep-dscp / vlan-egress-qos) and `eth-27` (skb-mark→queue);
+  `ppe-35` (conntrack-ext IS_REACHABLE) may be a build prereq. Expect the same
+  4-arg / real-source re-adaptation ppe-11 needed — read against build_dir.
+- **Genuinely applicable & not-yet-taken (non-qos):** `eth-07` (done); possibly
+  `wdt-01` (trivial clamp, ~0 value).
 
-**Bottom line for next session:** the clean-mainline build already captures this
-board's realistic SDK value. Further SDK mining has **low expected yield** unless
-(a) the netfilter-builtin wall is broken (unlocks DSCP-qos + functional TCP-ACK),
-or (b) a *specific measured problem* appears (e.g., PPE cache misbehavior → ppe-14,
-WiFi-roam stalls → ppe-08, link-flap offload loss → eth-18/19) that justifies a
-targeted, higher-risk patch. Don't re-mine the bulk set from scratch — start from
-the PHASE3 verdicts + this summary.
+**Bottom line for next session:** core value (PPPQ + hw-NAT) is done & HW-proven;
+**TCP-ACK is now functional-by-default** (built, pending HW validation). The
+netfilter-builtin wall that gated the QoS-conntrack class is **broken** (§5d), so
+the **highest-value remaining thread is the DSCP-qos class** (start at `ppe-05`).
+Otherwise SDK mining stays low-yield (dead-on-v1, WED-dependent, or redundant with
+mainline). Don't re-mine the bulk set; start from the PHASE3 verdicts + this
+summary. Reserve the higher-risk driver patches (ppe-14 cache, ppe-08 roam,
+eth-18/19 link-flap) for a *specific measured symptom*.
