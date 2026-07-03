@@ -173,6 +173,20 @@ LAN topology seen live: mgmt `192.168.1.1`, admin host `.254`, a downstream
 client subnet `192.168.3.0/24` (e.g. `192.168.3.15`) that generates real transit
 flows — the place to drive a DSCP-marked test.
 
+**Class is effectively DONE at ppe-12+ppe-17.** The other "members" are poor
+targets (verified against real 6.12.87 source):
+- **`ppe-23` (keep-dscp toggle) — compiles but DEAD on netsysv1.** Every
+  functional line is gated on `mtk_is_netsys_v3_or_greater()` (false on MT7622):
+  the `udf` keep-ECN/keep-DSCP write in `mtk_foe_entry_set_dscp` and the
+  `MTK_PPE_TB_CFG_KEEP_DSCP_ECN_EN` reg bit in `mtk_ppe_start`. It only adds an
+  inert `dscp_toggle` debugfs node. A NETSYSv3+ feature — zero value here. Skip.
+- **`ppe-27` (nft VLAN-egress-PCP learning) — will NOT compile as-is.** It reads
+  `qos->priority[dir]`, but `struct nf_conn_qos` (from ppe-12) has only `tos[]`.
+  The `priority[]` field is added by **`ppe-26`** (the xt_FLOWOFFLOAD twin, not
+  carried). So ppe-27 needs ppe-26's frontend-agnostic core extracted first, then
+  a real-source re-adapt. Niche feature (`vconfig set_egress_map` VLAN PCP) —
+  only worth it if 802.1Q tagged egress with per-priority PCP is a concrete need.
+
 ---
 
 ## 6. THE GATING WALL — conntrack modularity
