@@ -1,0 +1,33 @@
+From 80df409e1a483676826a6c66e693dba6ac507751 Mon Sep 17 00:00:00 2001
+From: Lorenzo Bianconi <lorenzo@kernel.org>
+Date: Tue, 2 Jun 2026 11:21:05 +0200
+Subject: [PATCH] net: ethernet: mtk_eth_soc: fix use-after-free in metadata dst teardown
+
+mtk_free_dev() calls metadata_dst_free() which frees the metadata_dst
+immediately, bypassing the RCU grace period.  The RX path installs a
+non-refcounted pointer to this metadata with skb_dst_set_noref(), so an skb
+can retain the pointer while the driver is being torn down.
+
+Use dst_release() to schedule the final free after existing RCU readers
+have completed.  MT7622 uses this metadata path for hardware DSA
+untagging with the MT7531 switch.
+
+Fixes: 2d7605a72906 ("net: ethernet: mtk_eth_soc: enable hardware DSA untagging")
+Signed-off-by: Lorenzo Bianconi <lorenzo@kernel.org>
+Link: https://patch.msgid.link/20260602-airoha-mtk-metadata-uaf-fix-v1-2-3aaa99d83351@kernel.org
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+---
+ drivers/net/ethernet/mediatek/mtk_eth_soc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -4746,7 +4746,7 @@ static int mtk_free_dev(struct mtk_eth *eth)
+ 	for (i = 0; i < ARRAY_SIZE(eth->dsa_meta); i++) {
+ 		if (!eth->dsa_meta[i])
+ 			break;
+-		metadata_dst_free(eth->dsa_meta[i]);
++		dst_release(&eth->dsa_meta[i]->dst);
+ 	}
+ 
+ 	return 0;
