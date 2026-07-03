@@ -126,11 +126,14 @@ the detach path does it a second time.
 - The running kernel is diagnostically blind: no MAGIC_SYSRQ, no
   DETECT_HUNG_TASK, no CONFIG_STACKTRACE (so no /proc/<pid>/stack either).
 - A debug rebuild is in progress, detached from the session
-  (`builddebug2.log`, `BUILD-EXIT=` line appended at the end), with:
-  - `CONFIG_KERNEL_MAGIC_SYSRQ=y`, `CONFIG_KERNEL_DETECT_HUNG_TASK=y`
-    (OpenWrt .config)
-  - `CONFIG_CC_OPTIMIZE_FOR_SIZE=y` in `target/linux/mediatek/mt7622/
-    config-6.12` (user asked to shrink the kernel)
+  (`builddebug3.log`, `BUILD-EXIT=` line appended at the end), with three
+  OpenWrt buildroot symbols in `.config` (NOT committed — re-add via
+  `make defconfig` if .config is ever regenerated):
+  - `CONFIG_KERNEL_MAGIC_SYSRQ=y`
+  - `CONFIG_KERNEL_DETECT_HUNG_TASK=y`
+  - `CONFIG_KERNEL_CC_OPTIMIZE_FOR_SIZE=y` (user asked to shrink the
+    kernel; note: setting CONFIG_CC_OPTIMIZE_FOR_SIZE in the target
+    config-6.12 does NOT work — the KERNEL_* buildroot symbol overrides it)
 - Deadman test script ready: `docs/e8450-eth0-deadman.sh`.
 
 ## What to do next
