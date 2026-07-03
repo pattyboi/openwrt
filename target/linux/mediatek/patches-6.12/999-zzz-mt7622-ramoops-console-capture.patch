@@ -1,0 +1,29 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] arm64: dts: mt7622: ramoops — add console/pmsg/ftrace capture
+
+The MT7622 ramoops node reserves 64 KiB (0x42ff0000/0x10000) but declares only
+record-size (the oops/panic dump zone). On a headless, no-UART board (Linksys
+E8450) a *bus hang* — e.g. the WED attach fault — freezes the CPU without an
+oops or panic, so the record zone captures nothing and the hang leaves no trace
+across the power-cycle recovery.
+
+Carve a console zone (continuously mirrors the kernel printk ring to persistent
+RAM) plus pmsg/ftrace zones. Breadcrumb printk emitted immediately before a
+hanging MMIO access then survives the freeze: after the manual power-cycle,
+/sys/fs/pstore/console-ramoops-0 holds the last line printed before the hang,
+pinpointing the offending access. Zones fit the existing 64 KiB reservation.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/arch/arm64/boot/dts/mediatek/mt7622.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7622.dtsi
+@@ -146,6 +146,9 @@
+ 			compatible = "ramoops";
+ 			reg = <0 0x42ff0000 0 0x10000>;
+ 			record-size = <0x1000>;
++			console-size = <0x8000>;
++			pmsg-size = <0x1000>;
++			ftrace-size = <0x1000>;
+ 		};
+ 
+ 		/* 192 KiB reserved for ARM Trusted Firmware (BL31) */
