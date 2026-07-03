@@ -27,10 +27,14 @@ stack ppe-12+ppe-17, eth-07 napi fix) is DONE and HW-validated. See
 - **DUT candidate fix** `wed_v1_txbm_quiesce`: asserts `MTK_WED_TX_BM_CTRL_PAUSE` in
   `mtk_wed_stop()` on v1 to freeze the TX buffer-manager token state before the WLAN MCU runs
   SER reconcile — hypothesised fix for the MCU wedge (ref mt76 issue #754).
-- Both behind runtime module params under `/sys/module/mtk_eth_soc/parameters/`
+- Both behind runtime module params under `/sys/module/mtk_eth/parameters/`
   (`wed_debug_breadcrumb`, `wed_v1_txbm_quiesce`) — nothing runs unless explicitly armed AND
   WED is attached manually post-SSH. Deterministic SER is triggered via the existing mt76
   `sys_recovery` debugfs knob (no custom trigger patch).
+- Live router verification on **2026-07-03** confirmed: `wed-breadcrumb@42fef000` exists in
+  reserved-memory, params are really under `/sys/module/mtk_eth/parameters/`, and the current
+  mt76 SER trigger path is `/sys/kernel/debug/ieee80211/wl1/mt76/sys_recovery`. Raw probe logs:
+  `.recall/router-probes/2026-07-03-breadcrumb-audit/`.
 
 ## Immediate next steps
 1. **Flash** `bin/targets/mediatek/mt7622/openwrt-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb`
@@ -40,6 +44,8 @@ stack ppe-12+ppe-17, eth-07 napi fix) is DONE and HW-validated. See
    - Arm `wed_debug_breadcrumb=1`, attach WED manually (wed-toggle helper →
      `/sys/module/mt7915e/parameters/wed_enable` + PCI unbind/rebind), trigger SER, let it hang,
      power-cycle, read back last checkpoint from dmesg. → identifies the exact hanging MMIO.
+   - Do **not** hardcode `phy0` / `wl0` for SER. Discover the live path with
+     `find /sys/kernel/debug/ieee80211 -path '*/mt76/sys_recovery'`.
    - **A/B** with `wed_v1_txbm_quiesce=1` to test whether the TX-BM pause prevents the wedge.
 3. Record findings; if the quiesce works, promote it out of debug-gating into a real fix patch.
 

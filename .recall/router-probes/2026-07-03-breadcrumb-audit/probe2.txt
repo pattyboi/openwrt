@@ -1,0 +1,86 @@
+=== TOOLS ===
+/usr/bin/hexdump
+/usr/bin/logger
+crw-------    1 root     root      253,   0 Jan  1  1970 /dev/pmsg0
+=== MT76 DEBUGFS CONTENTS ===
+-- /sys/kernel/debug/ieee80211/wl0/mt76
+-r--r--r--    1 root     root             0 May 13 22:42 acq
+-r--------    1 root     root             0 May 13 22:42 ampdu_stat
+-rw-------    1 root     root             0 May 13 22:42 dbdc
+-r--------    1 root     root             0 May 13 22:42 eeprom
+-rw-------    1 root     root             0 May 13 22:42 ext_mac_addr
+-rw-------    1 root     root             0 May 13 22:42 fw_debug
+-rw-------    1 root     root             0 May 13 22:42 idle-timeout
+-rw-------    1 root     root             0 May 13 22:42 led_active_low
+-rw-------    1 root     root             0 May 13 22:42 led_pin
+-rw-------    1 root     root             0 May 13 22:42 napi_threaded
+-r--------    1 root     root             0 May 13 22:42 otp
+-r--r--r--    1 root     root             0 May 13 22:42 radio
+-rw-------    1 root     root             0 May 13 22:42 regidx
+-rw-------    1 root     root             0 May 13 22:42 regval
+--w-------    1 root     root             0 May 13 22:42 reset_test
+-rw-------    1 root     root             0 May 13 22:42 rf_regidx
+-rw-------    1 root     root             0 May 13 22:42 rf_regval
+-rw-------    1 root     root             0 May 13 22:42 rf_wfidx
+-rw-------    1 root     root             0 May 13 22:42 runtime-pm
+-r--r--r--    1 root     root             0 May 13 22:42 runtime_pm_stats
+-r--r--r--    1 root     root             0 May 13 22:42 rx-queues
+-rw-------    1 root     root             0 May 13 22:42 scs
+-r--r--r--    1 root     root             0 May 13 22:42 xmit-queues
+-- /sys/kernel/debug/ieee80211/wl1/mt76
+-r--------    1 root     root             0 May 13 22:42 dfs_hw_pattern
+-r--------    1 root     root             0 May 13 22:42 eeprom
+-rw-------    1 root     root             0 May 13 22:42 fw_debug_bin
+-rw-------    1 root     root             0 May 13 22:42 fw_debug_wa
+-rw-------    1 root     root             0 May 13 22:42 fw_debug_wm
+-r--------    1 root     root             0 May 13 22:42 fw_util_wa
+-r--------    1 root     root             0 May 13 22:42 fw_util_wm
+-r--------    1 root     root             0 May 13 22:42 hw-queues
+-rw-------    1 root     root             0 May 13 22:42 implicit_txbf
+-rw-------    1 root     root             0 May 13 22:42 led_active_low
+-rw-------    1 root     root             0 May 13 22:42 led_pin
+-rw-------    1 root     root             0 May 13 22:42 muru_debug
+-r--------    1 root     root             0 May 13 22:42 muru_stats
+-rw-------    1 root     root             0 May 13 22:42 napi_threaded
+--w-------    1 root     root             0 May 13 22:42 radar_trigger
+-r--r--r--    1 root     root             0 May 13 22:42 rdd_monitor
+-rw-------    1 root     root             0 May 13 22:42 regidx
+-rw-------    1 root     root             0 May 13 22:42 regval
+-rw-------    1 root     root             0 May 13 22:42 rf_regval
+-r--r--r--    1 root     root             0 May 13 22:42 rx-queues
+-rw-------    1 root     root             0 May 13 22:42 sys_recovery
+-r--r--r--    1 root     root             0 May 13 22:42 twt_stats
+-r--------    1 root     root             0 May 13 22:42 tx_stats
+-r--------    1 root     root             0 May 13 22:42 txpower_path
+-r--------    1 root     root             0 May 13 22:42 txpower_sku
+-r--------    1 root     root             0 May 13 22:42 xmit-queues
+sys_recovery=Please echo the correct value ...
+0: grab firmware transient SER state
+1: trigger system error L1 recovery
+2: trigger system error L2 recovery
+3: trigger system error L3 rx abort
+4: trigger system error L3 tx abort
+5: trigger system error L3 tx disable
+6: trigger system error L3 bf recovery
+7: trigger system error full recovery
+8: trigger firmware crash
+
+let's dump firmware SER statistics...
+::E  R , SER_STATUS        = 0x00000000
+::E  R , SER_PLE_ERR       = 0x00000000
+::E  R , SER_PLE_ERR_1     = 0x00000000
+::E  R , SER_PLE_ERR_AMSDU = 0x00000000
+::E  R , SER_PSE_ERR       = 0x00000000
+::E  R , SER_PSE_ERR_1     = 0x00000000
+::E  R , SER_LMAC_WISR6_B0 = 0x00000000
+::E  R , SER_LMAC_WISR6_B1 = 0x00000000
+::E  R , SER_LMAC_WISR7_B0 = 0x00000000
+::E  R , SER_LMAC_WISR7_B1 = 0x00000000
+
+SYS_RESET_COUNT: WM 0, WA 0
+=== BREADCRUMB RAW READ POSSIBILITY ===
+=== DMESG FOCUS ===
+147:[    1.415753] mtk-wdt 10212000.watchdog: Watchdog enabled (timeout=31 sec, nowayout=0)
+284:[    3.138293] init: - watchdog -
+322:[    8.695888] procd: - watchdog -
+323:[    9.252561] procd: - watchdog -

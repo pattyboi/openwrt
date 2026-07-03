@@ -1,0 +1,17 @@
+=== MODULE METADATA ===
+filename:	/lib/modules/6.12.87/mt7915e.ko
+license:	Dual BSD/GPL
+depends:	mt76-connac-lib,mt76,mac80211,cfg80211
+name:		mt7915e
+vermagic:	6.12.87 SMP mod_unload aarch64
+parm:		wed_enable (bool)
+parm:		sr_scene_detect (bool)
+parm:		enable_6ghz (bool)
+=== SYSFS MODULE SECTIONS ===
+=== KALLSYMS WED MARKERS ===
+ffffffc08065a9e0 t mtk_wed_stop
+ffffffc08065f700 t mtk_wed_reset_dma
+ffffffc0806608c0 T mtk_wed_fe_reset
+ffffffc080660b10 T mtk_wed_fe_reset_complete
+ffffffc080660d60 T mtk_wed_add_hw
+=== BREADCRUMB DMESG ===

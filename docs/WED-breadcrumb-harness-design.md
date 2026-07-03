@@ -39,6 +39,10 @@ PAUSE quiesce *testable*, using only data that survives a bus hang + reset.
 - `999-zzz-mt7622-ramoops-console-capture.patch` (exists): adds `console-size`,
   `pmsg-size`, `ftrace-size` to `ramoops@42ff0000` within the existing 64 KiB.
   `PSTORE_CONSOLE=y` / `PSTORE_RAM=y` already set.
+- **Already verified live on 2026-07-03:** `pstore` is mounted, `/dev/pmsg0`
+  exists, `ramoops@42ff0000` is present, and `wed-breadcrumb@42fef000` is a
+  live `no-map` reserved-memory node on the flashed image. Raw probe output is
+  saved under `.recall/router-probes/2026-07-03-breadcrumb-audit/`.
 - **Step 0 verification (do first, before any WED work):**
   - `mount | grep pstore` → pstore mounted.
   - Provoke a benign capture: `echo 1 > /proc/sys/kernel/panic_on_warn`? No —
@@ -59,8 +63,8 @@ Two independent trails so a mapping/printk surprise can't blind us:
 
 ### 3a. Raw "last checkpoint" word (deterministic, primary)
 
-A tiny fixed struct in a dedicated `no-map` reserved region (e.g.
-`wed-breadcrumb@42ffe000`, 8 KiB — carve from RAM, *not* from the ramoops 64 KiB
+A tiny fixed struct in a dedicated `no-map` reserved region
+`wed-breadcrumb@42fef000`, 4 KiB — carved from RAM, *not* from the ramoops 64 KiB
 so the two are independent). Mapped **non-cached** (or `memremap` WB + explicit
 cacheline clean) so the store reaches DRAM before the next, possibly-hanging,
 access.
@@ -77,7 +81,7 @@ static inline void wed_bc_mark(u32 phase, u32 id, u32 arg)
     writel(id,    wed_bc + 12);
     writel(arg,   wed_bc + 16);
     writel(readl(wed_bc + 4) + 1, wed_bc + 4);
-    dsb(sy);                              /* land in DRAM before the next MMIO */
+    mb();                                 /* complete this MMIO write before the next access */
 }
 ```
 
@@ -100,10 +104,11 @@ word gives the precise last step. Cross-check the two.
 - **Implemented:** on the first `mtk_wed_add_hw` after boot, `wed_bc_setup()`
   ioremaps the region and, if magic is valid, emits `pr_emerg("WED-BC last boot:
   ph=%u id=%u arg=%#x seq=%u\n", ...)` → shows in `dmesg` **and** is re-captured
-  into `console-ramoops-0`. That is the read-back for the A/B.
-- Raw region is also reachable ad hoc via `devmem 0x42fef000` (busybox) if a
-  scripted decode is wanted; a dedicated debugfs reader was left out as
-  non-essential.
+  into `console-ramoops-0`. That is the read-back for the A/B. The region is
+  then cleared so later clean boots do not replay stale crashes.
+- Raw region can be read ad hoc if `devmem` is available, but the current
+  flashed image does **not** ship it; rely on `dmesg` / `console-ramoops-0`
+  unless you add a separate reader.
 
 ---
 
@@ -112,15 +117,16 @@ word gives the precise last step. Cross-check the two.
 Phases: `1=STOP  2=WAIT(MCU)  3=RESET_DMA  4=START  5=FE_RESET(eth)`.
 
 **Phase 1 — `mtk_wed_stop`/`mtk_wed_dma_disable`** (runs first on SER):
-`10` enter · `11` before each `wed_clr` in dma_disable · `12` the **quiesce
-write** (TX_BM PAUSE) so we know it executed.
+`10` enter · `11` before each dma-disable write (`arg=0..3` selects the call
+site) · `12` the **quiesce write** (TX_BM PAUSE) so we know it executed.
 
 **Phase 3 — `mtk_wed_reset_dma`** (prime suspect):
-`30` enter · `31` after TX-DMA-disable poll · `32` after `mtk_wdma_rx_reset`
-· `33` **TKFIFO drain loop — mark each iter with `arg=i<<16|val`** (if it hangs
-reading `MTK_WED_TX_BM_INTF`, last id=33 pinpoints it) · `34` after
+`30` enter · `31` after TX-DMA-disable poll (`arg=busy`) · `32` after
+`mtk_wdma_rx_reset` (`arg=busy`) · `33` **TKFIFO drain loop — mark each iter
+with `arg=i` immediately before the risky read** (if it hangs reading
+`MTK_WED_TX_BM_INTF`, last id=33 pinpoints it) · `34` after
 `RESET_TX_FREE_AGENT` · `35` after clear `WED_TX_BM_EN` + `RESET_TX_BM`
-· `36` WPDMA-tx busy poll · `37` exit.
+(`arg=0`) · `36` after the WPDMA-tx busy poll (`arg=busy`) · `37` exit.
 
 **Phase 5 — eth side** (`mtk_wed_fe_reset` / `mtk_pending_work` →
 `mtk_hw_init` → `ethsys_reset`): `50` fe_reset enter · `51` before wlan.reset
@@ -142,10 +148,12 @@ Module params on the **one** instrumented build:
   (`/sys/module/mtk_eth/parameters/wed_debug_breadcrumb`).
 - `mtk_eth.wed_v1_txbm_quiesce=0|1` — **the DUT** (assert TX_BM PAUSE in stop).
 - SER-on-demand: **no patch needed** — mainline mt76 already ships the
-  `sys_recovery` debugfs knob. `echo 1 > /sys/kernel/debug/ieee80211/phyX/mt76/
-  sys_recovery` fires the **L1 SER** path (the exact one `mt7915_mmio_wed_reset`
-  drives); `echo 8` forces a firmware crash → full-reset path. Makes SER
-  deterministic instead of load-dependent.
+  `sys_recovery` debugfs knob. Discover the live path with
+  ``find /sys/kernel/debug/ieee80211 -path '*/mt76/sys_recovery'``; on the
+  current E8450 image it is `/sys/kernel/debug/ieee80211/wl1/mt76/sys_recovery`.
+  `echo 1 > .../sys_recovery` fires the **L1 SER** path (the exact one
+  `mt7915_mmio_wed_reset` drives); `echo 8` forces a firmware crash → full-reset
+  path. Makes SER deterministic instead of load-dependent.
 
 One flash covers the whole matrix; each arm is `echo` + trigger + (power-cycle) +
 read-back.
@@ -158,8 +166,10 @@ Preconditions: Step 0 passed; smart-plug wired; `wed_enable=N` default.
 
 1. **Baseline hang localize** (`v1_txbm_quiesce=0`):
    - SSH: load mt7915e, `debug_breadcrumb=1`, trigger WED attach (wed-toggle).
-   - Fire SER: `echo 1 > .../mt76/sys_recovery`. Observe: hang? auto-reboot?
-     (records watchdog behavior.)
+   - Discover the live SER path:
+     ``SER=$(find /sys/kernel/debug/ieee80211 -path '*/mt76/sys_recovery' | head -1)``
+   - Fire SER: `echo 1 > "$SER"`. Observe: hang? auto-reboot? (records watchdog
+     behavior.)
    - After reboot: read `breadcrumb` + `console-ramoops-0`. Record last
      `(phase,id,arg)`. Repeat ×3 for stability — SER timing is racy.
 2. **Quiesce arm** (`v1_txbm_quiesce=1`): identical trigger. Compare last

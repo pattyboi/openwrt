@@ -1,0 +1,142 @@
+=== BASIC ===
+Fri Jul  3 20:33:29 GMT 2026
+Linux OpenWrt 6.12.87 #0 SMP Wed May 13 22:42:09 2026 aarch64 GNU/Linux
+DISTRIB_ID='OpenWrt'
+DISTRIB_RELEASE='25.12.4'
+DISTRIB_REVISION='r32933-4ccb782af7'
+DISTRIB_TARGET='mediatek/mt7622'
+DISTRIB_ARCH='aarch64_cortex-a53'
+DISTRIB_DESCRIPTION='OpenWrt 25.12.4 r32933-4ccb782af7'
+DISTRIB_TAINTS='no-all'
+=== MODEL ===
+Linksys E8450 (UBI)
+linksys,e8450-ubi
+=== PSTORE / RAMOOPS ===
+pstore on /sys/fs/pstore type pstore (rw,nosuid,nodev,noexec,noatime)
+-r--r--r--    1 root     root         30299 May 13 22:42 console-ramoops-0
+--- /sys/firmware/devicetree/base/reserved-memory/name
+00000000  72 65 73 65 72 76 65 64  2d 6d 65 6d 6f 72 79 00  |reserved-memory.|
+00000010
+--- /sys/firmware/devicetree/base/reserved-memory/ramoops@42ff0000
+--- /sys/firmware/devicetree/base/reserved-memory/ramoops@42ff0000/compatible
+00000000  72 61 6d 6f 6f 70 73 00                           |ramoops.|
+00000008
+--- /sys/firmware/devicetree/base/reserved-memory/ramoops@42ff0000/name
+00000000  72 61 6d 6f 6f 70 73 00                           |ramoops.|
+00000008
+--- /sys/firmware/devicetree/base/reserved-memory/ramoops@42ff0000/reg
+00000000  00 00 00 00 42 ff 00 00  00 00 00 00 00 01 00 00  |....B...........|
+00000010
+--- /sys/firmware/devicetree/base/reserved-memory/secmon@43000000/name
+00000000  73 65 63 6d 6f 6e 00                              |secmon.|
+00000007
+--- /sys/firmware/devicetree/base/reserved-memory/secmon@43000000/no-map
+--- /sys/firmware/devicetree/base/reserved-memory/secmon@43000000/reg
+00000000  00 00 00 00 43 00 00 00  00 00 00 00 00 03 00 00  |....C...........|
+00000010
+--- /sys/firmware/devicetree/base/reserved-memory/wed-breadcrumb@42fef000
+--- /sys/firmware/devicetree/base/reserved-memory/wed-breadcrumb@42fef000/name
+00000000  77 65 64 2d 62 72 65 61  64 63 72 75 6d 62 00     |wed-breadcrumb.|
+0000000f
+--- /sys/firmware/devicetree/base/reserved-memory/wed-breadcrumb@42fef000/no-map
+--- /sys/firmware/devicetree/base/reserved-memory/wed-breadcrumb@42fef000/reg
+00000000  00 00 00 00 42 fe f0 00  00 00 00 00 00 00 10 00  |....B...........|
+00000010
+=== MODULE PARAM PATHS ===
+-- /sys/module/mtk_eth
+/sys/module/mtk_eth/parameters/wed_debug_breadcrumb=N
+/sys/module/mtk_eth/parameters/wed_v1_txbm_quiesce=N
+-- /sys/module/mt7915e
+/sys/module/mt7915e/parameters/enable_6ghz=N
+/sys/module/mt7915e/parameters/sr_scene_detect=Y
+/sys/module/mt7915e/parameters/wed_enable=N
+=== DEBUGFS ===
+debugfs on /sys/kernel/debug type debugfs (rw,nosuid,nodev,noexec,noatime)
+/sys/kernel/debug/wed0
+/sys/kernel/debug/wed0/regidx
+/sys/kernel/debug/wed0/regval
+/sys/kernel/debug/wed0/txinfo
+/sys/kernel/debug/wed1
+/sys/kernel/debug/wed1/regidx
+/sys/kernel/debug/wed1/regval
+/sys/kernel/debug/wed1/txinfo
+=== WIFI / WED STATE ===
+wireless.radio0=wifi-device
+wireless.radio0.type='mac80211'
+wireless.radio0.phy='wl0'
+wireless.radio0.band='2g'
+wireless.radio0.channel='1'
+wireless.radio0.htmode='HT20'
+wireless.default_radio0=wifi-iface
+wireless.default_radio0.device='radio0'
+wireless.default_radio0.network='lan'
+wireless.default_radio0.mode='ap'
+wireless.default_radio0.ssid='OpenWrt'
+wireless.default_radio0.encryption='none'
+wireless.default_radio0.disabled='1'
+wireless.radio1=wifi-device
+wireless.radio1.type='mac80211'
+wireless.radio1.phy='wl1'
+wireless.radio1.band='5g'
+wireless.radio1.channel='36'
+wireless.radio1.htmode='HE80'
+wireless.default_radio1=wifi-iface
+wireless.default_radio1.device='radio1'
+wireless.default_radio1.network='lan'
+wireless.default_radio1.mode='ap'
+wireless.default_radio1.ssid='OpenWrt'
+wireless.default_radio1.encryption='none'
+wireless.default_radio1.disabled='1'
+cfg80211              335872  5 mt7915e,mt7615_common,mt76_connac_lib,mt76,mac80211
+mac80211              659456  5 mt7915e,mt7615e,mt7615_common,mt76_connac_lib,mt76
+mt76                   81920  4 mt7915e,mt7615e,mt7615_common,mt76_connac_lib
+mt76_connac_lib        53248  3 mt7915e,mt7615e,mt7615_common
+mt7615_common          81920  1 mt7615e
+mt7615e                20480  0 
+mt7915e               131072  0 
+usbcore               196608  4 xhci_plat_hcd,xhci_pci,xhci_mtk_hcd,xhci_hcd
+xhci_hcd              135168  3 xhci_plat_hcd,xhci_pci,xhci_mtk_hcd
+xhci_mtk_hcd           20480  0 
+[    0.000000] Linux version 6.12.87 (pat@pat-Inspiron-3593) (aarch64-openwrt-linux-musl-gcc (OpenWrt GCC 14.3.0 r32933-4ccb782af7) 14.3.0, GNU ld (GNU Binutils) 2.44) #0 SMP Wed May 13 22:42:09 2026
+[    0.000000] OF: reserved mem: 0x0000000042ff0000..0x0000000042ffffff (64 KiB) map non-reusable ramoops@42ff0000
+[    0.000000] OF: reserved mem: 0x0000000042fef000..0x0000000042feffff (4 KiB) nomap non-reusable wed-breadcrumb@42fef000
+[    0.246518] pstore: Using crash dump compression: deflate
+[    0.251954] printk: legacy console [ramoops-1] enabled
+[    0.257386] pstore: Registered ramoops as persistent store backend
+[    0.263594] ramoops: using 0x10000@0x42ff0000, ecc: 0
+[   10.337403] mt7915e 0000:01:00.0: assign IRQ: got 130
+[   10.342531] mt7915e 0000:01:00.0: enabling device (0000 -> 0002)
+[   10.348699] mt7915e 0000:01:00.0: enabling bus mastering
+[   10.581166] mt7915e 0000:01:00.0: HW/SW Version: 0x8a108a10, Build Time: 20240429200716a
+[   10.712188] mt7915e 0000:01:00.0: WM Firmware Version: ____000000, Build Time: 20240429200752
+[   10.736369] mt7915e 0000:01:00.0: WA Firmware Version: DEV_000000, Build Time: 20240429200812
+[   10.852483] mt7915e 0000:01:00.0: registering led 'mt76-phy1'
+[   49.673665] WED-NETCONSOLE-SMOKE-TEST-20260703
+[  106.315155] WED-NETCONSOLE-BRLAN-SMOKE-20260703
+[  122.988518] WED-NETCONSOLE-LAN1-ZEROSRC-20260703
+[  158.068679] WED-NETCONSOLE-ESTABLISHED-SMOKE-20260703
+[  810.500707] WED-NETCONSOLE-SMOKE-PASS-20260703
+[  837.940322] WED-NETCONSOLE-BRLAN-PASS-20260703
+[  879.282167] WED-NETCONSOLE-DNS-STATE-SMOKE-20260703
+[  900.258308] WED-NETCONSOLE-TXCOUNTER-SMOKE-20260703
+[  909.720362] WED-NETCONSOLE-HOST-RXCOUNTER-20260703
+-- /sys/module/mt7915e/parameters/wed_enable
+N
+-- /sys/module/mtk_eth/parameters/wed_debug_breadcrumb
+N
+-- /sys/module/mtk_eth/parameters/wed_v1_txbm_quiesce
+N
+=== PHY NAMES ===
+/sys/kernel/debug/ieee80211
+/sys/kernel/debug/ieee80211/wl0
+/sys/kernel/debug/ieee80211/wl0/keys
+/sys/kernel/debug/ieee80211/wl0/mt76
+/sys/kernel/debug/ieee80211/wl0/rc
+/sys/kernel/debug/ieee80211/wl0/statistics
+/sys/kernel/debug/ieee80211/wl1
+/sys/kernel/debug/ieee80211/wl1/keys
+/sys/kernel/debug/ieee80211/wl1/mt76
+/sys/kernel/debug/ieee80211/wl1/statistics
+=== BUS / DEVICE ===
+lrwxrwxrwx    1 root     root             0 Jan  1  1970 /sys/bus/pci/devices/0000:01:00.0 -> ../../../devices/platform/1a143000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0
+/sys/bus/pci/drivers/mt7915e

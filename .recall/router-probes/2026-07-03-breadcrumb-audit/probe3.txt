@@ -1,0 +1,77 @@
+=== PROC IOMEM WED/RAMOOPS/PCIE ===
+1a143000-1a143fff : 1a143000.pcie port0
+1a145000-1a145fff : 1a145000.pcie port1
+20000000-27ffffff : pcie@1a143000
+28000000-2fffffff : pcie@1a145000
+42fef000-42feffff : reserved
+42ff0000-42ffffff : System RAM
+  42ff0000-42ffffff : reserved
+=== PLATFORM DEVICES ===
+/sys/bus/platform/devices/10212000.watchdog
+/sys/bus/platform/devices/1020a000.wed
+/sys/bus/platform/devices/1020b000.wed
+-- /sys/bus/platform/devices/1020a000.wed
+/sys/devices/platform/1020a000.wed/driver
+-- /sys/bus/platform/devices/1020b000.wed
+/sys/devices/platform/1020b000.wed/driver
+=== WED DEBUGFS SNAPSHOT ===
+-- /sys/kernel/debug/wed0
+--- /sys/kernel/debug/wed0/regidx
+0
+--- /sys/kernel/debug/wed0/regval
+0x76220001
+--- /sys/kernel/debug/wed0/txinfo
+-- /sys/kernel/debug/wed1
+--- /sys/kernel/debug/wed1/regidx
+0
+--- /sys/kernel/debug/wed1/regval
+0x76220001
+--- /sys/kernel/debug/wed1/txinfo
+=== DT WIFI/WED WIRING ===
+-- /sys/firmware/devicetree/base/pcie@1a143000/pcie@0,0/wifi@0,0
+--- name
+00000000  77 69 66 69 00                                    |wifi.|
+00000005
+--- reg
+00000000  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+00000010  00 00 00 00                                       |....|
+00000014
+--- compatible
+00000000  6d 65 64 69 61 74 65 6b  2c 6d 74 37 36 00        |mediatek,mt76.|
+0000000e
+=== PCI / DRIVER DETAIL ===
+pci:v000014C3d00007915sv000014C3sd00007915bc00sc02i80
+enable=1
+=== WATCHDOG ===
+=== DMESG FOCUS 2 ===
+[    1.415753] mtk-wdt 10212000.watchdog: Watchdog enabled (timeout=31 sec, nowayout=0)
+[    1.802290] pci 0000:01:00.0: [14c3:7915] type 00 class 0x000280 PCIe Endpoint
+[    1.809707] pci 0000:01:00.0: BAR 0 [mem 0x00000000-0x000fffff 64bit pref]
+[    1.816700] pci 0000:01:00.0: BAR 2 [mem 0x00000000-0x00003fff 64bit pref]
+[    1.823687] pci 0000:01:00.0: BAR 4 [mem 0x00000000-0x00000fff 64bit pref]
+[    1.831382] pci 0000:01:00.0: supports D1 D2
+[    1.835671] pci 0000:01:00.0: PME# supported from D0 D1 D2 D3hot D3cold
+[    1.842307] pci 0000:01:00.0: PME# disabled
+[    1.846827] pci 0000:01:00.0: 2.000 Gb/s available PCIe bandwidth, limited by 2.5 GT/s PCIe x1 link at 0000:00:00.0 (capable of 4.000 Gb/s with 5.0 GT/s PCIe x1 link)
+[    1.919487] pci 0000:01:00.0: BAR 0 [mem 0x20000000-0x200fffff 64bit pref]: assigned
+[    1.927317] pci 0000:01:00.0: BAR 2 [mem 0x20100000-0x20103fff 64bit pref]: assigned
+[    1.935150] pci 0000:01:00.0: BAR 4 [mem 0x20104000-0x20104fff 64bit pref]: assigned
+[    2.195262] pci 0000:01:00.0: save config 0x00: 0x791514c3
+[    2.200768] pci 0000:01:00.0: save config 0x04: 0x00100000
+[    2.206280] pci 0000:01:00.0: save config 0x08: 0x00028000
+[    2.211774] pci 0000:01:00.0: save config 0x0c: 0x00000000
+[    2.217274] pci 0000:01:00.0: save config 0x10: 0x2000000c
+[    2.222767] pci 0000:01:00.0: save config 0x14: 0x00000000
+[    2.228266] pci 0000:01:00.0: save config 0x18: 0x2010000c
+[    2.233770] pci 0000:01:00.0: save config 0x1c: 0x00000000
+[    2.239262] pci 0000:01:00.0: save config 0x20: 0x2010400c
+[    2.244761] pci 0000:01:00.0: save config 0x24: 0x00000000
+[    2.250254] pci 0000:01:00.0: save config 0x28: 0x00000000
+[    2.255752] pci 0000:01:00.0: save config 0x2c: 0x791514c3
+[    2.261244] pci 0000:01:00.0: save config 0x30: 0x00000000
+[    2.266742] pci 0000:01:00.0: save config 0x34: 0x00000080
+[    2.272235] pci 0000:01:00.0: save config 0x38: 0x00000000
+[    2.277734] pci 0000:01:00.0: save config 0x3c: 0x00000100
+[    3.138293] init: - watchdog -
+[    8.695888] procd: - watchdog -
+[    9.252561] procd: - watchdog -
