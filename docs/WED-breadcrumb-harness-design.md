@@ -67,8 +67,18 @@ watchdog resets it. Recovery requires a cold power-cycle, which clears both
 ramoops and the breadcrumb region. That means the breadcrumb harness is still
 useful for warm-reset/SER cases, but not for the current attach-time hard lock.
 
-For that case, use `999-zzzz-wed-attach-netconsole-trace.patch`, which emits
-runtime-gated `WED-AT` trace lines immediately before attach-path MMIO.
+Netconsole was the original plan for that case, but it is broken on this
+image: netpoll TX silently drops every frame before ndo_start_xmit (verified
+2026-07-03; console layer itself works — markers reach ramoops/dmesg). See
+the beads bug for the full diagnosis.
+
+Instead, `999-zzzz-wed-attach-netconsole-trace.patch` now gates the traced
+MMIO: with `wed_debug_breadcrumb=1` and `wed_attach_max_access=N`, traced
+accesses beyond sequence N are skipped (reads return 0) and attach fails
+cleanly. `N=0` enumerates the whole attach access list with the SoC
+surviving (read dmesg over SSH); stepping N upward executes the real access
+prefix until the first hard-locking access is identified — one cold
+power-cycle total.
 
 ## Current attach trace result
 
@@ -88,17 +98,24 @@ Current prime suspect: the first WED0 access at offset `0x508`.
 
 1. Prove capture first:
    - pstore mounted
-   - netconsole reception works if testing attach-time MMIO
+   - dmesg readable over SSH (netconsole is broken; do not rely on it)
 2. For SER testing:
    - set `wed_debug_breadcrumb=1`
    - set `wed_v1_txbm_quiesce=0` or `1`
    - trigger deterministic SER with `sys_recovery`
    - compare the last replayed checkpoint after reboot
-3. For attach-time fault localization:
-   - use the netconsole trace patch instead of the DRAM breadcrumb alone
+3. For attach-time fault localization (bisect):
+   - `echo 1 > /sys/module/mtk_eth/parameters/wed_debug_breadcrumb`
+   - `echo N > /sys/module/mtk_eth/parameters/wed_attach_max_access`
+   - `echo Y > /sys/module/mt7915e/parameters/wed_enable`, then PCI
+     unbind/rebind of `0000:01:00.0`
+   - surviving run: `dmesg | grep WED-AT` gives the executed/skipped list
+   - locking run: the last executed seq (= N) names the faulting access
+   - always reset `wed_attach_max_access=-1` and `wed_enable=N` afterwards
 
 ## Deliverables
 
 - `999-zzz-wed-breadcrumb-harness.patch`: runtime-gated breadcrumb + quiesce DUT
 - `999-zzz-mt7622-ramoops-console-capture.patch`: console/pmsg/ftrace capture
-- `999-zzzz-wed-attach-netconsole-trace.patch`: attach-path MMIO trace
+- `999-zzzz-wed-attach-netconsole-trace.patch`: attach-path MMIO trace +
+  `wed_attach_max_access` skip gate (bind-fault bisect)

@@ -52,16 +52,43 @@ The failing bind sequence begins before direct MT7915 BAR traffic:
 
 Current prime suspect: the first WED0 read-modify-write at offset `0x508`.
 
+## Netconsole verdict (2026-07-03)
+
+Netconsole is NOT usable on this image: modprobe succeeds on br-lan, lan1 and
+eth0 targets, the console layer demonstrably works (all markers reach the
+ramoops console and dmesg), but zero frames ever reach the wire. lan1's DSA
+software TX stats never increment, so the drop is inside netpoll before
+ndo_start_xmit. Source audit of write_msg/__netpoll_send_skb/find_skb and
+kernel config (NETPOLL=y, NET_POLL_CONTROLLER=y, DSA hooks present) found no
+explanation; black-box diagnosis is exhausted. Tracked as a beads bug.
+
+## Replacement: attach-access bisect (wed_attach_max_access)
+
+`999-zzzz-wed-attach-netconsole-trace.patch` now also gates the traced MMIO:
+with `wed_debug_breadcrumb=1` and `wed_attach_max_access=N` (>= 0), traced
+accesses with sequence number > N are skipped (reads return 0) and the attach
+is forced to fail cleanly (mt76 falls back to non-WED). The WED-AT lines land
+in dmesg and are read over SSH after each surviving run.
+
+Protocol:
+1. `wed_attach_max_access=0` run: every access skipped -> box survives,
+   dmesg holds the complete ordered attach access list (offsets + values).
+2. Raise N stepwise (or binary-search): each run executes the real access
+   prefix 1..N. The first N that hard-locks names the faulting access.
+   Only that final crossing costs a cold power-cycle.
+3. Between surviving runs, unbind/rebind is enough; warm reboot if in doubt.
+
 ## What to do next
 
-1. Prove netconsole reception with a harmless marker before touching WED again.
-2. Flash the improved image or commit the untracked attach-trace patch.
-3. Reproduce the bind lock with netconsole armed.
-4. Use the last `WED-AT` line to identify the exact non-returning access.
-5. Resume the SER/quiesce A/B only after attach itself is observable or fixed.
+1. Flash the bisect image, verify the params exist.
+2. Enumeration run (max=0), capture the full WED-AT list.
+3. Step N upward toward the suspected first WED0 RMW at `0x508`; coordinate
+   with a human for the one required cold power-cycle.
+4. Resume the SER/quiesce A/B only after attach is localized or fixed.
 
 ## Do not repeat
 
 - Do not enable WED at boot.
 - Do not assume the watchdog will recover the bind fault.
 - Do not hardcode `wl0` / `phy0`; the live SER path is under `wl1`.
+- Do not attempt netconsole capture again on this image; see verdict above.

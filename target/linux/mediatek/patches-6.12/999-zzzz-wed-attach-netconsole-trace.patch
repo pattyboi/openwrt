@@ -1,153 +1,218 @@
 From: pat <pi3iman@gmail.com>
-Subject: [PATCH] mediatek/mt7622: trace WED attach MMIO for netconsole
+Subject: [PATCH] mediatek/mt7622: trace and gate WED attach MMIO (bind-fault bisect)
 
 The MT7622 WED v1 attach fault hard-locks the CPU during PCI rebind, defeats
 the watchdog, and therefore requires a cold power-cycle that erases ramoops.
-Add runtime-gated printk checkpoints immediately before WED, WDMA and WLAN
-WPDMA MMIO accesses.  With netconsole active, the last received checkpoint
-identifies the access that did not return without relying on persistent DRAM.
+Netconsole proved non-functional on this DSA/mtk_eth stack (silent netpoll TX
+drop), so last-gasp capture is not available.
 
-Nothing is emitted unless wed_debug_breadcrumb is explicitly armed.
+Instead, make the attach-path MMIO tracer double as a skip gate:
+
+- every traced access gets a sequence number, logged via pr_emerg (dmesg)
+- with wed_debug_breadcrumb set and wed_attach_max_access >= 0, accesses
+  beyond that sequence number are skipped (reads return 0) and the attach is
+  forced to fail cleanly so mt76 falls back to non-WED operation
+- wed_attach_max_access=0 therefore enumerates the full attach access
+  sequence with the SoC surviving; raising it step by step executes the real
+  access prefix until the first hard-locking access is identified, at the
+  cost of a single cold power-cycle
+
+Nothing changes unless wed_debug_breadcrumb is explicitly armed.
 
 Signed-off-by: pat <pi3iman@gmail.com>
 ---
 --- a/drivers/net/ethernet/mediatek/mtk_wed.h
 +++ b/drivers/net/ethernet/mediatek/mtk_wed.h
-@@ -64,9 +64,13 @@ static inline bool mtk_wed_is_v3_or_grea
+@@ -82,9 +82,14 @@ static inline bool mtk_wed_is_v3_or_grea
  	return hw->version > 2;
  }
  
-+void mtk_wed_attach_trace(struct mtk_wed_device *dev, const char *space,
++bool mtk_wed_attach_trace(struct mtk_wed_device *dev, const char *space,
 +			  char op, u32 reg, u32 mask, u32 val);
 +
  static inline void
  wed_w32(struct mtk_wed_device *dev, u32 reg, u32 val)
  {
-+	mtk_wed_attach_trace(dev, "wed", 'W', reg, 0, val);
++	if (!mtk_wed_attach_trace(dev, "wed", 'W', reg, 0, val))
++		return;
  	regmap_write(dev->hw->regs, reg, val);
  }
  
-@@ -76,6 +81,7 @@ wed_r32(struct mtk_wed_device *dev, u32
+@@ -93,6 +98,8 @@ wed_r32(struct mtk_wed_device *dev, u32
  {
  	unsigned int val;
  
-+	mtk_wed_attach_trace(dev, "wed", 'R', reg, 0, 0);
++	if (!mtk_wed_attach_trace(dev, "wed", 'R', reg, 0, 0))
++		return 0;
  	regmap_read(dev->hw->regs, reg, &val);
  
  	return val;
-@@ -85,11 +91,13 @@ static inline void
+@@ -101,12 +108,16 @@ wed_r32(struct mtk_wed_device *dev, u32
+ static inline void
  wdma_w32(struct mtk_wed_device *dev, u32 reg, u32 val)
  {
-+	mtk_wed_attach_trace(dev, "wdma", 'W', reg, 0, val);
++	if (!mtk_wed_attach_trace(dev, "wdma", 'W', reg, 0, val))
++		return;
  	writel(val, dev->hw->wdma + reg);
  }
  
  static inline u32
  wdma_r32(struct mtk_wed_device *dev, u32 reg)
  {
-+	mtk_wed_attach_trace(dev, "wdma", 'R', reg, 0, 0);
++	if (!mtk_wed_attach_trace(dev, "wdma", 'R', reg, 0, 0))
++		return 0;
  	return readl(dev->hw->wdma + reg);
  }
  
-@@ -101,6 +109,8 @@ wpdma_tx_r32(struct mtk_wed_device *dev,
+@@ -116,6 +127,9 @@ wpdma_tx_r32(struct mtk_wed_device *dev,
  	if (!dev->tx_ring[ring].wpdma)
  		return 0;
  
-+	mtk_wed_attach_trace(dev, "wpdma-tx", 'R', reg,
-+			     (u32)ring, 0);
++	if (!mtk_wed_attach_trace(dev, "wpdma-tx", 'R', reg,
++				  (u32)ring, 0))
++		return 0;
  	return readl(dev->tx_ring[ring].wpdma + reg);
  }
  
-@@ -111,6 +121,8 @@ wpdma_tx_w32(struct mtk_wed_device *dev,
+@@ -125,6 +139,9 @@ wpdma_tx_w32(struct mtk_wed_device *dev,
  	if (!dev->tx_ring[ring].wpdma)
  		return;
  
-+	mtk_wed_attach_trace(dev, "wpdma-tx", 'W', reg,
-+			     (u32)ring, val);
++	if (!mtk_wed_attach_trace(dev, "wpdma-tx", 'W', reg,
++				  (u32)ring, val))
++		return;
  	writel(val, dev->tx_ring[ring].wpdma + reg);
  }
  
-@@ -121,6 +133,8 @@ wpdma_rx_r32(struct mtk_wed_device *dev,
+@@ -134,6 +151,9 @@ wpdma_rx_r32(struct mtk_wed_device *dev,
  	if (!dev->rx_ring[ring].wpdma)
  		return 0;
  
-+	mtk_wed_attach_trace(dev, "wpdma-rx", 'R', reg,
-+			     (u32)ring, 0);
++	if (!mtk_wed_attach_trace(dev, "wpdma-rx", 'R', reg,
++				  (u32)ring, 0))
++		return 0;
  	return readl(dev->rx_ring[ring].wpdma + reg);
  }
  
-@@ -131,6 +145,8 @@ wpdma_rx_w32(struct mtk_wed_device *dev,
+@@ -143,6 +163,9 @@ wpdma_rx_w32(struct mtk_wed_device *dev,
  	if (!dev->rx_ring[ring].wpdma)
  		return;
  
-+	mtk_wed_attach_trace(dev, "wpdma-rx", 'W', reg,
-+			     (u32)ring, val);
++	if (!mtk_wed_attach_trace(dev, "wpdma-rx", 'W', reg,
++				  (u32)ring, val))
++		return;
  	writel(val, dev->rx_ring[ring].wpdma + reg);
  }
  
-@@ -141,6 +157,7 @@ wpdma_txfree_r32(struct mtk_wed_device *
+@@ -152,6 +175,8 @@ wpdma_txfree_r32(struct mtk_wed_device *
  	if (!dev->txfree_ring.wpdma)
  		return 0;
  
-+	mtk_wed_attach_trace(dev, "wpdma-free", 'R', reg, 0, 0);
++	if (!mtk_wed_attach_trace(dev, "wpdma-free", 'R', reg, 0, 0))
++		return 0;
  	return readl(dev->txfree_ring.wpdma + reg);
  }
  
-@@ -161,5 +178,6 @@ wpdma_txfree_w32(struct mtk_wed_device *
+@@ -161,6 +186,8 @@ wpdma_txfree_w32(struct mtk_wed_device *
  	if (!dev->txfree_ring.wpdma)
  		return;
  
-+	mtk_wed_attach_trace(dev, "wpdma-free", 'W', reg, 0, val);
++	if (!mtk_wed_attach_trace(dev, "wpdma-free", 'W', reg, 0, val))
++		return;
  	writel(val, dev->txfree_ring.wpdma + reg);
  }
+ 
 --- a/drivers/net/ethernet/mediatek/mtk_wed.c
 +++ b/drivers/net/ethernet/mediatek/mtk_wed.c
-@@ -108,6 +108,20 @@ static void wed_bc_setup(void)
- 			 readl(wed_bc + 16), readl(wed_bc + 4));
+@@ -78,6 +78,13 @@ module_param(wed_v1_txbm_quiesce, bool,
+ MODULE_PARM_DESC(wed_v1_txbm_quiesce,
+ 		 "assert TX-BM PAUSE in mtk_wed_stop on WED v1 (SER quiesce experiment)");
+ 
++static int wed_attach_max_access = -1;
++module_param(wed_attach_max_access, int, 0644);
++MODULE_PARM_DESC(wed_attach_max_access,
++		 "with wed_debug_breadcrumb set: skip traced WED MMIO beyond this sequence number and fail attach cleanly; -1 disables (bind-fault bisect)");
++
++static atomic_t wed_at_seq = ATOMIC_INIT(0);
++
+ static void __iomem *wed_bc;
+ 
+ static inline void wed_bc_mark(u32 phase, u32 id, u32 arg)
+@@ -121,6 +128,27 @@ void mtk_wed_fe_reset_mark(u32 id, u32 a
  }
  
-+void mtk_wed_attach_trace(struct mtk_wed_device *dev, const char *space,
+ 
++bool mtk_wed_attach_trace(struct mtk_wed_device *dev, const char *space,
 +			  char op, u32 reg, u32 mask, u32 val)
 +{
-+	static atomic_t seq = ATOMIC_INIT(0);
++	bool allow = true;
++	int seq;
 +
 +	if (!wed_debug_breadcrumb)
-+		return;
++		return true;
 +
-+	pr_emerg("WED-AT seq=%d hw=%d %s %c reg=%#x mask=%#x val=%#x\n",
-+		 atomic_inc_return(&seq), dev->hw ? dev->hw->index : -1,
-+		 space, op, reg, mask, val);
++	seq = atomic_inc_return(&wed_at_seq);
++	if (wed_attach_max_access >= 0 && seq > wed_attach_max_access)
++		allow = false;
++
++	pr_emerg("WED-AT seq=%d hw=%d %s %c reg=%#x mask=%#x val=%#x%s\n",
++		 seq, dev->hw ? dev->hw->index : -1,
++		 space, op, reg, mask, val, allow ? "" : " SKIP");
++
++	return allow;
 +}
 +EXPORT_SYMBOL_GPL(mtk_wed_attach_trace);
 +
  static struct mtk_wed_hw *hw_list[3];
  static DEFINE_MUTEX(hw_lock);
  
-@@ -175,4 +189,6 @@ wed_m32(struct mtk_wed_device *dev, u32
+@@ -172,6 +200,9 @@ static const struct mtk_wed_soc_data mt7
+ static void
+ wed_m32(struct mtk_wed_device *dev, u32 reg, u32 mask, u32 val)
  {
-+	mtk_wed_attach_trace(dev, "wed-m32", 'M', reg, mask | val, val);
++	if (!mtk_wed_attach_trace(dev, "wed-m32", 'M', reg, mask | val, val))
++		return;
 +
  	regmap_update_bits(dev->hw->regs, reg, mask | val, val);
  }
  
-@@ -1136,4 +1152,6 @@ mtk_wed_dma_disable(struct mtk_wed_devic
+@@ -1136,7 +1167,9 @@ mtk_wed_dma_disable(struct mtk_wed_devic
+ 		 MTK_WDMA_GLO_CFG_RX_INFO2_PRERES);
+ 
  	if (mtk_wed_is_v1(dev->hw)) {
-+		mtk_wed_attach_trace(dev, "pcie-mirror", 'W',
-+				     dev->hw->index * 4, 0, 0);
- 		regmap_write(dev->hw->mirror, dev->hw->index * 4, 0);
+-		regmap_write(dev->hw->mirror, dev->hw->index * 4, 0);
++		if (mtk_wed_attach_trace(dev, "pcie-mirror", 'W',
++					 dev->hw->index * 4, 0, 0))
++			regmap_write(dev->hw->mirror, dev->hw->index * 4, 0);
  		wdma_clr(dev, MTK_WDMA_GLO_CFG,
  			 MTK_WDMA_GLO_CFG_RX_INFO3_PRERES);
-@@ -2528,6 +2542,9 @@ mtk_wed_attach(struct mtk_wed_device *de
+ 	} else {
+@@ -1243,7 +1276,10 @@ __mtk_wed_detach(struct mtk_wed_device *
+ 		struct device_node *wlan_node;
+ 
+ 		wlan_node = dev->wlan.pci_dev->dev.of_node;
+-		if (of_dma_is_coherent(wlan_node) && hw->hifsys)
++		if (of_dma_is_coherent(wlan_node) && hw->hifsys &&
++		    mtk_wed_attach_trace(dev, "hifsys-restore", 'M',
++					 HIFSYS_DMA_AG_MAP, BIT(hw->index),
++					 BIT(hw->index)))
+ 			regmap_update_bits(hw->hifsys, HIFSYS_DMA_AG_MAP,
+ 					   BIT(hw->index), BIT(hw->index));
+ 	}
+@@ -2556,6 +2592,11 @@ mtk_wed_attach(struct mtk_wed_device *de
  	dev_info(device, "attaching wed device %d version %d\n",
  		 hw->index, hw->version);
  
-+	if (wed_debug_breadcrumb)
-+		pr_emerg("WED-AT stage=assigned hw=%d version=%d\n",
-+			 hw->index, hw->version);
++	if (wed_debug_breadcrumb) {
++		atomic_set(&wed_at_seq, 0);
++		pr_emerg("WED-AT stage=assigned hw=%d version=%d max=%d\n",
++			 hw->index, hw->version, wed_attach_max_access);
++	}
  	dev->hw = hw;
  	dev->dev = hw->dev;
  	dev->irq = hw->irq;
-@@ -2548,5 +2565,7 @@ mtk_wed_attach(struct mtk_wed_device *de
+@@ -2571,6 +2612,8 @@ mtk_wed_attach(struct mtk_wed_device *de
+ 	    of_dma_is_coherent(hw->eth->dev->of_node))
  		mtk_eth_set_dma_device(hw->eth, hw->dev);
  
 +	if (wed_debug_breadcrumb)
@@ -155,18 +220,40 @@ Signed-off-by: pat <pi3iman@gmail.com>
  	ret = mtk_wed_tx_buffer_alloc(dev);
  	if (ret)
  		goto out;
-@@ -2569,4 +2592,13 @@ mtk_wed_attach(struct mtk_wed_device *de
+@@ -2585,15 +2628,33 @@ mtk_wed_attach(struct mtk_wed_device *de
+ 			goto out;
+ 	}
+ 
 +	if (wed_debug_breadcrumb)
 +		pr_emerg("WED-AT stage=hw-init-early\n");
-	mtk_wed_hw_init_early(dev);
+ 	mtk_wed_hw_init_early(dev);
+-	if (mtk_wed_is_v1(hw))
+-		regmap_update_bits(hw->hifsys, HIFSYS_DMA_AG_MAP,
+-				   BIT(hw->index), 0);
 +	if (wed_debug_breadcrumb)
 +		pr_emerg("WED-AT stage=hw-init-early-done\n");
--	if (mtk_wed_is_v1(hw))
 +	if (mtk_wed_is_v1(hw)) {
 +		if (wed_debug_breadcrumb)
 +			pr_emerg("WED-AT stage=hifsys-map\n");
-+		mtk_wed_attach_trace(dev, "hifsys", 'M', HIFSYS_DMA_AG_MAP,
-+				     BIT(hw->index), 0);
- 		regmap_update_bits(hw->hifsys, HIFSYS_DMA_AG_MAP,
- 				   BIT(hw->index), 0);
++		if (mtk_wed_attach_trace(dev, "hifsys", 'M', HIFSYS_DMA_AG_MAP,
++					 BIT(hw->index), 0))
++			regmap_update_bits(hw->hifsys, HIFSYS_DMA_AG_MAP,
++					   BIT(hw->index), 0);
 +	}
+ 	else
+ 		dev->rev_id = wed_r32(dev, MTK_WED_REV_ID);
+ 
+ 	if (mtk_wed_get_rx_capa(dev))
+ 		ret = mtk_wed_wo_init(hw);
++
++	/* bisect runs must never hand a partially-programmed WED to the
++	 * WLAN driver; force the clean fallback path instead
++	 */
++	if (!ret && wed_debug_breadcrumb && wed_attach_max_access >= 0) {
++		pr_emerg("WED-AT stage=bisect-forced-fail seq=%d\n",
++			 atomic_read(&wed_at_seq));
++		ret = -EOPNOTSUPP;
++	}
+ out:
+ 	if (ret) {
+ 		dev_err(dev->hw->dev, "failed to attach wed device\n");
