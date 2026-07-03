@@ -1,0 +1,226 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] mediatek/mt7622: WED v1 SER breadcrumb harness + TX-BM quiesce
+
+Debug-only instrumentation to make the WED v1 SER bus-hang observable on the
+headless (no-UART) E8450 and to A/B-test a candidate fix, all from one build
+via runtime module params under /sys/module/mtk_eth_soc/parameters/.
+
+  wed_debug_breadcrumb - arm capture. A checkpoint (phase,id,arg,seq) is written
+      to a dedicated no-map DRAM region immediately before each candidate MMIO;
+      the ioremap (Device memory) store reaches DRAM before the next possibly-
+      hanging access, so it survives the watchdog reset. Read back next boot.
+  wed_v1_txbm_quiesce  - the DUT: assert MTK_WED_TX_BM_CTRL_PAUSE in
+      mtk_wed_stop() on WED v1 so the TX buffer-manager token state is frozen
+      before the WLAN MCU attempts SER reconcile.
+
+Checkpoint map: phase 1=STOP(10, quiesce=12) 3=RESET_DMA(30, TKFIFO drain=33,
+post-drain=34/35, v1 exit=37) 4=START(40) 5=FE_RESET(50, pre wlan.reset=51,
+post=52, complete=55). A hang with last id=33 => TX-BM token-FIFO drain; id in
+[52,55) => eth ethsys reset under a live WED; ends at 10..12 with no phase-3 =>
+stalled in the MCU wait_reset_state (mt76 side).
+
+Boot-safe: ioremap failure -> marks are no-ops; nothing runs unless armed and
+WED is attached (manual, post-SSH). Numbered 999-zzz so it sorts last / drops
+trivially for production. See docs/WED-breadcrumb-harness-design.md.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/arch/arm64/boot/dts/mediatek/mt7622.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7622.dtsi
+@@ -151,6 +151,14 @@
+ 			ftrace-size = <0x1000>;
+ 		};
+ 
++		/* 4 KiB no-map DRAM for the WED v1 SER breadcrumb harness
++		 * (999-zzz debug). ioremap'd by mtk_wed.c as WED_BC_PHYS.
++		 */
++		wed_breadcrumb: wed-breadcrumb@42fef000 {
++			reg = <0 0x42fef000 0 0x1000>;
++			no-map;
++		};
++
+ 		/* 192 KiB reserved for ARM Trusted Firmware (BL31) */
+ 		secmon_reserved: secmon@43000000 {
+ 			reg = <0 0x43000000 0 0x30000>;
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -13,6 +13,7 @@
+ #include <linux/of_reserved_mem.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/debugfs.h>
++#include <linux/io.h>
+ #include <linux/soc/mediatek/mtk_wed.h>
+ #include <net/flow_offload.h>
+ #include <net/pkt_cls.h>
+@@ -48,6 +49,66 @@
+ #define MTK_WED_TX_BM_DMA_SIZE		65536
+ #define MTK_WED_TX_BM_PKT_CNT		32768
+ 
++/* --- WED v1 SER bus-hang breadcrumb harness (999-zzz debug) ---------------
++ * The E8450 is headless (no UART) and a WED bus hang freezes the CPU with no
++ * oops. Drop a checkpoint into a dedicated no-map DRAM region immediately
++ * before each candidate MMIO; ioremap (Device memory) makes the store reach
++ * DRAM before the next, possibly-hanging, access, so it survives the watchdog
++ * reset. After the reboot the last checkpoint names the offending step. Live
++ * marking is gated behind a runtime param so nothing runs unless armed.
++ */
++#define WED_BC_PHYS		0x42fef000UL	/* matches wed-breadcrumb@42fef000 */
++#define WED_BC_SIZE		0x1000
++#define WED_BC_MAGIC		0x57454442	/* "WEDB" */
++
++enum {
++	WED_BC_PH_STOP		= 1,
++	WED_BC_PH_RESET_DMA	= 3,
++	WED_BC_PH_START		= 4,
++	WED_BC_PH_FE_RESET	= 5,
++};
++
++static bool wed_debug_breadcrumb;
++module_param(wed_debug_breadcrumb, bool, 0644);
++MODULE_PARM_DESC(wed_debug_breadcrumb,
++		 "arm WED v1 SER bus-hang breadcrumb capture (debug)");
++
++static bool wed_v1_txbm_quiesce;
++module_param(wed_v1_txbm_quiesce, bool, 0644);
++MODULE_PARM_DESC(wed_v1_txbm_quiesce,
++		 "assert TX-BM PAUSE in mtk_wed_stop on WED v1 (SER quiesce experiment)");
++
++static void __iomem *wed_bc;
++
++static inline void wed_bc_mark(u32 phase, u32 id, u32 arg)
++{
++	if (!wed_bc || !wed_debug_breadcrumb)
++		return;
++
++	writel(WED_BC_MAGIC, wed_bc + 0);
++	writel(phase, wed_bc + 8);
++	writel(id, wed_bc + 12);
++	writel(arg, wed_bc + 16);
++	writel(readl(wed_bc + 4) + 1, wed_bc + 4);
++	wmb();	/* checkpoint must reach DRAM before the next MMIO */
++}
++
++static void wed_bc_setup(void)
++{
++	if (wed_bc)
++		return;
++
++	wed_bc = ioremap(WED_BC_PHYS, WED_BC_SIZE);
++	if (!wed_bc)
++		return;
++
++	/* report any survivor from the previous boot */
++	if (readl(wed_bc + 0) == WED_BC_MAGIC)
++		pr_emerg("WED-BC last boot: ph=%u id=%u arg=%#x seq=%u\n",
++			 readl(wed_bc + 8), readl(wed_bc + 12),
++			 readl(wed_bc + 16), readl(wed_bc + 4));
++}
++
+ static struct mtk_wed_hw *hw_list[3];
+ static DEFINE_MUTEX(hw_lock);
+ 
+@@ -448,6 +509,8 @@
+ 
+ 	mutex_lock(&hw_lock);
+ 
++	wed_bc_mark(WED_BC_PH_FE_RESET, 50, 0);
++
+ 	for (i = 0; i < ARRAY_SIZE(hw_list); i++) {
+ 		struct mtk_wed_hw *hw = hw_list[i];
+ 		struct mtk_wed_device *dev;
+@@ -461,7 +524,9 @@
+ 			continue;
+ 
+ 		/* reset callback blocks until WLAN reset is completed */
++		wed_bc_mark(WED_BC_PH_FE_RESET, 51, i);
+ 		err = dev->wlan.reset(dev);
++		wed_bc_mark(WED_BC_PH_FE_RESET, 52, i);
+ 		if (err)
+ 			dev_err(dev->dev, "wlan reset failed: %d\n", err);
+ 	}
+@@ -475,6 +540,8 @@
+ 
+ 	mutex_lock(&hw_lock);
+ 
++	wed_bc_mark(WED_BC_PH_FE_RESET, 55, 0);
++
+ 	for (i = 0; i < ARRAY_SIZE(hw_list); i++) {
+ 		struct mtk_wed_hw *hw = hw_list[i];
+ 		struct mtk_wed_device *dev;
+@@ -1081,6 +1148,17 @@
+ static void
+ mtk_wed_stop(struct mtk_wed_device *dev)
+ {
++	wed_bc_mark(WED_BC_PH_STOP, 10, 0);
++
++	/* v1 SER quiesce experiment: freeze the TX buffer-manager so its token
++	 * state is stable before the WLAN MCU attempts SER reconcile. PAUSE=1
++	 * halts the BM; mtk_wed_hw_init clears it to bring it live on restart.
++	 */
++	if (wed_v1_txbm_quiesce && mtk_wed_is_v1(dev->hw)) {
++		wed_set(dev, MTK_WED_TX_BM_CTRL, MTK_WED_TX_BM_CTRL_PAUSE);
++		wed_bc_mark(WED_BC_PH_STOP, 12, 0);
++	}
++
+ 	mtk_wed_dma_disable(dev);
+ 	mtk_wed_set_ext_int(dev, false);
+ 
+@@ -1758,6 +1836,8 @@
+ 	u32 val;
+ 	int i;
+ 
++	wed_bc_mark(WED_BC_PH_RESET_DMA, 30, 0);
++
+ 	for (i = 0; i < ARRAY_SIZE(dev->tx_ring); i++) {
+ 		if (!dev->tx_ring[i].desc)
+ 			continue;
+@@ -1830,6 +1910,7 @@
+ 	wed_clr(dev, MTK_WED_CTRL, MTK_WED_CTRL_WED_TX_FREE_AGENT_EN);
+ 
+ 	for (i = 0; i < 100; i++) {
++		wed_bc_mark(WED_BC_PH_RESET_DMA, 33, i);
+ 		if (mtk_wed_is_v1(dev->hw))
+ 			val = FIELD_GET(MTK_WED_TX_BM_INTF_TKFIFO_FDEP,
+ 					wed_r32(dev, MTK_WED_TX_BM_INTF));
+@@ -1840,9 +1921,11 @@
+ 			break;
+ 	}
+ 
++	wed_bc_mark(WED_BC_PH_RESET_DMA, 34, val);
+ 	mtk_wed_reset(dev, MTK_WED_RESET_TX_FREE_AGENT);
+ 	wed_clr(dev, MTK_WED_CTRL, MTK_WED_CTRL_WED_TX_BM_EN);
+ 	mtk_wed_reset(dev, MTK_WED_RESET_TX_BM);
++	wed_bc_mark(WED_BC_PH_RESET_DMA, 35, 0);
+ 
+ 	/* 4. reset WED WPDMA tx */
+ 	busy = mtk_wed_poll_busy(dev, MTK_WED_WPDMA_GLO_CFG,
+@@ -1868,8 +1951,10 @@
+ 	}
+ 
+ 	dev->init_done = false;
+-	if (mtk_wed_is_v1(dev->hw))
++	if (mtk_wed_is_v1(dev->hw)) {
++		wed_bc_mark(WED_BC_PH_RESET_DMA, 37, 0);
+ 		return;
++	}
+ 
+ 	if (!busy) {
+ 		wed_w32(dev, MTK_WED_RESET_IDX, MTK_WED_RESET_WPDMA_IDX_RX);
+@@ -2083,6 +2168,8 @@
+ {
+ 	int i;
+ 
++	wed_bc_mark(WED_BC_PH_START, 40, 0);
++
+ 	if (!mtk_wed_is_v3_or_greater(dev->hw)) {
+ 		wed_set(dev, MTK_WED_WPDMA_INT_CTRL,
+ 			MTK_WED_WPDMA_INT_CTRL_SUBRT_ADV);
+@@ -2834,6 +2921,8 @@
+ 	if (!np)
+ 		return;
+ 
++	wed_bc_setup();
++
+ 	pdev = of_find_device_by_node(np);
+ 	if (!pdev)
+ 		goto err_of_node_put;
