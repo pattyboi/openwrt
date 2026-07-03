@@ -119,40 +119,41 @@ The WED connection is now understood: `mtk_wed_attach` calls
 `dev_close_many()` + `dev_open()` on eth0 — the same stop/open cycle — and
 the detach path does it a second time.
 
-## Current state at handoff
+## Current state at handoff (2026-07-03 ~19:25 EDT, all verified live)
 
-- Router: HUNG from the baseline run, awaiting a cold power-cycle by the
-  user. The flashed image contains the bisect gate (`wed_attach_max_access`).
-- The running kernel is diagnostically blind: no MAGIC_SYSRQ, no
-  DETECT_HUNG_TASK, no CONFIG_STACKTRACE (so no /proc/<pid>/stack either).
-- A debug rebuild is in progress, detached from the session
-  (`builddebug3.log`, `BUILD-EXIT=` line appended at the end), with three
-  OpenWrt buildroot symbols in `.config` (NOT committed — re-add via
-  `make defconfig` if .config is ever regenerated):
-  - `CONFIG_KERNEL_MAGIC_SYSRQ=y`
-  - `CONFIG_KERNEL_DETECT_HUNG_TASK=y`
-  - `CONFIG_KERNEL_CC_OPTIMIZE_FOR_SIZE=y` (user asked to shrink the
-    kernel; note: setting CONFIG_CC_OPTIMIZE_FOR_SIZE in the target
-    config-6.12 does NOT work — the KERNEL_* buildroot symbol overrides it)
-- Deadman test script ready: `docs/e8450-eth0-deadman.sh`.
+- Router: UP on the debug + size-optimized image, freshly flashed and
+  verified over SSH:
+  - `wed_attach_max_access` / `wed_debug_breadcrumb` / `wed_v1_txbm_quiesce`
+    present under `/sys/module/mtk_eth/parameters/`
+  - `kernel.sysrq=1`, `/proc/sysrq-trigger` exists (MAGIC_SYSRQ works)
+  - `hung_task_timeout_secs=120` (DETECT_HUNG_TASK active; the deadman
+    script lowers it to 30)
+  - image shrank 13.5M -> 11.9M with `CC_OPTIMIZE_FOR_SIZE`
+- The three OpenWrt buildroot symbols live in `.config` (NOT committed —
+  re-add if .config is regenerated): `CONFIG_KERNEL_MAGIC_SYSRQ=y`,
+  `CONFIG_KERNEL_DETECT_HUNG_TASK=y`, `CONFIG_KERNEL_CC_OPTIMIZE_FOR_SIZE=y`.
+  Note: setting `CONFIG_CC_OPTIMIZE_FOR_SIZE` in the target config-6.12 does
+  NOT work — the `KERNEL_*` buildroot symbol overrides it (commit 9fb16f8).
+- Deadman test script: `docs/e8450-eth0-deadman.sh`. NOT yet run on the
+  debug kernel — this is the very next action.
 
-## What to do next
+## What to do next (start here)
 
-1. Wait for `builddebug2.log` to show `BUILD-EXIT=0`; user power-cycles.
-2. Flash `bin/targets/mediatek/mt7622/openwrt-mediatek-mt7622-linksys_e8450-
-   ubi-squashfs-sysupgrade.itb` via sysupgrade.
-3. Deploy `docs/e8450-eth0-deadman.sh` to `/tmp/t2.sh` on the router; run
+1. Deploy `docs/e8450-eth0-deadman.sh` to `/tmp/t2.sh` on the router; run
    `setsid /tmp/t2.sh </dev/null >/dev/null 2>&1 &`, disconnect, wait ~4 min.
-4. If the box comes back by itself (deadman `reboot -f` = warm reset), read
-   `/sys/fs/pstore/console-ramoops-0`: khungtaskd (30 s timeout set by the
-   script) will have dumped the stuck task's kernel stack — that is the
-   root-cause stack. If the box stays dead, the hang is bus-level, not a
-   kernel deadlock; that is decisive too.
-5. With the stack in hand, likely suspects: mtk_stop/mtk_open interaction
+   (Plain `nohup &` over ssh dies with dropbear — must be setsid.)
+2. If the box comes back by itself (deadman `reboot -f` = warm reset,
+   ramoops preserved), read `/sys/fs/pstore/console-ramoops-0`: khungtaskd
+   will have dumped the stuck task's kernel stack — that is the root-cause
+   stack. Also try `echo t > /proc/sysrq-trigger` before any reboot in live
+   sessions now that sysrq works.
+3. If the box stays dead even for `reboot -f`, the hang is bus-level, not a
+   kernel deadlock — also decisive (then user must power-cycle again).
+4. With the stack in hand, likely suspects: mtk_stop/mtk_open interaction
    with the PPE/PPPQ/flowtable offload patch stack. A/B candidates: remove
    the nft flowtable / disable offloads and retry; or test a stock image
    eth0 down/up to see if vanilla locks as well.
-6. Resume the SER/quiesce A/B only after this is localized/fixed.
+5. Resume the SER/quiesce A/B only after this is localized/fixed.
 
 ## Do not repeat
 
