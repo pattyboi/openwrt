@@ -50,7 +50,30 @@ The failing bind sequence begins before direct MT7915 BAR traffic:
 6. WED reset/init and WPDMA base programming
 7. HIFSYS coherent-agent update
 
-Current prime suspect: the first WED0 read-modify-write at offset `0x508`.
+~~Current prime suspect: the first WED0 read-modify-write at offset `0x508`.~~
+
+## DISPROVEN by the 2026-07-03 bisect run — MMIO is not the fault
+
+With the skip gate armed (`wed_debug_breadcrumb=1`, `wed_attach_max_access=0`
+— every traced WED/WDMA/WPDMA/PCIe-mirror/HIFSYS access skipped, attach
+force-failed), the PCI rebind STILL hard-locked the box. Therefore the bind
+fault is NOT in the traced attach MMIO, including the 0x508 RMW.
+
+What still executed in that run:
+
+1. `dma_set_mask_and_coherent` (no HW)
+2. `mtk_eth_set_dma_device(eth, hw->dev)` — the mt7622 eth node is
+   `dma-coherent`, so this runs and does `dev_close_many()` + `dev_open()`
+   on ALL mtk netdevs (full eth0 close/reopen under RTNL, with PPE/PPPQ/
+   flowtable state live)
+3. `mtk_wed_tx_buffer_alloc` (DMA allocs only)
+4. forced-fail -> `__mtk_wed_detach` -> `mtk_eth_set_dma_device(eth,
+   eth->dev)` — a SECOND full close/reopen
+
+New prime suspect: the mtk_eth netdev close/reopen cycle triggered by the
+DMA-device swap (2 and 4), interacting with the offload state. This also
+explains why the watchdog never fires (a kernel hang under RTNL keeps
+interrupts alive) and why stock mainline faults too.
 
 ## Netconsole verdict (2026-07-03)
 
@@ -78,13 +101,18 @@ Protocol:
    Only that final crossing costs a cold power-cycle.
 3. Between surviving runs, unbind/rebind is enough; warm reboot if in doubt.
 
-## What to do next
+## What to do next (after the pending cold power-cycle)
 
-1. Flash the bisect image, verify the params exist.
-2. Enumeration run (max=0), capture the full WED-AT list.
-3. Step N upward toward the suspected first WED0 RMW at `0x508`; coordinate
-   with a human for the one required cold power-cycle.
-4. Resume the SER/quiesce A/B only after attach is localized or fixed.
+1. Baseline WITHOUT WED: detached `ip link set eth0 down; sleep 2; up`
+   (use `setsid ... < /dev/null &`; plain `nohup &` gets killed by dropbear
+   on disconnect — verified). If this alone locks the box, WED is fully
+   exonerated and the bug is the mtk_eth stop/open path.
+2. If baseline survives: add a `wed_attach_stop_stage` param (abort attach
+   before/after `mtk_eth_set_dma_device`, before tx_buffer_alloc, etc.).
+   Each surviving run is readable over SSH; bisect the structural steps.
+3. Check upstream/mainline for known mt7622 WED attach hangs tied to
+   `mtk_eth_set_dma_device` / dma-coherent swap.
+4. Resume the SER/quiesce A/B only after the bind fault is localized/fixed.
 
 ## Do not repeat
 

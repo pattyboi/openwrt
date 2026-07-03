@@ -92,7 +92,11 @@ The bind sequence reaches these blocks in order:
 6. WED reset/init and MT7915 WPDMA base programming
 7. HIFSYS: clear PCIe0 coherent-DMA-agent mapping
 
-Current prime suspect: the first WED0 access at offset `0x508`.
+~~Current prime suspect: the first WED0 access at offset `0x508`.~~
+DISPROVEN 2026-07-03: the `wed_attach_max_access=0` run (all traced MMIO
+skipped) still hard-locked the box. New prime suspect: the
+`mtk_eth_set_dma_device` netdev close/reopen cycle (runs on attach and again
+on detach; eth node is `dma-coherent`). See `docs/HANDOFF-codex.md`.
 
 ## Minimal protocol
 
