@@ -1,20 +1,23 @@
 # Handoff — E8450/MT7622 WED bring-up (for next agent / Codex)
 
-_Written 2026-07-03. Branch `e8450-hw-driven`, HEAD `1684fa50d1`. All work committed and pushed; tree clean._
+_Updated 2026-07-03. Branch `e8450-hw-driven`._
 
 ## TL;DR
-The only open thread is **the WED v1 SER breadcrumb harness**. It is **committed, pushed, and
-the sysupgrade image is built** — but **NOT yet flashed to hardware or tested**. Pick up by
-flashing and running the experimental protocol in `docs/WED-breadcrumb-harness-design.md`.
+The WED attach fault is now reproduced: with `wed_enable=Y`, PCI unbind
+completes and rebind hard-locks the SoC. The watchdog does not recover it, and
+the required cold power-cycle erases all DRAM breadcrumbs. The original SER
+harness is flashed, but the new attach/netconsole tracer is built and **not yet
+flashed**. Resume only after netconsole smoke-test reception works.
 
 Everything else on this branch (PPPQ QoS, PPE hw-NAT, TCP-ACK via builtin conntrack, DSCP-qos
 stack ppe-12+ppe-17, eth-07 napi fix) is DONE and HW-validated. See
 `docs/E8450-MT7622-project-summary.md` (master reference) and `docs/PHASE3-patch-verdicts.md`.
 
 ## Hard constraints (unchanged)
-- **No UART/serial console.** Diagnose only over SSH (root@192.168.1.1) or via data that
-  survives a reboot (ramoops/pstore). `wed_enable` hard-faults the box; watchdog (mtk-wdt, 31s)
-  force-reboots. Single rootfs — recovery is power-cycle only. Never arm WED at boot time.
+- **No UART/serial console.** Diagnose over SSH (root@192.168.1.1) or live
+  netconsole. `wed_enable` hard-faults the box and the 31-second MTK watchdog
+  does not recover it. Cold power-cycle is required and erases ramoops and the
+  raw DRAM breadcrumb. Never arm WED at boot time.
 - SoC: MT7622, **WED v1**. Wi-Fi: MT7915E (Wi-Fi 6, PCIe 0000:01:00.0).
 
 ## What the harness does (commit 1684fa50d1)
@@ -36,18 +39,27 @@ stack ppe-12+ppe-17, eth-07 napi fix) is DONE and HW-validated. See
   mt76 SER trigger path is `/sys/kernel/debug/ieee80211/wl1/mt76/sys_recovery`. Raw probe logs:
   `.recall/router-probes/2026-07-03-breadcrumb-audit/`.
 
+## Current hardware/syscon profile
+
+- MT7915E is PCI `0000:01:00.0`, Gen2 x1, 32-bit DMA, BAR0 at
+  `0x20000000..0x200fffff`. PCIe port 0, HIF0, and ETHSYS remain powered.
+- WED0/WED1 are syscons at `0x1020a000`/`0x1020b000`; WDMA0 is
+  `0x1b102800`; PCIe mirror is `0x10000400`; HIFSYS is `0x1af00000`.
+- Initial WED attach touches WED and WDMA before directly touching the MT7915
+  BAR. The first suspect is WED0 offset `0x508`.
+- `999-zzzz-wed-attach-netconsole-trace.patch` now traces `wed_m32`, WDMA,
+  WPDMA, mirror, and HIFSYS accesses with a common sequence number.
+
 ## Immediate next steps
-1. **Flash** `bin/targets/mediatek/mt7622/openwrt-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb`
-   (mirror in `~/staging/latest-image/`) via `sysupgrade` over SSH.
-2. Follow the **experimental protocol** in `docs/WED-breadcrumb-harness-design.md`:
-   - Confirm `wed-breadcrumb@42fef000` reserved region is live and no-map.
-   - Arm `wed_debug_breadcrumb=1`, attach WED manually (wed-toggle helper →
-     `/sys/module/mt7915e/parameters/wed_enable` + PCI unbind/rebind), trigger SER, let it hang,
-     power-cycle, read back last checkpoint from dmesg. → identifies the exact hanging MMIO.
-   - Do **not** hardcode `phy0` / `wl0` for SER. Discover the live path with
-     `find /sys/kernel/debug/ieee80211 -path '*/mt76/sys_recovery'`.
-   - **A/B** with `wed_v1_txbm_quiesce=1` to test whether the TX-BM pause prevents the wedge.
-3. Record findings; if the quiesce works, promote it out of debug-gating into a real fix patch.
+
+1. Prove netconsole reception with a harmless `/dev/kmsg` marker. Router TX
+   counters advance, but the build host listener has not received it yet.
+2. Flash the improved image only after capture works:
+   `b03d574d8e91de1a9a10086899fd841a7fe929543283013577f873db720b1eee`.
+3. Arm `wed_debug_breadcrumb=1`, enable netconsole, then perform the known
+   `wed_enable=Y` PCI unbind/rebind reproduction. The last `WED-AT` packet
+   identifies the non-returning syscon/MMIO operation.
+4. Only after attach succeeds should the SER/quiesce A/B protocol resume.
 
 ## Build/config rules (from CLAUDE.md — enforce)
 - Never edit `.config` directly: `./scripts/config --enable/--disable`; then `make olddefconfig`.

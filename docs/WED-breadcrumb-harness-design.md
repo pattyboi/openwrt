@@ -208,3 +208,55 @@ quiesce move/eliminate that freeze."** It does **not** make WED v1 worth
 shipping — even a green A/B result only improves SER *recovery*; the documented
 speed regressions and MTK's v1 abandonment stand. Treat this as root-cause
 closure + a testable hypothesis, not a road to enabling WED in production.
+
+---
+
+## 9. Hardware results and attach-trace revision (2026-07-03)
+
+The first hardware run changed the capture requirements:
+
+- `wed_enable=Y` plus PCI unbind/rebind reproduces the hard lock
+  deterministically at the `bind` operation. The unbind completes; bind never
+  returns.
+- The 31-second MTK watchdog does not reset the machine. Recovery requires a
+  physical power-cycle.
+- A cold power-cycle clears both ramoops and `wed-breadcrumb@42fef000`.
+  Therefore the DRAM breadcrumb remains useful for warm-reset/SER failures but
+  cannot diagnose this initial-attach lock.
+- `kmod-netconsole` is present in the diagnostic image. Kernel messages cause
+  `lan1`, `eth0`, and `br-lan` TX counters to advance, but reception on the
+  build host has not yet been proven. Do not trigger WED until the listener
+  receives a smoke-test marker.
+
+`999-zzzz-wed-attach-netconsole-trace.patch` adds runtime-gated, sequenced
+`WED-AT` messages immediately before attach-path MMIO. It covers:
+
+- WED reads, writes, and read-modify-writes (`wed_m32`, including
+  `wed_set`/`wed_clr`) with register, mask, and value;
+- WDMA reads and writes;
+- MT7915 WPDMA ring accesses through PCIe BAR0;
+- PCIe-mirror and HIFSYS syscon updates; and
+- coarse attach stages around allocation and early hardware initialization.
+
+The actual MT7622 v1 bind sequence starts before any direct MT7915 BAR access:
+
+1. WED0 `0x1020a508`: clear WPDMA TX/RX driver bits.
+2. WED0 `0x1020aa04`: clear the WDMA RX driver bit.
+3. WED0 `0x1020a208`: clear WED TX/RX DMA bits.
+4. WDMA0 `0x1b102a04`: read-modify-write DMA state.
+5. PCIe mirror `0x10000400`: clear the port-0 mirror.
+6. Reset and initialize WED, then program the MT7915 WPDMA physical base.
+7. HIFSYS `0x1af00008`: clear the PCIe0 coherent-DMA-agent mapping.
+
+The strongest current suspect is the first read-modify-write at WED offset
+`0x508`. Boot creates the WED syscon regmap but does not access the WED register
+block, so successful boot does not prove that MMIO block responds. Both HIF0
+and ETHSYS power domains and all port-0 PCIe clocks are live, while the WED DT
+nodes declare no explicit clock, reset, or power domain.
+
+Latest unflashed improved-trace image:
+
+```
+bin/targets/mediatek/mt7622/openwrt-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb
+sha256 b03d574d8e91de1a9a10086899fd841a7fe929543283013577f873db720b1eee
+```
