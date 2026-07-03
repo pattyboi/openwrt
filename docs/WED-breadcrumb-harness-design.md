@@ -94,9 +94,14 @@ The bind sequence reaches these blocks in order:
 
 ~~Current prime suspect: the first WED0 access at offset `0x508`.~~
 DISPROVEN 2026-07-03: the `wed_attach_max_access=0` run (all traced MMIO
-skipped) still hard-locked the box. New prime suspect: the
-`mtk_eth_set_dma_device` netdev close/reopen cycle (runs on attach and again
-on detach; eth node is `dma-coherent`). See `docs/HANDOFF-codex.md`.
+skipped) still hard-locked the box, and a plain detached
+`ip link set eth0 down; up` (no WED at all) locked it identically. The bug
+is the mtk_eth stop/open path; WED only reaches it via the
+`mtk_eth_set_dma_device` close/reopen (eth node is `dma-coherent`, swap
+happens on attach and again on detach). Not an oops (panic auto-reboot armed
+but never fired). Next: debug kernel (MAGIC_SYSRQ + DETECT_HUNG_TASK) plus
+`docs/e8450-eth0-deadman.sh` to capture the hung-task stack in ramoops and
+self-recover via `reboot -f`. See `docs/HANDOFF-codex.md`.
 
 ## Minimal protocol
 

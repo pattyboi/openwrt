@@ -101,18 +101,55 @@ Protocol:
    Only that final crossing costs a cold power-cycle.
 3. Between surviving runs, unbind/rebind is enough; warm reboot if in doubt.
 
-## What to do next (after the pending cold power-cycle)
+## Baseline result (2026-07-03, later same day): WED FULLY EXONERATED
 
-1. Baseline WITHOUT WED: detached `ip link set eth0 down; sleep 2; up`
-   (use `setsid ... < /dev/null &`; plain `nohup &` gets killed by dropbear
-   on disconnect — verified). If this alone locks the box, WED is fully
-   exonerated and the bug is the mtk_eth stop/open path.
-2. If baseline survives: add a `wed_attach_stop_stage` param (abort attach
-   before/after `mtk_eth_set_dma_device`, before tx_buffer_alloc, etc.).
-   Each surviving run is readable over SSH; bisect the structural steps.
-3. Check upstream/mainline for known mt7622 WED attach hangs tied to
-   `mtk_eth_set_dma_device` / dma-coherent swap.
-4. Resume the SER/quiesce A/B only after the bind fault is localized/fixed.
+The baseline ran: a detached `ip link set eth0 down; sleep 3; ip link set
+eth0 up` (setsid; note plain `nohup &` is killed by dropbear on disconnect)
+killed the box identically — no ARP, no recovery, no watchdog rescue, and
+NO WED/PCI/mt7915 involvement at all.
+
+Because the image has `PANIC_ON_OOPS=y`, `PANIC_TIMEOUT=1` and OpenWrt sets
+`kernel.panic=3`, an oops would have auto-rebooted the box within seconds.
+It did not come back, so this is NOT a crash: it is either a permanent
+deadlock in the mtk_eth stop/open path (which keeps feeding the watchdog)
+or a hardware bus lock.
+
+The WED connection is now understood: `mtk_wed_attach` calls
+`mtk_eth_set_dma_device` (the mt7622 eth node is `dma-coherent`), which does
+`dev_close_many()` + `dev_open()` on eth0 — the same stop/open cycle — and
+the detach path does it a second time.
+
+## Current state at handoff
+
+- Router: HUNG from the baseline run, awaiting a cold power-cycle by the
+  user. The flashed image contains the bisect gate (`wed_attach_max_access`).
+- The running kernel is diagnostically blind: no MAGIC_SYSRQ, no
+  DETECT_HUNG_TASK, no CONFIG_STACKTRACE (so no /proc/<pid>/stack either).
+- A debug rebuild is in progress, detached from the session
+  (`builddebug2.log`, `BUILD-EXIT=` line appended at the end), with:
+  - `CONFIG_KERNEL_MAGIC_SYSRQ=y`, `CONFIG_KERNEL_DETECT_HUNG_TASK=y`
+    (OpenWrt .config)
+  - `CONFIG_CC_OPTIMIZE_FOR_SIZE=y` in `target/linux/mediatek/mt7622/
+    config-6.12` (user asked to shrink the kernel)
+- Deadman test script ready: `docs/e8450-eth0-deadman.sh`.
+
+## What to do next
+
+1. Wait for `builddebug2.log` to show `BUILD-EXIT=0`; user power-cycles.
+2. Flash `bin/targets/mediatek/mt7622/openwrt-mediatek-mt7622-linksys_e8450-
+   ubi-squashfs-sysupgrade.itb` via sysupgrade.
+3. Deploy `docs/e8450-eth0-deadman.sh` to `/tmp/t2.sh` on the router; run
+   `setsid /tmp/t2.sh </dev/null >/dev/null 2>&1 &`, disconnect, wait ~4 min.
+4. If the box comes back by itself (deadman `reboot -f` = warm reset), read
+   `/sys/fs/pstore/console-ramoops-0`: khungtaskd (30 s timeout set by the
+   script) will have dumped the stuck task's kernel stack — that is the
+   root-cause stack. If the box stays dead, the hang is bus-level, not a
+   kernel deadlock; that is decisive too.
+5. With the stack in hand, likely suspects: mtk_stop/mtk_open interaction
+   with the PPE/PPPQ/flowtable offload patch stack. A/B candidates: remove
+   the nft flowtable / disable offloads and retry; or test a stock image
+   eth0 down/up to see if vanilla locks as well.
+6. Resume the SER/quiesce A/B only after this is localized/fixed.
 
 ## Do not repeat
 
