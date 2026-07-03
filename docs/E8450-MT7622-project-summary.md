@@ -137,6 +137,42 @@ fires, programmed into hardware. `nf_conntrack_acct=1` confirmed set by default,
 bump lands on the LAN-egress direction per the SDK's get_ct_dir mapping, not WAN —
 a heuristic detail, not an enablement issue.)
 
+### 5e. DSCP-qos class — BUILT, FLASHED, LIVE ON HARDWARE (2026-07-02)
+Two patches added on `e8450-hw-driven` (commit `3864949077`) and flashed:
+- **`999-ppe-12`** (= SDK ppe-05) — the frontend-agnostic apply/consume half:
+  `nf_conntrack_qos` ct-extension + core flowtable `tos` plumbing +
+  `mtk_foe_entry_set_dscp()` writing DSCP into FOE **`ib2[31:24]`**
+  (`MTK_FOE_IB2_DSCP`, netsysv1 layout, distinct from ppe-04 QID/PSE_QOS bits).
+  **Renumbered 05→12 to apply AFTER ppe-11**: both edit
+  `mtk_flow_set_output_device()`; ppe-05-before-ppe-11 breaks ppe-11's hunk#1
+  context (`,int dscp` added to the signature). Clean-build order = **C-locale
+  numeric filename sort** (NOT the build_dir apply order a dry-run on the
+  finished tree shows). A `11a` letter suffix is ambiguous (locale collation
+  ignores `-`); a numeric bump is not.
+- **`999-ppe-17`** — the nft-path learn/seed (`nft_flow_offload.c`). This box is
+  fw4/nftables so the `xt_FLOWOFFLOAD` twin never runs; ppe-17 is mandatory.
+  Re-adapted to real 6.12.87 `nft_flow_offload_eval()`: `dir` hoisted above the
+  qos block, `nft_flow_route()` path (no is_bridging), and `#include
+  <net/dsfield.h>` added for `ipv6_get_dsfield()` (not otherwise reachable;
+  `CONFIG_IPV6=y`).
+
+**HW-confirmed live** (SSH, fresh boot, stable, WED off, pstore empty):
+`/proc/sys/net/netfilter/nf_conntrack_qos` = **3** (on by default); every
+`/proc/net/nf_conntrack` line now carries a `tos=` field (the `seq_print_qos`
+from ppe-12 → qos ext is attached); nft `flowtable ft { flags offload }` on
+lan1-4+wan is the active offload path (ppe-17 hook). **Not yet observed:** a
+*nonzero* DSCP in a **bound** FOE entry — needs sustained DSCP-marked transit
+traffic from a LAN client (same style as the TCP-ACK QID=9 test), not
+router-originated traffic (locally-terminated flows show `UNB`, never offload).
+
+**PPE FOE inspection tooling (for that validation):** `/sys/kernel/debug/ppe0/`
+has `bind` and `entries`. Entry line format:
+`<idx> <BIND|UNB> IPv4 5T orig=.. new=.. eth=.. ib1=<hex> ib2=<hex> packets=.. bytes=..`.
+Decode the top byte of `ib2` for DSCP (`ib2[31:24]`), low nibble region for QID.
+LAN topology seen live: mgmt `192.168.1.1`, admin host `.254`, a downstream
+client subnet `192.168.3.0/24` (e.g. `192.168.3.15`) that generates real transit
+flows — the place to drive a DSCP-marked test.
+
 ---
 
 ## 6. THE GATING WALL — conntrack modularity
