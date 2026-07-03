@@ -1,0 +1,74 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] netfilter: add macvlan hardware flow offload support
+
+Expose macvlan devices through the modern net_device forward-path API and
+teach nft_flow_offload to retain the macvlan source address while walking
+on to the lower hardware device.
+
+This is the NETSYSv1-relevant part of the MediaTek SDK macvlan HNAT series,
+adapted to Linux 6.12.  The SDK's ndo_flow_offload_check API is obsolete;
+the in-tree MediaTek PPE driver consumes paths built by
+ndo_fill_forward_path instead.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+ drivers/net/macvlan.c           | 13 +++++++++++++
+ include/linux/netdevice.h       |  1 +
+ net/netfilter/nft_flow_offload.c |  3 ++-
+ 3 files changed, 16 insertions(+), 1 deletion(-)
+
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -837,6 +837,7 @@ enum net_device_path_type {
+ 	DEV_PATH_VLAN,
+ 	DEV_PATH_BRIDGE,
+ 	DEV_PATH_PPPOE,
++	DEV_PATH_MACVLAN,
+ 	DEV_PATH_DSA,
+ 	DEV_PATH_MTK_WDMA,
+ };
+--- a/drivers/net/macvlan.c
++++ b/drivers/net/macvlan.c
+@@ -1162,6 +1162,18 @@ static int macvlan_dev_get_iflink(const struct net_device *dev)
+ 	return READ_ONCE(vlan->lowerdev->ifindex);
+ }
+ 
++static int macvlan_dev_fill_forward_path(struct net_device_path_ctx *ctx,
++					 struct net_device_path *path)
++{
++	struct macvlan_dev *vlan = netdev_priv(ctx->dev);
++
++	path->type = DEV_PATH_MACVLAN;
++	path->dev = ctx->dev;
++	ctx->dev = vlan->lowerdev;
++
++	return 0;
++}
++
+ static const struct ethtool_ops macvlan_ethtool_ops = {
+ 	.get_link		= ethtool_op_get_link,
+ 	.get_link_ksettings	= macvlan_ethtool_get_link_ksettings,
+@@ -1196,6 +1208,7 @@ static const struct net_device_ops macvlan_netdev_ops = {
+ 	.ndo_features_check	= passthru_features_check,
+ 	.ndo_hwtstamp_get	= macvlan_hwtstamp_get,
+ 	.ndo_hwtstamp_set	= macvlan_hwtstamp_set,
++	.ndo_fill_forward_path	= macvlan_dev_fill_forward_path,
+ };
+ 
+ static void macvlan_dev_free(struct net_device *dev)
+--- a/net/netfilter/nft_flow_offload.c
++++ b/net/netfilter/nft_flow_offload.c
+@@ -125,10 +125,11 @@ static void nft_dev_path_info(const struct net_device_path_stack *stack,
+ 		case DEV_PATH_DSA:
+ 		case DEV_PATH_VLAN:
+ 		case DEV_PATH_PPPOE:
++		case DEV_PATH_MACVLAN:
+ 			info->indev = path->dev;
+ 			if (is_zero_ether_addr(info->h_source))
+ 				memcpy(info->h_source, path->dev->dev_addr, ETH_ALEN);
+ 
+-			if (path->type == DEV_PATH_ETHERNET)
++			if (path->type == DEV_PATH_ETHERNET || path->type == DEV_PATH_MACVLAN)
+ 				break;
+ 			if (path->type == DEV_PATH_DSA) {
+ 				i = stack->num_paths;

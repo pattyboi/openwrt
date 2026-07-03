@@ -263,3 +263,24 @@ The next real frontier is **WED** (§5a): declared off-the-table because
 `wed_enable` hard-faults stock mainline too — now being investigated at the
 code level (why the v1 attach faults), not by live-toggling (which bricks the
 session until a manual power cycle).
+
+---
+
+## 9. HNAT feature port (2026-07-02)
+
+The SDK `hnat-03..11` series was compared with the Linux 6.12 flow-offload and
+MediaTek PPE paths. VLAN, bridge routing, PPPoE, and DSA traversal are already
+provided by `ndo_fill_forward_path` and consumed by `mtk_ppe_offload`; the SDK
+uses an older parallel `ndo_flow_offload_check` API and must not be layered on
+top of it.
+
+The one complete, hardware-independent feature missing from the nft path was
+**macvlan hardware flow offload**. `999-ppe-21` now adds a modern macvlan
+forward-path element, retains the macvlan source MAC, and continues traversal
+to the lower MT7622 Ethernet/DSA device. It clean-applies and builds for the
+E8450 target.
+
+The DS-Lite/6RD/L2TP and fragmentation hooks from `hnat-09..11` were not
+carried: they have no standalone PPE consumer and depend on the separate SDK
+tunnel-offload stack. WED paths remain excluded by the hardware failure in
+§5a.
