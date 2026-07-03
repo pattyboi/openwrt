@@ -239,3 +239,27 @@ Otherwise SDK mining stays low-yield (dead-on-v1, WED-dependent, or redundant wi
 mainline). Don't re-mine the bulk set; start from the PHASE3 verdicts + this
 summary. Reserve the higher-risk driver patches (ppe-14 cache, ppe-08 roam,
 eth-18/19 link-flap) for a *specific measured symptom*.
+
+---
+
+## 8. POST-DSCP SDK RE-REVIEW — SDK mining is DONE (2026-07-02)
+
+After DSCP-qos landed, the now-unblocked (conntrack-builtin) QoS set was
+re-evaluated against real 6.12.87 source. **No high-value SDK patch remains.**
+
+| Patch | Verdict |
+|---|---|
+| `eth-27` skb-mark→queue | **Marginal.** Adds `skb->mark → TX queue` in `mtk_select_queue` — the **software** TX path. Offloaded transit flows bypass it (queue set in FOE via ppe-04). Helps only router-local / non-offloaded / pre-offload traffic. Take only for explicit nft mark-based SW-path classification. |
+| `ppe-19` nft leak fix | **SKIP — risky.** Its success-path `dst_release(route.tuple[*])` fights mainline's dst-ownership (`flow_offload_route_init` takes the ref) → double-free/UAF risk. Mainline already releases on error paths. No symptom. |
+| `ppe-35` IS_REACHABLE guards | **SKIP — redundant.** Guards the modular-conntrack case; we made conntrack builtin, so moot. |
+| `ppe-15`/`ppe-24` nft bridge / vlan-passthrough | **SKIP unless a gap appears.** Mainline already resolves DSA/bridge/VLAN offload paths. |
+| `ppe-23`/`ppe-27` keep-dscp / vlan-PCP | **SKIP** (see §5e): ppe-23 dead-on-v1, ppe-27 needs ppe-26 + niche. |
+| `wdt-01` | Batch-only, ~0 value. |
+
+**Conclusion:** the E8450 build is functionally complete for MT7622 hardware
+offload + QoS. All remaining SDK patches are dead-on-v1, hardware-absent,
+firewall-mismatched, mainline-redundant, or guardrail-violating. Stop mining.
+The next real frontier is **WED** (§5a): declared off-the-table because
+`wed_enable` hard-faults stock mainline too — now being investigated at the
+code level (why the v1 attach faults), not by live-toggling (which bricks the
+session until a manual power cycle).
