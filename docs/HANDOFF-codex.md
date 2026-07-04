@@ -49,61 +49,6 @@ Next avenues:
 4. The `wed_enable=N` rebind lock is a separate reportable bug
    (mediatek PCIe controller MMIO-vs-resetting-card AXI hang).
 
-### Deeper steady-state audit: WED txfree / WA queue path
-
-This is the most suspicious early-WED path on MT7622/MT7915 after the
-2026-07-04 source audit:
-
-1. `mt7915_init_hardware()` calls `mt7915_dma_init()` and sets
-   `MT76_STATE_INITIALIZED` BEFORE `mt7915_mcu_init()`.
-2. In `mt7915_dma_init()`, when WED is active on MT7915,
-   `q_rx[MT_RXQ_MCU_WA]` is repurposed as `MT_WED_Q_TXFREE` and pointed at
-   `&mdev->mmio.wed` instead of remaining a normal WA RX ring.
-3. `mt76_wed_dma_setup()` initializes that queue in a hybrid way: it
-   temporarily clears WED flags, does a normal `mt76_dma_queue_reset()` and
-   `mt76_dma_rx_fill()`, then calls `mtk_wed_device_txfree_ring_setup()`,
-   which copies the first 12 bytes (base/count/cpu_idx) from the WLAN ring
-   into BOTH WED and WED-WPDMA shared RX ring registers.
-4. `mt76_dma_alloc_queue()` then special-cases WED txfree queues and SKIPS
-   the later normal post-setup `mt76_dma_queue_reset()`.
-5. All RX NAPI instances, including `MT_RXQ_MCU_WA`, are enabled immediately
-   by generic `mt76_dma_init()` before firmware load completes.
-6. `mt7915_dma_start()` then starts WFDMA, calls `mtk_wed_device_start()`,
-   and `mt7915_irq_enable()` immediately schedules the IRQ tasklet.
-7. The tasklet can schedule NAPI for `MT_RXQ_MCU_WA`; in the txfree case
-   `mt76_dma_rx_process()` switches to `dma_idx` polling with `check_ddone`
-   and routes packets through `mt7915_rx_check()`.
-8. `PKT_TYPE_TXRX_NOTIFY{,_V0}` is consumed by `mt7915_mac_tx_free*()`,
-   which does real token release / txwi free work immediately.
-
-Important eliminations from the same audit:
-
-- On MT7622 WED v1, `mtk_wed_get_rx_capa()` is false (`version == 1`), so
-  the WO/RRO/RX-offload side is NOT the early dependency here.
-- `mt7915_mcu_wed_enable_rx_stats()` is effectively a no-op on v1 because
-  `mtk_wed_mcu_msg_update()` returns 0 when RX capability is absent.
-
-Working theory after this audit:
-
-- The fragile first-bind surface is not WO messaging and not WED RX offload.
-- It is the EARLY activation of the shared WED txfree ring on the WA queue:
-  the queue is initialized, NAPI-enabled, interrupt-visible, and eligible to
-  run token-release work before mt7915 firmware/bootstrap is fully settled.
-- This still matches the wandering ramoops endpoints in `mtk_wed_start()`
-  (`MTK_WED_INT_MASK`, `MTK_WED_RX1_CTRL2`): the actual fatal bus hang may
-  occur when WED steady-state start collides with asynchronous mt7915/WA
-  state changes, not at one fixed register write.
-
-Best next probe from source evidence:
-
-- Leave WED attach intact, but structurally delay ONE of:
-  - the WA->`MT_WED_Q_TXFREE` conversion,
-  - `mtk_wed_device_start()`, or
-  - the first `mt7915_irq_enable()` tasklet kick
-  until after `mt7915_mcu_init_firmware()` completes.
-- That tests the race class directly, instead of adding more per-register
-  attach tracing.
-
 ## 2026-07-04 REVERSALS — READ THIS FIRST, it supersedes much of the below
 
 All results re-verified with self-reporting methodology (kmsg markers +
