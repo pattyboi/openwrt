@@ -1,6 +1,53 @@
 # Handoff — E8450 / MT7622 WED
 
-Updated 2026-07-04 on branch `e8450-hw-driven`.
+Updated 2026-07-04 (evening) on branch `e8450-hw-driven`.
+
+## 2026-07-04 PM — ROOT-CAUSE CLASS FOUND; UPSTREAM BUG CONFIRMED
+
+Full verified trigger matrix (sound methodology: deadman + independent
+wifi vantage + ramoops):
+
+| operation                     | wed_enable | result |
+|-------------------------------|-----------|--------|
+| first bind (normal boot)      | N         | fine   |
+| first bind (insmod)           | 1         | LOCKS  |
+| PCI unbind/rebind             | N         | LOCKS  |
+| PCI unbind/rebind             | Y         | LOCKS  |
+
+Key findings, in order:
+
+1. `wed_enable=N` PCI unbind/rebind hard-locks — WED-independent. The
+   mt7915e rebind itself is fatal on MT7622 (PCIe MMIO against a
+   resetting/stale card wedges the AXI fabric; watchdog and `reboot -f`
+   both defeated).
+2. First-bind with `wed_enable=1` (via `insmod` — NOTE: OpenWrt
+   `modprobe` is kmodloader and SILENTLY IGNORES command-line params)
+   also hard-locks, ~100ms into steady-state WED IRQ/ring servicing.
+3. **A fast power-replug preserves ramoops** — DRAM survives a 1-2s
+   outage. Two full WED-AT traces captured this way:
+   `.recall/router-probes/2026-07-04-firstbind-wed-lock/`.
+   Run 1 died at seq=754 `W WED0+0x204 (MTK_WED_INT_MASK)=0x2c018003`;
+   run 2 at seq=643 `W 0x418 (MTK_WED_RX1_CTRL2)=0x10`. The death point
+   WANDERS -> asynchronous killer: the mt7915 firmware bootstrap resets
+   the card bus interface while WED holds outstanding transactions; the
+   WED block wedges; the next WED register access hangs the AXI bus.
+4. WMAC-awake (wl0 AP up) does NOT prevent it. ASPM already off
+   (performance policy). Kernel-side runtime PM inactive.
+5. **VANILLA locks too**: an image with ALL 999 patches removed
+   (unpatched OpenWrt 25.12.4 / kernel 6.12.87) hard-locks identically
+   on first-bind `wed_enable=1`. The patch stack is exonerated — this is
+   an upstream/stock bug, on the very board WED v1 was developed on,
+   strongly suggesting a kernel regression (E8450 users ran WED on
+   5.15/6.1/6.6-era kernels).
+
+Next avenues:
+1. Establish the regression window: boot official OpenWrt 24.10 (k6.6)
+   or 23.05 (k5.15) on the E8450 and run the same first-bind WED test.
+2. Search upstream (lore, linux-mediatek) and OpenWrt git for mtk_wed /
+   mt7622 WED fixes newer than 6.12.87 — candidates to backport.
+3. The two ramoops traces are report-quality evidence for upstream.
+4. The `wed_enable=N` rebind lock is a separate reportable bug
+   (mediatek PCIe controller MMIO-vs-resetting-card AXI hang).
 
 ## 2026-07-04 REVERSALS — READ THIS FIRST, it supersedes much of the below
 
