@@ -46,8 +46,10 @@ fwmark→queue steering (999-eth-27).
 
 1. IRQ/RPS spread — all net IRQs on CPU0 today, CPU1 idle.
 2. cpufreq governor A/B (ondemand 437 MHz floor vs performance).
-3. Real SSIDs/PSKs (currently open "OpenWrt") + persistent firewall4 flow
-   offload replacing the runtime bench nft table.
+3. Real SSIDs/PSKs (currently open "OpenWrt"). Fresh installs now default
+   firewall4 flow offload + hardware flow offload ON via
+   `files/etc/uci-defaults/99-e8450-flow-offload`; existing configs keep
+   their setting.
 
 ## Build notes
 

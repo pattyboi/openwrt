@@ -90,5 +90,7 @@ probes in `.recall/router-probes/` (latest full survey:
 6. Optional upstream reports: runtime-bind WED AXI lock, mt7915e rebind
    AXI lock, mt76 SER-during-probe NULL deref (evidence in
    `.recall/router-probes/2026-07-04-firstbind-wed-lock/`).
-7. Housekeeping: real SSIDs/PSKs (currently open "OpenWrt"), persistent
-   flow-offload via firewall4 instead of the runtime bench nft table.
+7. Housekeeping: real SSIDs/PSKs (currently open "OpenWrt"). Fresh installs
+   now also default firewall4 flow offload + hardware flow offload ON for
+   E8450/RT3200 via `files/etc/uci-defaults/99-e8450-flow-offload`;
+   upgraded/preserved configs keep their existing setting.
