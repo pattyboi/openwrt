@@ -4,14 +4,16 @@ Updated 2026-07-03 on branch `e8450-hw-driven`.
 
 ## State
 
-The breadcrumb harness is in-tree and flashed. The current blocker is earlier:
-`wed_enable=Y` plus PCI unbind/rebind hard-locks the SoC during bind. The
-watchdog does not recover it. Cold power-cycle is required and clears DRAM
-breadcrumbs and ramoops.
+The breadcrumb harness is in-tree and flashed. The WED attach-MMIO theory is
+dead: `wed_attach_max_access=0` still hard-locks the box, and a plain detached
+`ip link set eth0 down; sleep 3; ip link set eth0 up` locks identically with
+no WED/PCI/mt7915 involvement. A deadman run on the debug image also proved
+`reboot -f` does not recover it, which strongly points at a bus-level lock or
+deeper FE hang in the `mtk_eth` stop/open cycle.
 
-The follow-up attach tracer exists as an untracked patch:
-`target/linux/mediatek/patches-6.12/999-zzzz-wed-attach-netconsole-trace.patch`.
-Do not rely on the DRAM breadcrumb alone for this bind-time fault.
+The active probe patches are now:
+- `target/linux/mediatek/patches-6.12/999-zzzz-wed-attach-netconsole-trace.patch`
+- `target/linux/mediatek/patches-6.12/999-zzzzz-mtk_eth-stop-open-bisect.patch`
 
 ## Hardware facts verified live
 
@@ -119,7 +121,7 @@ The WED connection is now understood: `mtk_wed_attach` calls
 `dev_close_many()` + `dev_open()` on eth0 — the same stop/open cycle — and
 the detach path does it a second time.
 
-## Current state at handoff (2026-07-03 ~19:25 EDT, all verified live)
+## Current state at handoff (2026-07-03 evening EDT, all verified live)
 
 - Router: UP on the debug + size-optimized image, freshly flashed and
   verified over SSH:
@@ -134,26 +136,32 @@ the detach path does it a second time.
   `CONFIG_KERNEL_DETECT_HUNG_TASK=y`, `CONFIG_KERNEL_CC_OPTIMIZE_FOR_SIZE=y`.
   Note: setting `CONFIG_CC_OPTIMIZE_FOR_SIZE` in the target config-6.12 does
   NOT work — the `KERNEL_*` buildroot symbol overrides it (commit 9fb16f8).
-- Deadman test script: `docs/e8450-eth0-deadman.sh`. NOT yet run on the
-  debug kernel — this is the very next action.
+- Deadman test script: `docs/e8450-eth0-deadman.sh`. It was run on the debug
+  kernel and the router stayed unreachable well past the script's forced
+  `reboot -f` window. That means the fault survives a warm reboot request and
+  is not just a recoverable hung task.
 
 ## What to do next (start here)
 
-1. Deploy `docs/e8450-eth0-deadman.sh` to `/tmp/t2.sh` on the router; run
-   `setsid /tmp/t2.sh </dev/null >/dev/null 2>&1 &`, disconnect, wait ~4 min.
-   (Plain `nohup &` over ssh dies with dropbear — must be setsid.)
-2. If the box comes back by itself (deadman `reboot -f` = warm reset,
-   ramoops preserved), read `/sys/fs/pstore/console-ramoops-0`: khungtaskd
-   will have dumped the stuck task's kernel stack — that is the root-cause
-   stack. Also try `echo t > /proc/sysrq-trigger` before any reboot in live
-   sessions now that sysrq works.
-3. If the box stays dead even for `reboot -f`, the hang is bus-level, not a
-   kernel deadlock — also decisive (then user must power-cycle again).
-4. With the stack in hand, likely suspects: mtk_stop/mtk_open interaction
-   with the PPE/PPPQ/flowtable offload patch stack. A/B candidates: remove
-   the nft flowtable / disable offloads and retry; or test a stock image
-   eth0 down/up to see if vanilla locks as well.
-5. Resume the SER/quiesce A/B only after this is localized/fixed.
+1. Build and flash the new `mtk_eth` stage-bisect patch set.
+2. On the router, arm:
+   - `echo 1 > /sys/module/mtk_eth/parameters/eth_debug_breadcrumb`
+   - `echo N > /sys/module/mtk_eth/parameters/eth_stop_max_stage`
+   - `echo M > /sys/module/mtk_eth/parameters/eth_open_max_stage`
+3. Run the bare reproducer first:
+   - `setsid sh -c 'ip link set eth0 down; sleep 3; ip link set eth0 up' </dev/null >/dev/null 2>&1 &`
+   - plain `nohup &` over dropbear is unreliable; use `setsid`
+4. Start with conservative gates so the SoC survives, then raise them:
+   - `eth_stop_max_stage=0` means no stop stages execute
+   - `eth_open_max_stage=0` means no open stages execute
+   - increase one side at a time until the first lock identifies the crossing
+     stage
+5. Use the `ETH-BI ...` and `ETH-DMA-SWAP ...` `pr_emerg` lines from `dmesg`
+   after surviving runs to see whether the lock is in stop, open, or the
+   caller around them.
+6. After the crossing stage is known, reduce the patch to a finer-grained
+   harness around that stage only. Resume the SER/quiesce A/B only after this
+   stop/open fault is localized or fixed.
 
 ## Do not repeat
 
