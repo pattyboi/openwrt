@@ -1,6 +1,6 @@
 # E8450 / MT7622 — Condensed Hardware & Software-Path Reference
 
-Updated 2026-07-05 on `e8450-hw-driven`. Supersedes scattered notes; raw
+Updated 2026-07-05 (late) on `e8450-hw-driven`. Supersedes scattered notes; raw
 probes in `.recall/router-probes/` (latest full survey:
 `2026-07-05-hw-survey/survey-raw.txt`).
 
@@ -36,6 +36,7 @@ probes in `.recall/router-probes/` (latest full survey:
 | Bridged LAN↔WLAN | nft bridging offload (`999-ppe-90/91/89`) | built, boots; E2E bind test pending (needs 2 LAN clients) |
 | QoS | PPPQ per-port queues + TCP-ACK prio (conntrack builtin) + DSCP learning (ppe-12/17) | validated |
 | Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | built; functional test pending |
+| SW flowtable hash | seeded xxh32 tuple hash (`999-ppe-92`) | flashed; bind verified |
 | SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | now testable (WED live) |
 | Debug | WED-AT tracer + `wed_attach_max_access` gate; eth stop/open stage harness; ramoops console+pmsg; sysrq + hung-task detector | all dormant, params default-off |
 
@@ -57,6 +58,11 @@ probes in `.recall/router-probes/` (latest full survey:
 8. Don't grep dmesg for `-i oops` — matches "ramoops"; use `BUG:|Call trace`.
 
 ## Closed investigations (do not reopen)
+
+- xxhash audit (2026-07-05): only viable site was the flowtable tuple hash
+  (done, 999-ppe-92). PPE bucket hash is silicon-fixed; RX jhash_1word is
+  faster than xxh32 at 4 bytes; conntrack siphash and nft set hashes are
+  keyed for DoS resistance — never swap those.
 
 - EIP97/crypto SDK patches: no silicon. RSS/HWLRO: netsys v2/v3 caps only.
 - pcie-01..04 SDK: gen3 controller only (MT7622 = gen2 driver).
