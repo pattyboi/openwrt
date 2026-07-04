@@ -260,6 +260,9 @@ ifeq ($(DUMP),1)
     CPU_TYPE ?= generic
     CPU_CFLAGS_generic = -mcpu=generic
     CPU_CFLAGS_cortex-a53 = -mcpu=cortex-a53
+    ifeq ($(BOARD)-$(SUBTARGET),mediatek-mt7622)
+      CPU_CFLAGS_cortex-a53 = -mcpu=cortex-a53+crypto+crc
+    endif
   endif
   ifeq ($(ARCH),arc)
     CPU_TYPE ?= arc700
