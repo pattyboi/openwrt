@@ -1,0 +1,18 @@
+#!/bin/sh
+
+. /lib/functions/system.sh
+
+case "$(board_name)" in
+linksys,e8450-ubi|\
+belkin,rt3200-ubi)
+	uci -q get network.globals.packet_steering >/dev/null || {
+		uci -q batch <<-EOF
+			set network.globals='globals'
+			set network.globals.packet_steering='1'
+		EOF
+		uci commit network
+	}
+	;;
+esac
+
+exit 0

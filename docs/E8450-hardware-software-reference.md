@@ -37,6 +37,7 @@ probes in `.recall/router-probes/` (latest full survey:
 | QoS | PPPQ per-port queues + TCP-ACK prio (conntrack builtin) + DSCP learning (ppe-12/17) | validated |
 | Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | built; functional test pending |
 | SW flowtable hash | seeded xxh32 tuple hash (`999-ppe-92`) | flashed; bind verified |
+| IRQ/RPS spread | OpenWrt generic `packet_steering` enabled by first-boot default for E8450/RT3200 | needs live validation |
 | SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | now testable (WED live) |
 | Debug | WED-AT tracer + `wed_attach_max_access` gate; eth stop/open stage harness; ramoops console+pmsg; sysrq + hung-task detector | all dormant, params default-off |
 
@@ -73,9 +74,10 @@ probes in `.recall/router-probes/` (latest full survey:
 
 ## Next-direction candidates (ranked)
 
-1. **IRQ/RPS spread across the 2 cores** — all net IRQs on CPU0 today;
-   pin eth0 vs wifi IRQs apart + RPS mask for host-terminated traffic.
-   Cheap, measurable.
+1. **Validate packet steering live** — new first-boot default now enables
+   OpenWrt's generic `packet_steering` service for E8450/RT3200, but the
+   measured IRQ/RPS redistribution and perf impact still need hardware
+   confirmation. Existing upgraded configs will keep their current setting.
 2. **cpufreq governor A/B** — `ondemand` (437 MHz floor) vs `performance`
    for latency jitter under WED+PPE load.
 3. **Bridged-offload E2E validation** (ppe-90) with two LAN clients, then
