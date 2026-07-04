@@ -1,8 +1,65 @@
-# Handoff — E8450 / MT7622 WED
+# Handoff — E8450 / MT7622 WED — RESOLVED
 
-Updated 2026-07-04 (evening) on branch `e8450-hw-driven`.
+Updated 2026-07-04 (night) on branch `e8450-hw-driven`.
 
-## 2026-07-04 PM — ROOT-CAUSE CLASS FOUND; UPSTREAM BUG CONFIRMED
+## FINAL VERDICT: WED WORKS. The load path was the bug.
+
+Live right now on the custom 25.12.4 image (all 16 patches):
+
+```
+mt7915e 0000:01:00.0: attaching wed device 0 version 1
+wed_enable = Y, wl0-ap0 (2.4G) + wl1-ap0 (5G/80MHz) up, PPE alive,
+zero WED errors, stable.
+```
+
+The entire multi-day "WED hard-faults the box" history was a load-path
+artifact:
+
+- RUNTIME loading mt7915e with WED (insmod first-bind) hard-locks the
+  MT7622 AXI fabric — on stock 24.10/6.6.73 AND 25.12/6.12.87. Not a
+  regression; it has likely always been true.
+- ANY mt7915e PCI unbind/rebind hard-locks too, even with wed_enable=N —
+  a separate, WED-independent fabric hang (upstream-reportable).
+- BOOT-TIME autoload with `mt7915e wed_enable=1` in
+  `/etc/modules.d/mt7915e` works perfectly. This is how WED is actually
+  deployed in the field, and it was never tested here until today.
+
+## Operating rules (permanent)
+
+1. WED on = `echo "mt7915e wed_enable=1" > /etc/modules.d/mt7915e` + reboot.
+2. NEVER runtime-load mt7915e. NEVER PCI unbind/rebind it. Both hard-lock
+   the SoC unrecoverably (watchdog and `reboot -f` defeated).
+3. kmodloader ignores `modprobe module param=x` argv; params go in the
+   modules.d FILE.
+4. After any kernel panic: save then `rm /sys/fs/pstore/dmesg-*`, or the
+   E8450 u-boot `pstore check` will boot the RECOVERY partition on every
+   subsequent boot (recovery = tmpfs rootfs, no wifi modules).
+5. A fast power-replug (1-2 s) preserves ramoops across a "cold" cycle.
+6. `setsid` survives dropbear disconnect; `nohup &` does not.
+7. Never trust reachability from the build laptop alone (its r8169 is
+   flaky); confirm via the router WAN (192.168.3.15) from the house net.
+
+## Reverted / superseded
+
+- Codex's mt76 defer patch: REVERTED — it broke the MCU handshake in its
+  only hardware test (patch-semaphore timeout -> SER during probe ->
+  NULL deref in mt76_txq_schedule_pending -> panic -> recovery failover;
+  dumps in `.recall/router-probes/2026-07-04-firstbind-wed-lock/`), and
+  the problem it targeted was the load path, not WED timing.
+- The WED attach gate (999-zzzz) and eth stop/open harness (999-zzzzz)
+  remain in tree, dormant (params default off).
+
+## What remains
+
+- Soak/performance validation of WED offload under real wifi traffic
+  (PPE + PPPQ + WED all active together).
+- The SER / `wed_v1_txbm_quiesce` A/B is now actually testable.
+- Optional upstream reports: (a) runtime first-bind WED AXI lock,
+  (b) mt7915e rebind AXI lock, (c) mt76 SER-during-probe NULL deref.
+
+Everything below is the historical investigation record.
+
+## 2026-07-04 PM — ROOT-CAUSE CLASS FOUND; UPSTREAM BUG CONFIRMED (superseded)
 
 Full verified trigger matrix (sound methodology: deadman + independent
 wifi vantage + ramoops):
