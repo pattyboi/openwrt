@@ -1,6 +1,16 @@
 # Handoff — E8450 / MT7622 WED — RESOLVED
 
-Updated 2026-07-04 (night) on branch `e8450-hw-driven`.
+Updated 2026-07-05 on branch `e8450-hw-driven`.
+
+**START HERE: `docs/E8450-hardware-software-reference.md`** — the condensed
+hardware map, software-path status, operating rules, closed investigations,
+and ranked next directions. This file below is the historical record.
+
+2026-07-04/05 additions since resolution: SDK re-audit cherry-picks landed
+and flashed (commit f544b83cde): 999-ppe-89/90/91 (nft bridged-flow offload
++ prereqs + dst leak fix) and 999-eth-27 (fwmark→QDMA queue). WED persists
+across sysupgrades now (/etc/modules.d/mt7915e in /etc/sysupgrade.conf).
+Full fresh hardware survey in .recall/router-probes/2026-07-05-hw-survey/.
 
 ## FINAL VERDICT: WED WORKS. The load path was the bug.
 

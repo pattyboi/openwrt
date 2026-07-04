@@ -1,0 +1,324 @@
+#### iomem
+10000000-10000fff : 10000000.infracfg infracfg@10000000
+10001000-1000124f : 10001000.pwrap pwrap
+10002000-10002fff : 10002000.pericfg pericfg@10002000
+10005000-10005fff : 10211000.pinctrl eint
+10006000-10006fff : 10006000.power-controller power-controller@10006000
+10206000-10206fff : 10206000.efuse efuse@10206000
+10209000-10209fff : 10209000.clock-controller clock-controller@10209000
+1020f000-1020ffff : 1020f000.rng rng@1020f000
+10210000-10210fff : 10210000.clock-controller clock-controller@10210000
+10211000-10211fff : 10211000.pinctrl base
+10212000-102127ff : 10212000.watchdog watchdog@10212000
+11002000-1100201f : serial
+11004000-1100401f : serial
+1100a000-1100a0ff : 1100a000.spi spi@1100a000
+1100b000-1100bfff : 1100b000.thermal thermal@1100b000
+1100d000-1100dfff : 1100d000.spi spi@1100d000
+1100e000-1100efff : 1100e000.ecc ecc@1100e000
+11016000-110160ff : 11016000.spi spi@11016000
+18000000-180fffff : 18000000.wmac wmac@18000000
+1a0c0000-1a0c0fff : 1a0c0000.usb mac
+1a0c4000-1a0c46ff : 1a0c4000.t-phy t-phy@1a0c4000
+1a0c4700-1a0c47ff : 1a0c0000.usb ippc
+1a0c4800-1a0c48ff : phy-1a0c4000.t-phy.0 usb-phy@1a0c4800
+1a0c4900-1a0c4fff : phy-1a0c4000.t-phy.1 usb-phy@1a0c4900
+1a0c5000-1a0c50ff : phy-1a0c4000.t-phy.2 usb-phy@1a0c5000
+1a143000-1a143fff : 1a143000.pcie port0
+1a145000-1a145fff : 1a145000.pcie port1
+1b007000-1b007fff : 1b007000.dma-controller dma-controller@1b007000
+1b100000-1b11ffff : 1b100000.ethernet ethernet@1b100000
+20000000-27ffffff : pcie@1a143000
+  20000000-201fffff : PCI Bus 0000:01
+    20000000-200fffff : 0000:01:00.0
+      20000000-200fffff : 0000:01:00.0
+    20100000-20103fff : 0000:01:00.0
+    20104000-20104fff : 0000:01:00.0
+28000000-2fffffff : pcie@1a145000
+40000000-42feefff : System RAM
+42fef000-42feffff : reserved
+42ff0000-42ffffff : System RAM
+  42ff0000-42ffffff : reserved
+43000000-4302ffff : reserved
+43030000-5fffffff : System RAM
+  44000000-449fffff : Kernel code
+  44a00000-44a6ffff : reserved
+  44a70000-44baffff : Kernel data
+  5e7ee000-5e7f5fff : reserved
+  5f4c0000-5fdfffff : reserved
+  5fe19000-5fe1bfff : reserved
+  5fe1c000-5fe9cfff : reserved
+  5fe9d000-5fec4fff : reserved
+  5fec6000-5fec6fff : reserved
+  5fec7000-5fec8fff : reserved
+  5fec9000-5fed9fff : reserved
+  5feda000-5fffffff : reserved
+#### interrupts
+           CPU0       CPU1       
+ 10:    1021791    2049655     GICv2  30 Level     arch_timer
+ 14:          0          0   mt-eint   0 Edge      gpio-keys
+ 67:          6          0   mt-eint  53 Level     mt7530
+116:          0          0   mt-eint 102 Edge      gpio-keys
+117:          1          0  MT_SYSIRQ 163 Level     mt-pmic-pwrap
+118:         14          0  MT_SYSIRQ  91 Level     ttyS0
+120:      41130          0  MT_SYSIRQ  95 Level     mtk-ecc
+121:          0          0  MT_SYSIRQ 118 Level     1100a000.spi
+122:          0          0  MT_SYSIRQ 122 Level     11016000.spi
+123:      11349          0  MT_SYSIRQ  96 Level     mtk-snand
+124:      43028          0  MT_SYSIRQ 214 Level     mt7915e
+127:        677          0  MT_SYSIRQ 224 Level     1b100000.ethernet
+128:       1224          0  MT_SYSIRQ 225 Level     1b100000.ethernet
+130:          0          0     dummy   0 Edge      PCIe PME
+132:          0          0  MT_SYSIRQ 219 Level     1b007000.dma-controller
+133:          3          0    mt7530   0 Edge      mt7530-0:00
+134:          0          0    mt7530   1 Edge      mt7530-0:01
+135:          0          0    mt7530   2 Edge      mt7530-0:02
+136:          0          0    mt7530   3 Edge      mt7530-0:03
+137:          3          0    mt7530   4 Edge      mt7530-0:04
+138:          0          0  MT_SYSIRQ 232 Level     xhci-hcd:usb1
+139:     125272          0  MT_SYSIRQ 211 Level     mt7615e
+IPI0:      1157       3316       Rescheduling interrupts
+IPI1:    117632     168565       Function call interrupts
+IPI2:         0          0       CPU stop interrupts
+IPI3:         0          0       CPU stop NMIs
+IPI4:         0          0       Timer broadcast interrupts
+IPI5:     17323      38078       IRQ work interrupts
+IPI6:         0          0       CPU backtrace interrupts
+IPI7:         0          0       KGDB roundup interrupts
+Err:          0
+#### cpuinfo
+CPU part	: 0xd03
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 cpuid
+processor	: 0
+processor	: 1
+#### cpufreq
+policy0
+437500 600000 812500 1025000 1137500 1262500 1350000 
+ondemand
+#### thermal
+/sys/class/thermal/thermal_zone0 cpu-thermal 58200
+hwmon0
+hwmon1
+hwmon2
+#### meminfo
+MemTotal:         501060 kB
+MemFree:          385516 kB
+MemAvailable:     380016 kB
+#### dt root
+#address-cells
+#size-cells
+__symbols__
+adc@11001000
+aliases
+cci@10390000
+chosen
+clock-controller@10209000
+clock-controller@10210000
+clock-controller@11220000
+clock-controller@1a000000
+clock-controller@1a100800
+clock-controller@1af00000
+clock-controller@1b000000
+compatible
+cpus
+dma-controller@1b007000
+dummy40m
+ecc@1100e000
+efuse@10206000
+ethernet@1b100000
+gpio-keys
+gpio-leds
+i2c@11007000
+i2c@11008000
+i2c@11009000
+infracfg@10000000
+interrupt-controller@10200620
+interrupt-controller@10300000
+interrupt-parent
+ir-receiver@10009000
+memory@40000000
+mmc@11230000
+mmc@11240000
+model
+name
+nand-controller@1100d000
+opp-table
+oscillator
+pcie-mirror@10000400
+pcie@1a143000
+pcie@1a145000
+pciecfg@1a140000
+pericfg@10002000
+pinctrl@10211000
+pmu
+power-controller@10006000
+psci
+pwm@11006000
+pwrap@10001000
+regulator-1p8v
+regulator-3p3v
+regulator-5v
+reserved-memory
+rng@1020f000
+rtc@10212800
+sata@1a200000
+serial@11002000
+serial@11003000
+serial@11004000
+serial@11005000
+serial@1100c000
+serial@11019000
+sgmiisys@1b128000
+spi@1100a000
+spi@1100d000
+spi@11014000
+spi@11016000
+t-phy@1a0c4000
+t-phy@1a243000
+thermal-zones
+thermal@1100b000
+timer
+usb@1a0c0000
+watchdog@10212000
+wed@1020a000
+wed@1020b000
+wmac@18000000
+#### dt soc nodes
+#address-cells
+#size-cells
+__symbols__
+adc@11001000
+aliases
+cci@10390000
+chosen
+clock-controller@10209000
+clock-controller@10210000
+clock-controller@11220000
+clock-controller@1a000000
+clock-controller@1a100800
+clock-controller@1af00000
+clock-controller@1b000000
+compatible
+cpus
+dma-controller@1b007000
+dummy40m
+ecc@1100e000
+efuse@10206000
+ethernet@1b100000
+gpio-keys
+gpio-leds
+i2c@11007000
+i2c@11008000
+i2c@11009000
+infracfg@10000000
+interrupt-controller@10200620
+interrupt-controller@10300000
+interrupt-parent
+ir-receiver@10009000
+memory@40000000
+mmc@11230000
+mmc@11240000
+model
+name
+nand-controller@1100d000
+opp-table
+oscillator
+pcie-mirror@10000400
+#### disabled dt nodes
+#### usb
+1-0:1.0
+2-0:1.0
+usb1
+usb2
+#### mtd
+dev:    size   erasesize  name
+mtd0: 00080000 00020000 "bl2"
+mtd1: 07f80000 00020000 "ubi"
+64
+#### switch mt7530
+mdio-bus:1f
+mt7530-0:00
+mt7530-0:01
+mt7530-0:02
+mt7530-0:03
+mt7530-0:04
+no-ethtool
+#### net features eth0
+/sys/class/net/eth0/queues/rx-0
+/sys/class/net/eth0/queues/tx-0
+/sys/class/net/eth0/queues/tx-1
+/sys/class/net/eth0/queues/tx-10
+#### gmac/sgmii dt
+#### rng
+dev
+power
+rng_available
+rng_current
+rng_quality
+rng_selected
+subsystem
+uevent
+1020f000.rng none
+1020f000.rng
+#### watchdog
+watchdog0
+mtk-wdt
+#### leds
+inet:blue
+inet:orange
+mt76-phy0
+mt76-phy1
+power:blue
+power:orange
+#### gpio
+gpiochip0: GPIOs 512-614, parent: platform/10211000.pinctrl, pinctrl_moore:
+ gpio-512 (                    |reset               ) in  hi IRQ ACTIVE LOW
+ gpio-565 (                    |interrupt           ) in  lo IRQ 
+ gpio-566 (                    |reset               ) out hi 
+ gpio-607 (                    |power:blue          ) out lo ACTIVE LOW
+ gpio-608 (                    |power:orange        ) out hi ACTIVE LOW
+ gpio-609 (                    |inet:blue           ) out lo ACTIVE LOW
+ gpio-610 (                    |inet:orange         ) out hi ACTIVE LOW
+ gpio-614 (                    |wps                 ) in  hi IRQ ACTIVE LOW
+#### pcie
+0000:00:00.0
+0000:01:00.0
+5.0 GT/s PCIe
+1
+#### crypto proc summary
+      1 driver       : zstd-scomp
+      1 driver       : zstd-generic
+      1 driver       : xts-aes-ce
+      1 driver       : xctr-aes-ce
+      1 driver       : xcbc-aes-ce
+      1 driver       : sha512-generic
+      1 driver       : sha512-arm64
+      1 driver       : sha384-generic
+#### modules
+cfg80211              274432  5 mt7915e,mt7615_common,mt76_connac_lib,mt76,mac80211
+compat                 12288  2 mac80211,cfg80211
+geniv                  12288  1 seqiv
+gpio_button_hotplug    12288  0 
+gre                    12288  2 pptp,ip_gre
+ip_gre                 20480  0 
+ip_tables              24576  2 iptable_mangle,iptable_filter
+ip_tunnel              20480  1 ip_gre
+ip6_udp_tunnel         12288  1 l2tp_core
+ipt_REJECT             12288  0 
+iptable_filter         12288  0 
+iptable_mangle         12288  0 
+l2tp_core              20480  2 l2tp_ppp,l2tp_netlink
+l2tp_netlink           20480  1 l2tp_ppp
+l2tp_ppp               16384  0 
+leds_gpio              12288  0 
+libcrc32c              12288  1 nf_tables
+mac80211              569344  5 mt7915e,mt7615e,mt7615_common,mt76_connac_lib,mt76
+macvlan                20480  0 
+mt76                   73728  4 mt7915e,mt7615e,mt7615_common,mt76_connac_lib
+mt76_connac_lib        45056  3 mt7915e,mt7615e,mt7615_common
+mt7615_common          73728  1 mt7615e
+mt7615e                20480  0 
+mt7915e               122880  0 
+netconsole             12288  0 
+#### uptime/load
+ 22:10:16 up 22 min,  load average: 0.05, 0.03, 0.02
