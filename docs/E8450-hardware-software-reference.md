@@ -33,7 +33,7 @@ probes in `.recall/router-probes/` (latest full survey:
 |---|---|---|
 | Routed v4 fwd | PPE hw-NAT (BND entries) | validated |
 | WAN→WLAN fwd | PPE → WDMA → **WED v1** → mt7915 | validated (counters + MIB) |
-| Bridged LAN↔WLAN | nft bridging offload (`999-ppe-90/91/89`) | built, boots; E2E bind test pending (needs 2 LAN clients) |
+| Bridged LAN↔WLAN | nft bridging offload (`999-ppe-90/91/89`) | built, boots; helper/procedure added, E2E bind proof still pending |
 | QoS | PPPQ per-port queues + TCP-ACK prio (conntrack builtin) + DSCP learning (ppe-12/17) | validated |
 | Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | built; functional test pending |
 | SW flowtable hash | seeded xxh32 tuple hash (`999-ppe-92`) | flashed; bind verified |
@@ -82,6 +82,7 @@ probes in `.recall/router-probes/` (latest full survey:
    for latency jitter under WED+PPE load.
 3. **Bridged-offload E2E validation** (ppe-90) with two LAN clients, then
    the eth-27 mark→queue functional check.
+   See `docs/e8450-bridged-offload-validation.md`.
 4. **WED soak/perf** at real WAN speeds (current upstream hop is ~5 Mbps —
    inadequate for throughput numbers).
 5. **SER / `wed_v1_txbm_quiesce` A/B** — the original harness plan, now

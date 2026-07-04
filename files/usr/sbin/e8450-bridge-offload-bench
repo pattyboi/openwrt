@@ -1,0 +1,136 @@
+#!/bin/sh
+
+set -eu
+
+TABLE="bench"
+FAMILY="inet"
+PPE="/sys/kernel/debug/ppe0/entries"
+
+usage() {
+	cat <<'EOF'
+Usage:
+  e8450-bridge-offload-bench setup
+  e8450-bridge-offload-bench watch [seconds]
+  e8450-bridge-offload-bench teardown
+  e8450-bridge-offload-bench status
+
+Installs a temporary nftables flowtable that includes bridged LAN/WLAN ingress
+devices for PPE offload validation on the E8450/RT3200.
+EOF
+}
+
+require_cmd() {
+	command -v "$1" >/dev/null 2>&1 || {
+		echo "missing required command: $1" >&2
+		exit 1
+	}
+}
+
+bridge_ports() {
+	local dev
+
+	for dev in /sys/class/net/br-lan/lower_*; do
+		[ -e "$dev" ] || continue
+		basename "$dev" | sed 's/^lower_//'
+	done
+}
+
+flowtable_devices() {
+	local seen=" "
+	local dev out=""
+
+	for dev in $(bridge_ports) wan; do
+		[ -d "/sys/class/net/$dev" ] || continue
+		case " $seen " in
+			*" $dev "*) continue ;;
+		esac
+		seen="$seen$dev "
+		if [ -n "$out" ]; then
+			out="$out, $dev"
+		else
+			out="$dev"
+		fi
+	done
+
+	[ -n "$out" ] || {
+		echo "failed to discover any flowtable devices" >&2
+		exit 1
+	}
+
+	printf '%s\n' "$out"
+}
+
+setup_table() {
+	local devices
+
+	require_cmd nft
+	devices="$(flowtable_devices)"
+
+	nft -f - <<EOF
+table $FAMILY $TABLE {
+	flowtable ft {
+		hook ingress priority filter;
+		devices = { $devices };
+		flags offload;
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		ip protocol { tcp, udp } flow add @ft
+		ip6 nexthdr { tcp, udp } flow add @ft
+	}
+}
+EOF
+
+	echo "installed $FAMILY $TABLE with devices: $devices"
+}
+
+watch_entries() {
+	local seconds="${1:-30}"
+	local end now
+
+	[ -r "$PPE" ] || {
+		echo "missing PPE debugfs entries file: $PPE" >&2
+		exit 1
+	}
+
+	end=$(( $(date +%s) + seconds ))
+	while :; do
+		now=$(date +%s)
+		[ "$now" -lt "$end" ] || break
+		date '+== %F %T =='
+		grep ' BIND ' "$PPE" || true
+		sleep 2
+	done
+}
+
+teardown_table() {
+	require_cmd nft
+	nft delete table "$FAMILY" "$TABLE" 2>/dev/null || true
+}
+
+status_table() {
+	require_cmd nft
+	nft list table "$FAMILY" "$TABLE"
+}
+
+cmd="${1:-}"
+case "$cmd" in
+setup)
+	setup_table
+	;;
+watch)
+	shift
+	watch_entries "${1:-30}"
+	;;
+teardown)
+	teardown_table
+	;;
+status)
+	status_table
+	;;
+*)
+	usage >&2
+	exit 1
+	;;
+esac

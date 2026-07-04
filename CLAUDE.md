@@ -36,6 +36,9 @@ fwmark→queue steering (999-eth-27).
   change existing preserved configs.
 - Bridged LAN↔WLAN offload E2E (needs two LAN clients) and eth-27
   mark→queue functional check.
+  Bridged validation helper now exists:
+  `files/usr/sbin/e8450-bridge-offload-bench`
+  with procedure in `docs/e8450-bridged-offload-validation.md`.
 - WED perf soak (upstream hop currently ~5 Mbps — too slow for numbers).
 - SER / `wed_v1_txbm_quiesce` A/B (harness in tree, now unblocked).
 
