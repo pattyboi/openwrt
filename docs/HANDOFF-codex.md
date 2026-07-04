@@ -1,6 +1,44 @@
 # Handoff — E8450 / MT7622 WED
 
-Updated 2026-07-03 on branch `e8450-hw-driven`.
+Updated 2026-07-04 on branch `e8450-hw-driven`.
+
+## 2026-07-04 REVERSALS — READ THIS FIRST, it supersedes much of the below
+
+All results re-verified with self-reporting methodology (kmsg markers +
+deadman `reboot -f` + ramoops readback + independent wifi vantage: ping the
+router WAN at 192.168.3.15 from the house network). Never trust plain
+reachability from the build laptop: its r8169 NIC logged continuous PCIe
+RxErr bus errors on 2026-07-03 and its link flapping caused false "router
+dead" verdicts.
+
+1. The mtk_eth stop/open lock was a MISDIAGNOSIS. ~52 eth0 down/up cycles
+   on 2026-07-04 never locked: all 17 stage-gated runs (stop 1-9, open 1-8),
+   bare runs, runs under bound-PPE offloaded load, a 20-cycle hammer, a
+   cold-boot replica, and runs with forced lan1 link flaps. mtk_stop /
+   mtk_open / dev_close_many+dev_open are all fine.
+2. The WED bind hard-lock IS REAL. A full ungated attach (`wed_enable=Y`,
+   PCI unbind/rebind) hard-locked the SoC first try on a rebuilt image;
+   deadman `reboot -f` was defeated; both vantage points dead. Bus-level.
+3. The skip-gate result stands: `wed_attach_max_access=0` (every traced
+   WED/WDMA/WPDMA/mirror/HIFSYS access skipped, attach force-failed) ALSO
+   hard-locks. Re-verified 2026-07-04.
+
+Combining 1+3: the locking ingredient is in what the (even fully-gated)
+attach does that plain eth0 cycles do not:
+- the PCI unbind/rebind of mt7915e itself (NOTE: "rebind with wed_enable=N
+  is safe" was never verified with sound methodology — test it FIRST)
+- `mtk_eth_set_dma_device(eth, hw->dev)`: unlike plain cycles, this CHANGES
+  eth->dma_dev to the WED platform device before the reopen
+- `mtk_wed_tx_buffer_alloc` (DMA allocs against the WED device)
+- the detach-restore swap back to eth->dev
+
+Next steps: (a) PCI unbind/rebind with `wed_enable=N` under the sound
+methodology; if it locks, the fault is mt76 re-probe/PCIe, not WED at all.
+(b) If it survives, add a `wed_attach_stop_stage` gate for the STRUCTURAL
+attach steps (before/after set_dma_device, before tx_buffer_alloc, skip
+detach-restore) and bisect. The eth stage harness patch (999-zzzzz) is
+currently set aside in the session scratchpad but committed at 1db6653;
+the flashed image is the A-replica (perf-opt, WED gate only, no debug).
 
 ## State
 
