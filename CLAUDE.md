@@ -53,6 +53,9 @@ fwmark→queue steering (999-eth-27).
 
 ## Build notes
 
+- Canonical build seed: `configs/e8450-ubi.config`. Run
+  `./scripts/build-e8450.sh`, or `CLEAN=1 ./scripts/build-e8450.sh` for a
+  clean build; set `JOBS` to override the default `nproc` parallelism.
 - Patches: `target/linux/mediatek/patches-6.12/999-*` (diffs vs vanilla;
   quilt applies in filename order — 999-ppe-90/91 are rebased ON ppe-17/21).
 - Kernel debug/size flags are buildroot symbols in the UNTRACKED `.config`:

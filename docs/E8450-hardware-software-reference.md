@@ -21,7 +21,7 @@ probes in `.recall/router-probes/` (latest full survey:
 | USB | xHCI + 3-phy T-PHY up, usb1/usb2 root hubs — **no external port on E8450** | unused |
 | Storage | SPI-NAND 128 MB UBI (bl2 + ubi), ECC engine `1100e000` | — |
 | Thermal | `cpu-thermal` zone (~58 °C idle-ish), auxadc | headroom OK |
-| TRNG | `1020f000.rng` (mtk) | working (runtime-PM hardened patch in tree) |
+| TRNG | `1020f000.rng` (legacy MMIO mtk-rng) | active HWRNG; live-read and runtime-PM verified |
 | Watchdog | `mtk-wdt 10212000` | **cannot recover AXI-fabric hangs** |
 | Serial | ttyS0 console in DT — **no populated UART header** | pstore/ramoops instead |
 | Recovery | u-boot: `pstore check` → boots recovery volume when crash dumps present; reset-button TFTP path exists | see rules below |
@@ -64,6 +64,15 @@ probes in `.recall/router-probes/` (latest full survey:
   (done, 999-ppe-92). PPE bucket hash is silicon-fixed; RX jhash_1word is
   faster than xxh32 at 4 bytes; conntrack siphash and nft set hashes are
   keyed for DoS resistance — never swap those.
+- TRNG/HWRNG backport audit (2026-07-04): MT7622 uses the legacy MMIO
+  `mtk-rng` through the `mediatek,mt7623-rng` fallback. Live hardware has
+  `1020f000.rng` selected, initializes the CRNG before userspace, returns
+  data, and autosuspends afterward. Linux 6.12.87 already contains upstream
+  `522a242` (check `devm_pm_runtime_enable()` errors); local patch 999 adds
+  upstream device context plus `pm_runtime_resume_and_get()` error handling.
+  Do not backport `99d9edf` alone: 6.12 PM helpers do not mark last-busy
+  internally. Upstream 2026 SMCC support (`066d65a`) targets MT7981/MT7986/
+  MT7987/MT7988 secure-firmware access and is not applicable to MT7622.
 
 - EIP97/crypto SDK patches: no silicon. RSS/HWLRO: netsys v2/v3 caps only.
 - pcie-01..04 SDK: gen3 controller only (MT7622 = gen2 driver).
