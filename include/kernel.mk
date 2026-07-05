@@ -39,6 +39,10 @@ else
     KERNEL_CROSS?=$(TARGET_CROSS)
   endif
 
+  ifneq (,$(KERNEL_LLVM))
+    KERNEL_CC:=$(KERNEL_LLVM)/clang
+  endif
+
   ifeq ($(TARGET_BUILD),1)
     PATCH_DIR ?= $(CURDIR)/patches$(if $(wildcard ./patches-$(KERNEL_PATCHVER)),-$(KERNEL_PATCHVER))
     FILES_DIR ?= $(foreach dir,$(wildcard $(CURDIR)/files $(CURDIR)/files-$(KERNEL_PATCHVER)),"$(dir)")
@@ -104,8 +108,15 @@ endif
 
 KERNEL_MAKE = $(MAKE) $(KERNEL_MAKEOPTS)
 
+KERNEL_EXTRA_CFLAGS = $(filter-out -fno-plt,$(call qstrip,$(CONFIG_EXTRA_OPTIMIZATION)))
+KERNEL_TARGET_CFLAGS = $(call qstrip,$(CONFIG_KERNEL_CFLAGS))
+ifneq (,$(KERNEL_LLVM))
+  KERNEL_EXTRA_CFLAGS := $(filter-out -fno-caller-saves,$(KERNEL_EXTRA_CFLAGS))
+  KERNEL_TARGET_CFLAGS := $(filter-out --param l1-cache-size=% l2-cache-size=%,$(KERNEL_TARGET_CFLAGS))
+endif
+
 KERNEL_MAKE_FLAGS = \
-	KCFLAGS="$(call iremap,$(BUILD_DIR),$(notdir $(BUILD_DIR))) $(filter-out -fno-plt,$(call qstrip,$(CONFIG_EXTRA_OPTIMIZATION))) $(call qstrip,$(CONFIG_KERNEL_CFLAGS))" \
+	KCFLAGS="$(call iremap,$(BUILD_DIR),$(notdir $(BUILD_DIR))) $(KERNEL_EXTRA_CFLAGS) $(KERNEL_TARGET_CFLAGS)" \
 	HOSTCFLAGS="$(HOST_CFLAGS) -Wall -Wmissing-prototypes -Wstrict-prototypes" \
 	CROSS_COMPILE="$(KERNEL_CROSS)" \
 	ARCH="$(LINUX_KARCH)" \
@@ -123,6 +134,10 @@ KERNEL_MAKE_FLAGS = \
 
 ifneq (,$(KERNEL_CC))
   KERNEL_MAKE_FLAGS += CC="$(KERNEL_CC)"
+endif
+
+ifneq (,$(KERNEL_LLVM))
+  KERNEL_MAKE_FLAGS += LLVM="$(KERNEL_LLVM)/" LLVM_IAS=1
 endif
 
 KERNEL_NOSTDINC_FLAGS = \
