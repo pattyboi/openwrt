@@ -714,7 +714,7 @@ ret_t rtl8367c_getAsicEavPortTimeStamp(rtk_uint32 port, rtk_uint32 type, rtl8367
            return retVal;
         if((retVal = rtl8367c_getAsicReg(RTL8367C_REG_P8_PORT_NSEC_15_0, &nsec8_l)) != RT_ERR_OK)
            return retVal;
-    }else if(port == 9){
+    }else{
         if((retVal = rtl8367c_getAsicReg(RTL8367C_REG_P9_TX_SYNC_SEQ_ID+type, &timeStamp->sequence_id))!=  RT_ERR_OK)
             return retVal;
         if((retVal = rtl8367c_getAsicReg(RTL8367C_REG_P9_PORT_SEC_31_16, &sec_h)) != RT_ERR_OK)

@@ -497,7 +497,7 @@ ret_t rtl8367c_setAsicSvlanMemberConfiguration(rtk_uint32 index, rtl8367c_svlan_
 
     if(index < 63)
         regAddr = RTL8367C_REG_SVLAN_MEMBERCFG0_CTRL4+index;
-    else if(index == 63)
+    else
         regAddr = RTL8367C_REG_SVLAN_MEMBERCFG63_CTRL4;
 
     retVal = rtl8367c_setAsicReg(regAddr, regData);
@@ -551,7 +551,7 @@ ret_t rtl8367c_getAsicSvlanMemberConfiguration(rtk_uint32 index,rtl8367c_svlan_m
 
     if(index < 63)
         regAddr = RTL8367C_REG_SVLAN_MEMBERCFG0_CTRL4+index;
-    else if(index == 63)
+    else
         regAddr = RTL8367C_REG_SVLAN_MEMBERCFG63_CTRL4;
 
     retVal = rtl8367c_getAsicReg(regAddr, &regData);

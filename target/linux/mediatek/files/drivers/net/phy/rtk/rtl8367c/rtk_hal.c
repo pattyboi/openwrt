@@ -741,7 +741,7 @@ rtk_api_ret_t rtk_port_phyTestMode_set(rtk_port_t port, rtk_port_phy_test_mode_t
                 return retVal;
         }
 
-        if( (regData == 0x6367) )
+        if( regData == 0x6367 )
         {
             if ((retVal = rtl8367c_setAsicPHYOCPReg(rtk_switch_port_L2P_get(port), 0xa436, 0x80c1)) != RT_ERR_OK)
                 return retVal;

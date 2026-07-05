@@ -60,6 +60,9 @@ rtl8367s_gsw-objs += rtl8367c/trunk.o
 rtl8367s_gsw-objs += rtl8367c/vlan.o
 
 ccflags-y += -Werror -D_LITTLE_ENDIAN -DMDC_MDIO_OPERATION
+# Imported vendor code: suppress Clang-strict diagnostics that are not bugs
+ccflags-y += $(call cc-disable-warning, sometimes-uninitialized)
+ccflags-y += $(call cc-disable-warning, parentheses-equality)
 
 ccflags-y += -Idrivers/net/phy/rtk/rtl8367c/include
 ccflags-y += -Iinclude/linux/

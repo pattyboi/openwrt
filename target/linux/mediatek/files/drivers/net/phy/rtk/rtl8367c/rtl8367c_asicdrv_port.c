@@ -4820,7 +4820,7 @@ ret_t rtl8367c_getAsicPortRTCTResult(rtk_uint32 port, rtl8367c_port_rtct_result_
     if((retVal = rtl8367c_getAsicReg(0x1300, &regData)) != RT_ERR_OK)
         return retVal;
 
-    if( (regData == 0x6367) )
+    if( regData == 0x6367 )
     {
         if((retVal = rtl8367c_getAsicPHYOCPReg(port, 0xa422, &regData)) != RT_ERR_OK)
             return retVal;

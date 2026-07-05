@@ -2246,7 +2246,7 @@ rtk_api_ret_t rtk_l2_floodPortMask_get(rtk_l2_flood_type_t floood_type, rtk_port
                 return retVal;
             break;
         default:
-            break;
+            return RT_ERR_INPUT;
     }
 
     /* Get Logical port mask */
