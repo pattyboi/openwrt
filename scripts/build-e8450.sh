@@ -14,9 +14,4 @@ if [ "${CLEAN:-0}" = 1 ]; then
 	make clean
 fi
 
-if [ "$GOOGLE_CLANG" = 1 ]; then
-	GOOGLE_CLANG_DIR=${GOOGLE_CLANG_DIR:-$($TOPDIR/scripts/fetch-google-clang20.sh)}
-	exec make -j"$JOBS" KERNEL_LLVM="$GOOGLE_CLANG_DIR/bin" "$@"
-fi
-
 exec make -j"$JOBS" "$@"

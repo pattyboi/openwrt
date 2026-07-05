@@ -39,6 +39,8 @@ else
     KERNEL_CROSS?=$(TARGET_CROSS)
   endif
 
+  include $(INCLUDE_DIR)/google-clang.mk
+
   ifneq (,$(KERNEL_LLVM))
     KERNEL_CC:=$(KERNEL_LLVM)/clang
   endif
