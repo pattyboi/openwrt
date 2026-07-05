@@ -1,0 +1,47 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] lib: lzma: fix Clang 20 WERROR failures
+
+The imported LZMA SDK uses a generic void pointer as the match-finder
+callback context and casts implementations taking CMatchFinder pointers
+into that interface. Clang 20 diagnoses these intentional casts with
+-Wcast-function-type-strict, which becomes fatal under CONFIG_WERROR.
+
+Disable only that diagnostic for LzFind.o. Keep the global WERROR policy
+and all other Clang diagnostics intact.
+
+Also fix an over-indented unconditional block (-Wmisleading-indentation) and
+replace an unused-argument self-assignment with a void cast in the encoder
+(-Wself-assign). Both become fatal under CONFIG_WERROR.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+ lib/lzma/LzmaEnc.c | 4 ++--
+ lib/lzma/Makefile  | 1 +
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+--- a/lib/lzma/Makefile
++++ b/lib/lzma/Makefile
+@@ -5,3 +5,4 @@ lzma_decompress-objs := LzmaDec.o
+ obj-$(CONFIG_LZMA_DECOMPRESS) += lzma_decompress.o
+ 
+ EXTRA_CFLAGS += -Iinclude/linux -Iinclude/linux/lzma -include types.h
++CFLAGS_LzFind.o += $(call cc-disable-warning, cast-function-type-strict)
+--- a/lib/lzma/LzmaEnc.c
++++ b/lib/lzma/LzmaEnc.c
+@@ -1342,6 +1342,6 @@
+         startLen = lenTest + 1;
+
+       /* if (_maxMode) */
+-        {
++      {
+           UInt32 lenTest2 = lenTest + 1;
+           UInt32 limit = lenTest2 + p->numFastBytes;
+@@ -2081,7 +2081,7 @@ static void LzmaEnc_Finish(CLzmaEncHandl
+   if (p->mtMode)
+     MatchFinderMt_ReleaseStream(&p->matchFinderMt);
+   #else
+-  pp = pp;
++  (void)pp;
+   #endif
+ }
+ 
