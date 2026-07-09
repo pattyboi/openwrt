@@ -42,22 +42,17 @@ Supersedes scattered notes; raw probes in `.recall/router-probes/`.
 
 ## Operating rules (hard-won — do not violate)
 
-1. WED on = `mt7915e wed_enable=1` in `/etc/modules.d/mt7915e` (listed in
-   `/etc/sysupgrade.conf`) + boot. **Never** runtime-insmod mt7915e with
-   WED, **never** PCI unbind/rebind it — both hard-lock the AXI fabric
-   unrecoverably (all kernels; watchdog + `reboot -f` defeated).
-2. kmodloader ignores `modprobe mod param=x` argv — params go in the
-   modules.d file.
-3. After any panic: save then `rm /sys/fs/pstore/dmesg-*`, else u-boot
-   boots the recovery volume (tmpfs root, no wifi) every time.
-4. Fast power-replug (1–2 s) preserves ramoops through a "cold" cycle.
-5. `setsid` survives dropbear disconnect; `nohup &` does not.
-6. Netconsole is broken on this stack (netpoll drops pre-ndo; beads bug).
-7. Verify router life via WAN vantage (192.168.3.15) — the build laptop's
-   r8169 NIC is untrustworthy. LAN SSH: root@192.168.1.1. WAN IP (live):
-   71.61.93.132/23 via DHCP, GW 71.61.92.1, dual-stack (IPv6 delegated
-   2601:547:cb00:3afa::/64). DNS pinned to 1.1.1.1/1.0.0.1 (peerdns=0).
-8. Don't grep dmesg for `-i oops` — matches "ramoops"; use `BUG:|Call trace`.
+Hard-locks 1–5 (mt7915e/WED boot-only load, modules.d argv, pstore/panic
+recovery, power-replug/setsid, WAN-vantage verification) live in the
+project `CLAUDE.md` — that file is the single source of truth, kept there
+so it's cheap insurance re-read every message. Don't fork a second copy
+here. Supplementary detail not in CLAUDE.md:
+
+1. Netconsole is broken on this stack (netpoll drops pre-ndo; beads bug).
+2. LAN SSH: root@192.168.1.1. WAN IP (live): 71.61.93.132/23 via DHCP, GW
+   71.61.92.1, dual-stack (IPv6 delegated 2601:547:cb00:3afa::/64). DNS
+   pinned to 1.1.1.1/1.0.0.1 (peerdns=0).
+3. Don't grep dmesg for `-i oops` — matches "ramoops"; use `BUG:|Call trace`.
 
 ## Live state snapshot (2026-07-05 probe — 11h39m uptime)
 
