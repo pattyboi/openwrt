@@ -87,7 +87,7 @@ tools-$(if $(CONFIG_BUILD_ALL_HOST_TOOLS)$(CONFIG_USES_MINOR),y) += yafut
 tools-$(if $(CONFIG_BUILD_ALL_HOST_TOOLS)$(CONFIG_USE_SPARSE),y) += sparse
 tools-$(if $(CONFIG_BUILD_ALL_HOST_TOOLS)$(CONFIG_USE_LLVM_BUILD),y) += llvm-bpf
 tools-$(if $(CONFIG_BUILD_ALL_HOST_TOOLS)$(CONFIG_USE_MOLD),y) += mold
-tools-$(if $(GOOGLE_CLANG),y) += google-clang20
+tools-$(if $(filter 1,$(GOOGLE_CLANG)),y) += google-clang20
 
 # builddir dependencies
 $(curdir)/autoconf/compile := $(curdir)/m4/compile
