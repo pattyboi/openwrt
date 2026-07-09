@@ -1,0 +1,49 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] lib: umash: add umash_params_init_random() helper
+
+The nft_set_hash.c UMASH call site (999-umash-03) hand-rolls a
+get_random_bytes()+umash_params_prepare() retry loop for its
+DO_ONCE-guarded lazy init. The next three call sites (inet/inet6
+established-hash, UDP portaddr hash) all want the exact same thing,
+so pull it into a header-only inline helper instead of copy-pasting
+the loop a fourth time.
+
+DO_ONCE() itself still lives at each call site (it needs its own
+static key + "done" flag per site), this just removes the boilerplate
+of what runs the first time.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/include/linux/umash.h
++++ b/include/linux/umash.h
+@@ -28,6 +28,7 @@
+ #define _LINUX_UMASH_H
+
+ #include <linux/types.h>
++#include <linux/random.h>
+
+ enum { UMASH_OH_PARAM_COUNT = 32, UMASH_OH_TWISTING_COUNT = 2 };
+
+@@ -66,4 +67,22 @@ bool umash_params_prepare(struct umash_params *params);
+  */
+ u64 umash_full(const struct umash_params *params, u64 seed, const void *data, size_t n_bytes);
+
++/*
++ * Convenience helper for call sites that just want a randomly-keyed
++ * umash_params with no special handling: retries until
++ * umash_params_prepare() accepts the random bytes (astronomically
++ * unlikely to loop more than once). Pair with DO_ONCE() at each call
++ * site for lazy, thread/interrupt-safe, exactly-once init:
++ *
++ *   static struct umash_params __read_mostly my_params;
++ *   ...
++ *   DO_ONCE(umash_params_init_random, &my_params);
++ */
++static inline void umash_params_init_random(struct umash_params *params)
++{
++	do {
++		get_random_bytes(params, sizeof(*params));
++	} while (!umash_params_prepare(params));
++}
++
+ #endif /* _LINUX_UMASH_H */

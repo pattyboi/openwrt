@@ -1,0 +1,91 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] netfilter: nft_set_hash: use UMASH for the rhashtable key hash
+
+nft_rhash_key()/nft_rhash_obj() use plain seeded jhash() -- the same
+category of hash as the flow-offload tuple hash already swapped to
+xxh32 in 999-ppe-92 (seeded, non-cryptographic, no proven collision
+bound). UMASH is a strict upgrade at this call site: same DoS posture
+(the params struct is as unpredictable to a remote peer as the
+rhashtable seed already is) plus a proven collision bound jhash
+doesn't have.
+
+This is scoped to nft_set_hash.c only for now. nf_conntrack_core.c's
+hash_conntrack_raw() uses full keyed siphash(), not jhash/hsiphash,
+and runs on essentially every non-offloaded packet in softirq
+context; IPv6 tuples (~40B) would take UMASH's PMULL/NEON path on
+every lookup. That needs iperf3-class before/after numbers on real
+hardware before touching it, not just a boot test, so it is left on
+siphash.
+
+Falls back to the original jhash() when CONFIG_UMASH is unset (e.g.
+non-arm64 mediatek subtargets), so this is a no-op everywhere except
+where lib/umash.c is actually built and enabled (E8450 seed config).
+The umash_params key is generated once, lazily, on first hash-type
+set creation (control path, via DO_ONCE + get_random_bytes() +
+umash_params_prepare()), shared by all nft rhash sets in the system.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/net/netfilter/nft_set_hash.c
++++ b/net/netfilter/nft_set_hash.c
+@@ -11,6 +11,11 @@
+ #include <linux/list.h>
+ #include <linux/log2.h>
+ #include <linux/jhash.h>
++#ifdef CONFIG_UMASH
++#include <linux/umash.h>
++#include <linux/once.h>
++#include <linux/random.h>
++#endif
+ #include <linux/netlink.h>
+ #include <linux/workqueue.h>
+ #include <linux/rhashtable.h>
+@@ -41,18 +46,37 @@ struct nft_rhash_cmp_arg {
+ 	u64				tstamp;
+ };
+
++#ifdef CONFIG_UMASH
++static struct umash_params nft_rhash_umash_params __read_mostly;
++
++static void nft_rhash_umash_params_init(void)
++{
++	do {
++		get_random_bytes(&nft_rhash_umash_params, sizeof(nft_rhash_umash_params));
++	} while (!umash_params_prepare(&nft_rhash_umash_params));
++}
++#endif
++
+ static inline u32 nft_rhash_key(const void *data, u32 len, u32 seed)
+ {
+ 	const struct nft_rhash_cmp_arg *arg = data;
+
++#ifdef CONFIG_UMASH
++	return (u32)umash_full(&nft_rhash_umash_params, seed, arg->key, len);
++#else
+ 	return jhash(arg->key, len, seed);
++#endif
+ }
+
+ static inline u32 nft_rhash_obj(const void *data, u32 len, u32 seed)
+ {
+ 	const struct nft_rhash_elem *he = data;
+
++#ifdef CONFIG_UMASH
++	return (u32)umash_full(&nft_rhash_umash_params, seed, nft_set_ext_key(&he->ext), len);
++#else
+ 	return jhash(nft_set_ext_key(&he->ext), len, seed);
++#endif
+ }
+
+ static inline int nft_rhash_cmp(struct rhashtable_compare_arg *arg,
+@@ -427,6 +451,10 @@ static int nft_rhash_init(const struct nft_set *set,
+
+ 	BUILD_BUG_ON(offsetof(struct nft_rhash_elem, priv) != 0);
+
++#ifdef CONFIG_UMASH
++	DO_ONCE(nft_rhash_umash_params_init);
++#endif
++
+ 	params.nelem_hint = desc->size ?: NFT_RHASH_ELEMENT_HINT;
+ 	params.key_len	  = set->klen;
+

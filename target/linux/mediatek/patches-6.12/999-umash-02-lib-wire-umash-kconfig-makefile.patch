@@ -1,0 +1,47 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] lib: wire up CONFIG_UMASH
+
+Kconfig/Makefile plumbing for lib/umash.c: a bool gated to ARM64,
+since the PMULL fast path has no software fallback. No special
+CFLAGS are needed for lib/umash.o -- see 999-umash-01's commit
+message for why its PMULL inline asm works fine under the kernel's
+default -mgeneral-regs-only.
+
+Unlike CONFIG_XXHASH (a promptless `bool`/`tristate` with no prompt
+string, only ever turned on via `select` from another symbol),
+CONFIG_UMASH gets an actual prompt. A promptless symbol can only be
+enabled via `select`; Kconfig's syncconfig silently drops a raw
+CONFIG_FOO=y line for one when merging a config fragment, since there
+is no user-facing choice to record a value against. Confirmed this
+the hard way: a first real build had CONFIG_UMASH=y sitting correctly
+in the merged .config.set/.config.target, and it still vanished from
+the final .config, so lib/umash.o never got built. Nothing in this
+series selects UMASH from elsewhere, so it needs the prompt to be
+directly settable from the mt7622 subtarget config-6.12 the way the
+line was always intended to work.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@ -279,6 +279,10 @@ config CRC8
+ config XXHASH
+ 	tristate
+
++config UMASH
++	bool "UMASH hash function (arm64/PMULL)"
++	depends on ARM64
++
+ config AUDIT_GENERIC
+ 	bool
+ 	depends on AUDIT && !AUDIT_ARCH
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -165,6 +165,7 @@ obj-$(CONFIG_CRC4)	+= crc4.o
+ obj-$(CONFIG_CRC7)	+= crc7.o
+ obj-$(CONFIG_LIBCRC32C)	+= libcrc32c.o
+ obj-$(CONFIG_CRC8)	+= crc8.o
++obj-$(CONFIG_UMASH)	+= umash.o
+ obj-$(CONFIG_CRC64_ROCKSOFT) += crc64-rocksoft.o
+ obj-$(CONFIG_XXHASH)	+= xxhash.o
+ obj-$(CONFIG_GENERIC_ALLOCATOR) += genalloc.o

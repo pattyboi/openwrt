@@ -1,0 +1,504 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] lib: add UMASH, a hash with a proven collision bound (arm64/PMULL)
+
+Port of UMASH (backtrace-labs/umash, MIT) as a faster, provably
+DoS-resistant alternative to jhash at packet-input-exposed hashtable
+call sites. UMASH provides a proven collision probability of
+ceil(s/2048) * 2^-56 for any two distinct inputs of at most s bytes
+(a mathematical proof, not an empirical claim); jhash has no such
+bound.
+
+This is a trimmed, single-target port, not a drop-in of the upstream
+library:
+ - arm64 + ARMv8 Crypto Extension (PMULL64) only. MT7622 (Cortex-A53)
+   confirms pmull in /proc/cpuinfo, so no software fallback is
+   implemented; CONFIG_UMASH depends on ARM64 and callers must keep a
+   non-UMASH fallback for builds where it is unset.
+ - only the one-shot umash_full() entry point (upstream's "which=0"
+   function). No x86 CLMUL path, no incremental sink, no
+   fingerprinting, no Salsa20 parameter derivation (umash_params_derive)
+   -- callers seed umash_params with get_random_bytes() +
+   umash_params_prepare() instead.
+ - <arm_neon.h> intrinsics are replaced with a local `struct v128` and
+   a PMULL inline-asm helper using a local ".arch_extension aes"
+   directive (the same technique arch/arm64/include/asm/atomic_lse.h
+   uses for LSE atomics), so the file does not need a bumped -march
+   and, verified against the generated object code, compiles cleanly
+   under the kernel's default -mgeneral-regs-only: that flag only
+   stops the compiler's own codegen from touching FP/SIMD registers,
+   it does not restrict raw inline-asm register names. No special
+   lib/Makefile CFLAGS are needed as a result.
+
+NEON/FPSIMD handling: UMASH only touches PMULL for inputs > 16 bytes
+(the OH block-compression path); inputs of 16 bytes or fewer are pure
+integer arithmetic. umash_full() wraps the >16-byte path in
+kernel_neon_begin()/kernel_neon_end() itself so call sites never have
+to reason about NEON context, including softirq/hardirq callers
+(kernel_neon_begin() is valid outside NMI context on arm64).
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- /dev/null
++++ b/lib/umash.c
+@@ -0,0 +1,389 @@
++// SPDX-License-Identifier: MIT
++/*
++ * umash.c - kernel port of UMASH (https://github.com/backtrace-labs/umash).
++ *
++ * Original implementation:
++ *   Copyright 2020-2022 Backtrace I/O, Inc.
++ *   Copyright 2022 Paul Khuong, Dougall Johnson
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included
++ * in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ *
++ * This file is a trimmed, arm64+PMULL-only port: see umash.h for what
++ * was dropped and why. Ported by hand from upstream umash.c; the modular
++ * arithmetic, OH block compression and short/medium/long dispatch below
++ * follow the upstream algorithm exactly, just re-typed to kernel u64/u32
++ * and with the vector ops reimplemented on top of a local v128 struct
++ * instead of <arm_neon.h> intrinsics (see v128_clmul()).
++ */
++#include <linux/umash.h>
++#include <linux/kernel.h>
++#include <linux/export.h>
++#include <linux/overflow.h>
++#include <linux/string.h>
++#include <asm/neon.h>
++
++#define BLOCK_SIZE (sizeof(u64) * UMASH_OH_PARAM_COUNT)
++
++struct umash_oh {
++	u64 bits[2];
++};
++
++/*
++ * Minimal 128-bit lane pair, memory-compatible with a little-endian
++ * 16-byte load: lo is the first 8 bytes, hi the next 8. This replaces
++ * upstream's <arm_neon.h> uint64x2_t; we only ever need XOR, a 1-bit
++ * shift, and the PMULL cross product below, so there is no need to
++ * expose an actual NEON-typed C value to the compiler.
++ */
++struct v128 {
++	u64 lo, hi;
++};
++
++static inline struct v128 v128_zero(void)
++{
++	return (struct v128){ 0, 0 };
++}
++
++static inline struct v128 v128_xor(struct v128 a, struct v128 b)
++{
++	return (struct v128){ a.lo ^ b.lo, a.hi ^ b.hi };
++}
++
++/*
++ * 64x64->128 carryless multiply via the ARMv8 Crypto Extension PMULL
++ * instruction. The `.arch_extension aes` directive enables PMULL for
++ * just this asm block regardless of the compilation unit's baseline
++ * -march (same technique arch/arm64/include/asm/atomic_lse.h uses for
++ * LSE atomics). The v0/v1 clobbers are plain inline-asm register
++ * names, not compiler-managed vector operands, so they are legal even
++ * when this translation unit is compiled with the kernel's default
++ * -mgeneral-regs-only (verified against the object code: that flag
++ * only stops the compiler's own codegen from touching FP/SIMD
++ * registers, it does not restrict raw asm). Must only be reached with
++ * NEON context live, i.e. between kernel_neon_begin() and
++ * kernel_neon_end().
++ */
++static inline struct v128 v128_clmul(u64 x, u64 y)
++{
++	u64 lo, hi;
++
++	asm volatile(".arch_extension aes\n\t"
++		     "fmov d0, %2\n\t"
++		     "fmov d1, %3\n\t"
++		     "pmull v0.1q, v0.1d, v1.1d\n\t"
++		     "fmov %0, d0\n\t"
++		     "fmov %1, v0.d[1]\n\t"
++		     : "=r"(lo), "=r"(hi)
++		     : "r"(x), "r"(y)
++		     : "v0", "v1");
++
++	return (struct v128){ lo, hi };
++}
++
++/* clmul of x's own low and high 64-bit halves. */
++static inline struct v128 v128_clmul_cross(struct v128 x)
++{
++	return v128_clmul(x.lo, x.hi);
++}
++
++/*
++ * Modular arithmetic mod 2**61 - 1, and the Horner update, straight
++ * from upstream: __uint128_t is available in kernel GCC/Clang on all
++ * 64-bit targets, so the portable mul128() is all we need here (arm64
++ * has no equivalent of upstream's x86 mul128 inline-asm fast path).
++ */
++static inline void mul128(u64 x, u64 y, u64 *hi, u64 *lo)
++{
++	unsigned __int128 product = (unsigned __int128)x * y;
++
++	*hi = product >> 64;
++	*lo = product;
++}
++
++static inline u64 add_mod_fast(u64 x, u64 y)
++{
++	u64 sum;
++
++	/* If `sum` overflows, `sum + 8` does not. */
++	return check_add_overflow(x, y, &sum) ? sum + 8 : sum;
++}
++
++static u64 add_mod_slow_slow_path(u64 sum, u64 fixup)
++{
++	sum = (sum >= (u64)-8) ? sum + 8 : sum;
++	sum += fixup;
++	sum = (sum >= (u64)-8) ? sum + 8 : sum;
++	return sum;
++}
++
++static inline u64 add_mod_slow(u64 x, u64 y)
++{
++	u64 sum;
++	u64 fixup = 0;
++
++	if (check_add_overflow(x, y, &sum))
++		fixup = 8;
++
++	if (likely(sum < (u64)-16))
++		return sum + fixup;
++
++	return add_mod_slow_slow_path(sum, fixup);
++}
++
++static inline u64 mul_mod_fast(u64 m, u64 x)
++{
++	u64 hi, lo;
++
++	mul128(m, x, &hi, &lo);
++	return add_mod_fast(lo, 8 * hi);
++}
++
++static inline u64 horner_double_update(u64 acc, u64 m0, u64 m1, u64 x, u64 y)
++{
++	acc = add_mod_fast(acc, x);
++	return add_mod_slow(mul_mod_fast(m0, acc), mul_mod_fast(m1, y));
++}
++
++/*
++ * OH block compression (PMULL path, >16-byte inputs only). Ported
++ * verbatim from upstream oh_varblock(), retyped onto struct v128.
++ */
++static struct umash_oh oh_varblock(const u64 *params, u64 tag, const void *block, size_t n_bytes)
++{
++	struct umash_oh ret;
++	struct v128 acc = v128_zero();
++	size_t remaining = 1 + ((n_bytes - 1) % sizeof(struct v128));
++	size_t end_full_pairs = (n_bytes - remaining) / sizeof(u64);
++	const void *last_ptr = (const char *)block + n_bytes - sizeof(struct v128);
++	size_t i;
++
++	for (i = 0; i < end_full_pairs; i += 2) {
++		struct v128 x, k;
++
++		memcpy(&x, block, sizeof(x));
++		block = (const char *)block + sizeof(x);
++
++		memcpy(&k, &params[i], sizeof(k));
++		x = v128_xor(x, k);
++		acc = v128_xor(acc, v128_clmul_cross(x));
++	}
++
++	memcpy(&ret, &acc, sizeof(ret));
++
++	{
++		u64 x, y, enh_hi, enh_lo;
++
++		memcpy(&x, last_ptr, sizeof(x));
++		last_ptr = (const char *)last_ptr + sizeof(x);
++		memcpy(&y, last_ptr, sizeof(y));
++
++		x += params[i];
++		y += params[i + 1];
++		mul128(x, y, &enh_hi, &enh_lo);
++		enh_hi += tag;
++
++		ret.bits[0] ^= enh_lo;
++		ret.bits[1] ^= enh_hi ^ enh_lo;
++	}
++
++	return ret;
++}
++
++/* Short UMASH (<= 8 bytes): pure integer, no NEON. */
++static inline u64 vec_to_u64(const void *data, size_t n_bytes)
++{
++	static const char zeros[2] = { 0 };
++	u32 hi, lo;
++
++	if (likely(n_bytes >= sizeof(lo))) {
++		memcpy(&lo, data, sizeof(lo));
++		memcpy(&hi, (const char *)data + n_bytes - sizeof(hi), sizeof(hi));
++	} else {
++		u16 word;
++		u8 byte;
++
++		memcpy(&byte, (n_bytes & 1) ? data : zeros, 1);
++		lo = byte;
++
++		memcpy(&word, (n_bytes & 2) ? (const char *)data + n_bytes - 2 : zeros, 2);
++		hi = word;
++	}
++
++	/* Mix `hi` with the `lo` bits: SplitMix64 has trouble with the top 4 bits. */
++	return ((u64)hi << 32) | (lo + hi);
++}
++
++static u64 umash_short(const u64 *params, u64 seed, const void *data, size_t n_bytes)
++{
++	u64 h;
++
++	seed += params[n_bytes];
++	h = vec_to_u64(data, n_bytes);
++	h ^= h >> 30;
++	h *= 0xbf58476d1ce4e5b9ULL;
++	h = (h ^ seed) ^ (h >> 27);
++	h *= 0x94d049bb133111ebULL;
++	h ^= h >> 31;
++	return h;
++}
++
++static inline u64 rotl64(u64 x, int n)
++{
++	return (x << n) | (x >> (64 - n));
++}
++
++static inline u64 finalize(u64 x)
++{
++	return (x ^ rotl64(x, 8)) ^ rotl64(x, 33);
++}
++
++/* Medium UMASH (9-16 bytes): pure integer, no NEON. */
++static u64 umash_medium(const u64 *multipliers, const u64 *oh, u64 seed,
++			 const void *data, size_t n_bytes)
++{
++	u64 enh_hi, enh_lo;
++	u64 x, y;
++
++	memcpy(&x, data, sizeof(x));
++	memcpy(&y, (const char *)data + n_bytes - sizeof(y), sizeof(y));
++	x += oh[0];
++	y += oh[1];
++
++	mul128(x, y, &enh_hi, &enh_lo);
++	enh_hi += seed ^ n_bytes;
++
++	enh_hi ^= enh_lo;
++	return finalize(horner_double_update(/*acc=*/0, multipliers[0], multipliers[1], enh_lo, enh_hi));
++}
++
++/* Long UMASH (>16 bytes): drives oh_varblock(), needs NEON context. */
++static u64 umash_long(const u64 *multipliers, const u64 *oh, u64 seed, const void *data,
++		       size_t n_bytes)
++{
++	u64 acc = 0;
++
++	while (n_bytes > BLOCK_SIZE) {
++		struct umash_oh compressed;
++
++		compressed = oh_varblock(oh, seed, data, BLOCK_SIZE);
++		data = (const char *)data + BLOCK_SIZE;
++		n_bytes -= BLOCK_SIZE;
++
++		acc = horner_double_update(acc, multipliers[0], multipliers[1], compressed.bits[0],
++					    compressed.bits[1]);
++	}
++
++	{
++		struct umash_oh compressed;
++
++		seed ^= (u8)n_bytes;
++		compressed = oh_varblock(oh, seed, data, n_bytes);
++		acc = horner_double_update(acc, multipliers[0], multipliers[1], compressed.bits[0],
++					    compressed.bits[1]);
++	}
++
++	return finalize(acc);
++}
++
++static u64 umash_long_neon(const u64 *multipliers, const u64 *oh, u64 seed,
++			    const void *data, size_t n_bytes)
++{
++	u64 ret;
++
++	kernel_neon_begin();
++	ret = umash_long(multipliers, oh, seed, data, n_bytes);
++	kernel_neon_end();
++	return ret;
++}
++
++u64 umash_full(const struct umash_params *params, u64 seed, const void *data, size_t n_bytes)
++{
++	if (n_bytes <= sizeof(u64))
++		return umash_short(params->oh, seed, data, n_bytes);
++
++	if (n_bytes <= sizeof(struct v128))
++		return umash_medium(params->poly[0], params->oh, seed, data, n_bytes);
++
++	return umash_long_neon(params->poly[0], params->oh, seed, data, n_bytes);
++}
++EXPORT_SYMBOL_GPL(umash_full);
++
++static bool value_is_repeated(const u64 *values, size_t n, u64 needle)
++{
++	size_t i;
++
++	for (i = 0; i < n; i++) {
++		if (values[i] == needle)
++			return true;
++	}
++
++	return false;
++}
++
++bool umash_params_prepare(struct umash_params *params)
++{
++	static const u64 modulo = (1UL << 61) - 1;
++	/*
++	 * The polynomial parameters have two redundant fields (for the
++	 * pre-squared multipliers). Use them as our source of extra
++	 * entropy if rejection sampling needs another candidate.
++	 */
++	u64 buf[] = { params->poly[0][0], params->poly[1][0] };
++	size_t buf_idx = 0;
++	size_t i;
++
++#define GET_RANDOM(DST)                                 \
++	do {                                             \
++		if (buf_idx >= ARRAY_SIZE(buf))          \
++			return false;                    \
++		(DST) = buf[buf_idx++];                  \
++	} while (0)
++
++	/* Check the polynomial multipliers: we don't want 0s. */
++	for (i = 0; i < ARRAY_SIZE(params->poly); i++) {
++		u64 f = params->poly[i][1];
++
++		while (true) {
++			/*
++			 * Zero out bits and use rejection sampling to
++			 * guarantee uniformity.
++			 */
++			f &= (1UL << 61) - 1;
++			if (f != 0 && f < modulo)
++				break;
++
++			GET_RANDOM(f);
++		}
++
++		/* We can work in 2**64 - 8 and reduce after the fact. */
++		params->poly[i][0] = mul_mod_fast(f, f) % modulo;
++		params->poly[i][1] = f;
++	}
++
++	/* Avoid repeated OH noise values. */
++	for (i = 0; i < ARRAY_SIZE(params->oh); i++) {
++		while (value_is_repeated(params->oh, i, params->oh[i]))
++			GET_RANDOM(params->oh[i]);
++	}
++
++#undef GET_RANDOM
++	return true;
++}
++EXPORT_SYMBOL_GPL(umash_params_prepare);
+--- /dev/null
++++ b/include/linux/umash.h
+@@ -0,0 +1,69 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * umash.h - kernel port of UMASH, a hash function with a proven collision
++ * bound: <= ceil(s / 4096) * 2^-56 for any two distinct inputs of at most
++ * s bytes (see https://github.com/backtrace-labs/umash).
++ *
++ * Original implementation:
++ *   Copyright 2020-2022 Backtrace I/O, Inc.
++ *   Copyright 2022 Paul Khuong, Dougall Johnson
++ * MIT licensed, ported into the kernel tree for use at
++ * packet-input-exposed hashtable call sites in place of hsiphash/jhash.
++ *
++ * This port only implements the one-shot umash_full() entry point
++ * (which=0 in upstream terms) on arm64 with the ARMv8 Crypto Extension
++ * (PMULL64). There is no portable/software fallback and no x86 CLMUL,
++ * incremental-sink, or fingerprinting support: this is a trimmed,
++ * single-target port, not a drop-in of the upstream library. Callers
++ * must guard call sites with #ifdef CONFIG_UMASH and keep the original
++ * hash as a fallback for builds where CONFIG_UMASH is not set.
++ *
++ * Inputs longer than 16 bytes go through the PMULL-based OH block
++ * compression and therefore need NEON/FPSIMD registers; umash_full()
++ * wraps that path in kernel_neon_begin()/kernel_neon_end() itself, so
++ * callers do not need to manage NEON context. Inputs of 16 bytes or
++ * fewer are pure integer arithmetic and never touch NEON state.
++ */
++#ifndef _LINUX_UMASH_H
++#define _LINUX_UMASH_H
++
++#include <linux/types.h>
++
++enum { UMASH_OH_PARAM_COUNT = 32, UMASH_OH_TWISTING_COUNT = 2 };
++
++/*
++ * A umash_params struct holds the key for one UMASH function (the
++ * upstream library's "which=0" function only, in this trimmed port).
++ * Initialise with get_random_bytes() + umash_params_prepare(), e.g.:
++ *
++ *   static struct umash_params my_params __read_mostly;
++ *   ...
++ *   do {
++ *           get_random_bytes(&my_params, sizeof(my_params));
++ *   } while (!umash_params_prepare(&my_params));
++ *
++ * umash_params is 320 bytes: keep it in static/global storage, never
++ * on the stack.
++ */
++struct umash_params {
++	u64 poly[2][2];
++	u64 oh[UMASH_OH_PARAM_COUNT + UMASH_OH_TWISTING_COUNT];
++};
++
++/*
++ * Converts a umash_params struct filled with random bytes into valid
++ * UMASH parameters (key). Returns false on failure (astronomically
++ * unlikely for genuinely random input, and only possible if the RNG
++ * behind get_random_bytes() is broken); retry with fresh random bytes.
++ */
++bool umash_params_prepare(struct umash_params *params);
++
++/*
++ * Computes the UMASH value of data[0 .. n_bytes). seed perturbs the
++ * output but carries no collision-bound guarantee on its own; the
++ * bound comes from params being unpredictable to whoever supplies the
++ * input.
++ */
++u64 umash_full(const struct umash_params *params, u64 seed, const void *data, size_t n_bytes);
++
++#endif /* _LINUX_UMASH_H */
