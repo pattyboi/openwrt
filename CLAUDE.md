@@ -15,8 +15,12 @@ Also run `bd prime` and check `bd remember` memories.
    `pstore check` boots the recovery volume forever (tmpfs root, no wifi).
 4. Fast power-replug (1–2 s) preserves ramoops. `setsid` survives dropbear;
    `nohup &` doesn't. Netconsole is broken (netpoll drops silently).
-5. Verify router life via its WAN (192.168.3.15) — build laptop's r8169 NIC
-   is flaky and caused historical misdiagnoses.
+5. Verify router life from a second, independent path — the build
+   laptop's r8169 NIC is flaky and caused historical misdiagnoses.
+   As of 2026-07-10 the build host sits on the router's LAN: reach it
+   at 192.168.1.1 (br-lan). The old WAN check address (192.168.3.15)
+   is no longer reachable from the build host (WAN is now DHCP
+   upstream).
 
 This is the single source of truth for these hard-locks — the reference
 doc's "Operating rules" section points back here; don't fork a second copy.
@@ -33,12 +37,13 @@ bridged-flow offload, fwmark→queue steering) live and hardware-verified.
 Current status, pending validation, and ranked next directions: see
 reference doc §Software paths — status / §Next-direction candidates.
 
-## Cache line audit task
+## Cache line audit task — CLOSED 2026-07-10
 
-See `docs/cacheline-audit.md` — struct layout audit + reorganization
-patches (999-zzzzzz-cacheline-01 active; -02 staged in patches-staged/),
-flash and perf-verification procedure. Only load it when working on
-that task.
+See `docs/cacheline-audit.md` for the full record (layout survey,
+patches, cycle-1/2 measurements). Patches 999-zzzzzz-cacheline-01/-02
+and 999-zzzzzz-perf-01 (-O2 datapath) are live in `patches-6.12/` and
+stay. Verdict: GbE line rate is not cache-limited on this box; don't
+reopen struct-reorg work unless a workload binds on l1d refills/CPU.
 
 ## UMASH port task
 

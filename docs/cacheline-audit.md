@@ -242,6 +242,123 @@ cacheline-02-*.patch target/linux/mediatek/patches-6.12/`), rebuild
 (`make target/linux/clean && GOOGLE_CLANG=0 ./scripts/build-e8450.sh`),
 flash cycle 2, re-measure.
 
+### Cycle-1 results (2026-07-10, patch 01 + perf-O2 image live)
+
+Flashed and booted clean (squashfs volume, wifi up, no pstore panics,
+17 min soak).  **Caveat:** the pre-flash `-Os`/pre-patch-01 throughput
+baseline was never taken (step 1 skipped — sessions went to build
+work), so cycle 1 has no before/after; the numbers below are the
+reference that **cycle 2 (patch 02) is compared against**.  Note this
+image changed two things at once (cacheline-01 + `-O2` datapath), so
+their individual contributions are not separable.
+
+Setup: iperf3 3.20 server on the router (**must run `iperf3 -s -4`** —
+the default v6 wildcard socket refuses v4 despite `bindv6only=0`; and
+launch under `setsid` or it dies with dropbear).  Client = build host
+on LAN (192.168.1.6 → br-lan 192.168.1.1).  IRQ affinity already
+TX(127)→CPU0, RX(128)→CPU1 as planned.  3× 30 s runs per direction;
+perf window = middle 15 s, system-wide.
+
+| metric | idle | fwd (host→router, RX path) | rev (router→host, TX path) |
+|---|---|---|---|
+| iperf3 Mbps | — | 916 / 923 / 925 | 924 / 925 / 919 |
+| l1d_cache_refill /s | 0.35 M | 7.30 / 7.29 / 7.19 M | 2.47 / 2.57 / 2.41 M |
+| l1d miss rate | 1.41 % | 2.81–2.86 % | 2.64–2.82 % |
+| total CPU (2 cores) | — | 73–76 % | 39–41 % |
+| softirq % | — | ~22.4 % | ~12.4 % |
+
+Both directions saturate GbE with CPU headroom, so **throughput cannot
+show the cycle-2 delta — compare `l1d_cache_refill`/s and CPU% at the
+same (line-rate) offered load instead.**  The RX-terminated direction
+is the sensitive one (3× the refill rate of TX).
+
+CCI-400 PMU: **not registered** — `perf list` has no cci events;
+`CONFIG_ARM_CCI400_PMU` is not enabled.  Enable it in the cycle-2
+kernel config to get direct snoop/coherency counters for the
+mtk_tx_ring writer-split verdict.
+
+### Cycle-2 results (2026-07-10, patch 02 + CCI400-PMU image live)
+
+Flashed 16:24, booted clean (pstore: console-ramoops only), iperf3 3.20
+reinstalled via apk (sysupgrade drops post-flash packages — remember
+this every cycle).  Same methodology as cycle 1: 3× 30 s per direction,
+system-wide perf over the middle 15 s, IRQ affinity confirmed
+TX(127)→CPU0 / RX(128)→CPU1.
+
+| metric | idle | fwd (RX path) | rev (TX path) |
+|---|---|---|---|
+| iperf3 Mbps | — | 934 / 930 / 935 | 915 / 923 / 920 |
+| l1d_cache_refill /s | 0.38 M | 7.07 / 7.15 / 6.94 M | 2.57 / 2.68 / 2.33 M |
+| l1d miss rate | 1.49 % | 2.78–2.87 % | 2.61–2.71 % |
+| total CPU (2 cores) | 7.7 % | 73.1–76.6 % | 37.1–43.2 % |
+| softirq % | — | 23.0–25.1 % | 12.7–13.1 % |
+
+**Verdict: no measurable effect from patch 02.**  The TX path it
+targets (rev) is flat vs cycle 1 (mean 2.53 M refills/s vs 2.48; run
+spread ±7 % swamps the delta).  fwd mean is ~3 % lower (7.05 vs
+7.26 M/s) at ~1 % higher Mbps — borderline, within run-to-run spread.
+CPU% and softirq% unchanged in both directions.  The patch is
+theoretically sound and costs nothing, but at GbE line rate with this
+much CPU headroom the writer-split does not move any counter.
+
+CCI-400 snoop data (new): `si_r_data_last_hs_snoop` ≈ **9 K/15 s fwd,
+1 K/15 s rev, single source port, zero on all others** — i.e. reads
+served by snooping another master's cache are ~3 orders of magnitude
+below the l1d refill rate.  DMA↔CPU coherency traffic through CCI is
+not a mechanism here; false-sharing effects are intra-cluster (SCU),
+so the CCI PMU won't arbitrate future cacheline verdicts.  (Side
+observation: with the 6-event multiplexed CCI group counting,
+throughput dropped to ~820–835 Mbps — PMU multiplexing overhead is
+visible; don't leave CCI groups counting during throughput numbers.)
+
+Conclusion for the audit: **line-rate GbE on this box is not
+cache-limited enough for further struct reorgs to show up.**  Keep
+patches 01/02 (no cost, cleaner layout, static_asserts guard the
+hw-format structs); stop pursuing residual candidates unless a
+workload appears where refills/CPU actually bind (e.g. >GbE via WED
+paths or many-flow softpath).
+
+## Closed — MTK hwrng + hw_random core (audited 2026-07-10, no change)
+
+Scope: `drivers/char/hw_random/mtk-rng.c` (CONFIG_HW_RANDOM_MTK=y,
+mt7622 node `rng@1020f000`; the local
+`999-hwrng-mtk-use-device-context-*.patch` is already applied) and the
+hw_random core.  Verdict: **no actionable reorganization** — same class
+as mtk_rx_ring / mtk_wed_device.
+
+- **Concurrency**: false sharing is structurally impossible.  Every
+  read funnels through `reading_mutex` (BUG_ON-enforced in
+  `rng_get_data`), and the only steady-state consumer is the single
+  khwrngd thread (`hwrng_fillfn`); nothing on this box opens
+  /dev/hwrng.  There is never a concurrent reader/writer pair on these
+  structs.
+- **Frequency**: khwrngd blocks in `add_hwgenerator_randomness` until
+  the crng wants reseeding (~60 s cadence), then reads
+  `RNG_BUFFER_SIZE` = SMP_CACHE_BYTES = 64 B.  ~1 call/min vs. the
+  per-packet paths this audit targets.
+- **MMIO-dominated**: each 4-byte word costs a `RNG_CTRL` ready poll
+  (2 µs steps, 60 µs timeout) plus a `RNG_DATA` readl over the slow
+  peripheral bus.  A coherency miss (~100 ns) is 2–3 orders of
+  magnitude under the noise floor.
+
+Layouts (pahole on mtk-rng.o; `hwrng` offsets hand-verified — the
+reduced DWARF shows the embedded hwrng as size 0 / 184 B phantom hole):
+
+- `struct mtk_rng` 208 B, 4 lines: `base`@0, `clk`@8, `rng`@16 (184 B),
+  `dev`@200.  `mtk_rng_read` touches lines 0 (`base`) and 3 (`dev`);
+  moving `dev` next to `base` would save one line-touch per minute —
+  not worth churn.
+- `struct hwrng` 184 B, 3 lines: line 0 = all callbacks + `priv` +
+  `quality` (the runtime-read fields); lines 1–2 = list/kref/works
+  (register/teardown only).  Already the ideal hot/cold order.
+- Core globals: the `.bss` cluster (`current_rng`, `rng_buffer`,
+  `rng_fillbuf`, `cur_rng_set_by_user`, `current_quality`,
+  `data_avail`, `hwrng_fill`) lands in **one** 64 B line at a
+  64-aligned address — one line per fill iteration, mutex-serialized;
+  ideal as-is.  `rng_buffer`/`rng_fillbuf` are separate 64 B kmallocs
+  (line-aligned by the allocator), and the core already sizes them in
+  whole cache lines.
+
 ## Ranked residual candidates (not implemented)
 
 1. mtk_ppe: cacheline-align `foe_check_time` and pull `foe_flow` up

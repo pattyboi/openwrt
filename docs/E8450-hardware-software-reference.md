@@ -100,6 +100,36 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
   CPU1) that had never been committed; now tracked as
   `files/etc/rc.local`.
 - EIP97/crypto SDK patches: no silicon. RSS/HWLRO: netsys v2/v3 caps only.
+- Eth DMA coherency (2026-07-10): already optimal — mt7622.dtsi eth node
+  has `dma-coherent` + `cci-control-port = <&cci_control2>` (ACE port on
+  the CCI-400), and mtk_eth_soc probe writes snoop-enable (0x3) to that
+  port (mtk_eth_soc.c ~5615).  Streaming DMA does **no** per-packet
+  cache maintenance on this box; PCIe (mt7915 DMA) is dma-coherent too.
+  Nothing to gain here.  Measured (2026-07-10, CCI-400 PMU): DMA reads
+  served by CPU-cache snoops ≈ 9 K/15 s at GbE line rate — three orders
+  below the l1d refill rate, confirming coherency traffic is negligible.
+- Cache-line struct audit (2026-07-10): **closed after two flash cycles**
+  — full record in `docs/cacheline-audit.md`.  Patch 01 (mtk_eth
+  hot/cold split) + the `-O2` datapath patch and patch 02 (mtk_tx_ring
+  writer split) are all live in `patches-6.12/`.  Cycle-2 verdict:
+  patch 02 produced no measurable delta (l1d refills, CPU%, softirq%
+  all flat at line rate); GbE with this much CPU headroom is not
+  cache-limited, so residual reorg candidates are shelved unless a
+  refill-bound workload appears.  Patches stay (zero cost, cleaner
+  layout, static_asserts guard hw-format structs).  `CONFIG_ARM_CCI400_PMU`
+  is now enabled in `config-6.12`; note the CCI PMU can't arbitrate
+  intra-cluster false sharing (that's SCU territory) and a multiplexed
+  CCI event group costs ~100 Mbps while counting.
+- Netsys v2/v3 backport audit (2026-07-10): surveyed upstream
+  drivers/net/ethernet/mediatek v6.12..master for v1-applicable WED/PPPQ
+  work — **nothing left to take**. 6.12-LTS already carries the QDMA
+  scheduler fixes (1b661241 token-bucket + SPEED_1000, 6b02eb37 100M
+  queue weight), PPE per-tag-layer MTU init, fill_forward_path RCU fix,
+  TX-queue reset on DMA free; the wed memory-region rework is in-tree
+  as 940–944. Only absences: mtk_ppe_init probe-error rhashtable leak
+  fix + LLC VLAN tx fix — no WED/PPPQ relevance, will arrive via LTS.
+  Everything else v2/v3-era is hardware-gated (WED RX/RRO/AMSDU, WO fw,
+  SRAM rings, v3 rate format).
 - pcie-01..04 SDK: gen3 controller only (MT7622 = gen2 driver).
 - WED filogic patch series: v1 mainline works; revisit wed-03/13/14/16 only
   if SER tests show WDMA hangs.
