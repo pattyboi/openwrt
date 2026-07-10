@@ -1,0 +1,59 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] mediatek: split struct mtk_tx_ring by writer for SMP cache locality
+
+On MT7622 the xmit path and the TX completion NAPI can run on
+different Cortex-A53 cores.  All mtk_tx_ring fields currently share
+cache line 0: the completion core's writes to last_free/last_free_ptr/
+free_count invalidate the line holding the read-mostly dma/buf/phys/
+dma_size/thresh fields and the xmit-owned next_free pointer, forcing a
+coherency miss on nearly every access from the other core.
+
+Regroup into three cache lines: read-mostly ring geometry, the
+xmit-written next_free, and the completion-written group.  free_count
+(written by both sides) is placed with last_free so the xmit path
+touches exactly one shared-dirty line per packet.
+
+sizeof(struct mtk_tx_ring): 80 -> 192 (single instance inside mtk_eth).
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -959,20 +959,33 @@
+  *			are present
+  */
+ struct mtk_tx_ring {
++	/* Read-mostly after init, shared by the xmit and completion CPUs */
+ 	void *dma;
+ 	struct mtk_tx_buf *buf;
+ 	dma_addr_t phys;
+-	struct mtk_tx_dma *next_free;
+-	struct mtk_tx_dma *last_free;
+-	u32 last_free_ptr;
+-	u16 thresh;
+-	atomic_t free_count;
+-	int dma_size;
+ 	struct mtk_tx_dma *dma_pdma;	/* For MT7628/88 PDMA handling */
+ 	dma_addr_t phys_pdma;
++	int dma_size;
++	u16 thresh;
++
++	/* Written from the xmit path only */
++	struct mtk_tx_dma *next_free ____cacheline_aligned_in_smp;
++
++	/* Written from the TX completion path.  free_count is written by
++	 * both sides; it lives here so xmit dirties a single shared line
++	 * (it already reads last_free on every packet).
++	 */
++	struct mtk_tx_dma *last_free ____cacheline_aligned_in_smp;
++	u32 last_free_ptr;
++	atomic_t free_count;
+ 	int cpu_idx;
+ };
+ 
++static_assert(offsetof(struct mtk_tx_ring, next_free) % SMP_CACHE_BYTES == 0,
++	      "mtk_tx_ring: xmit write group must start a cache line");
++static_assert(offsetof(struct mtk_tx_ring, last_free) % SMP_CACHE_BYTES == 0,
++	      "mtk_tx_ring: completion write group must start a cache line");
++
+ /* PDMA rx ring mode */
+ enum mtk_rx_flags {
+ 	MTK_RX_FLAGS_NORMAL = 0,

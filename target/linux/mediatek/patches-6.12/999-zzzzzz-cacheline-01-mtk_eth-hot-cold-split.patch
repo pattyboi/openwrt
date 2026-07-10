@@ -1,0 +1,174 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] mediatek: reorganize struct mtk_eth for cache line locality
+
+Apply the net-next-6.8 cache line methodology (Coco Li / Paolo Abeni)
+to struct mtk_eth on the 2-core Cortex-A53 (64B lines, shared 256K L2):
+
+- Group the read-mostly per-packet fields (base, soc, netdev[], mac[],
+  ppe[], dsa_meta[], state, ...) at the start.  Previously page_lock,
+  tx_irq_lock and rx_irq_lock sat on cache line 0 next to ->base, so
+  every xmit spinlock write and IRQ mask update invalidated the line
+  holding the register base and netdev pointers on the other core.
+- Give the xmit-side page_lock its own cache line.
+- Split the TX-NAPI-written (tx_irq_lock + tx stats + tx_dim) and
+  RX-NAPI-written (rx_irq_lock + rx stats + rx_dim) groups onto their
+  own cache lines.  Previously ->soc and ->state shared a line with the
+  rx counters, and the rx_dim tail shared a line with the tx counters.
+- Cache-line-align tx_ring, tx_napi and rx_napi so ring/napi state
+  written by one core does not share a line with neighbouring fields.
+- Move init/control-path-only fields to the tail.
+
+Also add static_asserts guarding the grouping, and hardware-format
+asserts on the FOE entry structs, whose layout is consumed by the PPE
+hardware and must never be reordered.
+
+sizeof(struct mtk_eth): 3072 -> 3328 (one instance per device).
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1359,16 +1359,50 @@
+  */
+ 
+ struct mtk_eth {
++	/* Read-mostly fields used by the per-packet datapath (xmit and
++	 * both NAPI pollers, potentially on different CPUs).  Keep them
++	 * together and keep fast-path-written fields off these lines.
++	 */
+ 	struct device			*dev;
+ 	struct device			*dma_dev;
+ 	void __iomem			*base;
+ 	void				*sram_base;
+-	spinlock_t			page_lock;
+-	spinlock_t			tx_irq_lock;
+-	spinlock_t			rx_irq_lock;
+ 	struct net_device		*dummy_dev;
+ 	struct net_device		*netdev[MTK_MAX_DEVS];
+ 	struct mtk_mac			*mac[MTK_MAX_DEVS];
++	const struct mtk_soc_data	*soc;
++	struct mtk_ppe			*ppe[3];
++	struct metadata_dst		*dsa_meta[MTK_MAX_DSA_PORTS];
++	struct bpf_prog			__rcu *prog;
++	unsigned long			state;
++	int				ip_align;
++	bool				hwlro;
++	u8				qos_toggle;
++
++	/* Written from the xmit path (mtk_tx_map callers) */
++	spinlock_t			page_lock ____cacheline_aligned_in_smp;
++
++	/* Written from the TX interrupt/NAPI side */
++	spinlock_t			tx_irq_lock ____cacheline_aligned_in_smp;
++	u32				tx_events;
++	u32				tx_packets;
++	u32				tx_bytes;
++	struct dim			tx_dim;
++
++	/* Written from the RX interrupt/NAPI side */
++	spinlock_t			rx_irq_lock ____cacheline_aligned_in_smp;
++	u32				rx_events;
++	u32				rx_packets;
++	u32				rx_bytes;
++	struct dim			rx_dim;
++
++	struct mtk_tx_ring		tx_ring ____cacheline_aligned_in_smp;
++	struct mtk_rx_ring		rx_ring[MTK_MAX_RX_RING_NUM];
++	struct mtk_rx_ring		rx_ring_qdma;
++	struct napi_struct		tx_napi ____cacheline_aligned_in_smp;
++	struct napi_struct		rx_napi ____cacheline_aligned_in_smp;
++
++	/* Control/init path only — cache placement does not matter */
+ 	int				irq[3];
+ 	u32				msg_enable;
+ 	unsigned long			sysclk;
+@@ -1376,13 +1410,7 @@
+ 	struct regmap			*infra;
+ 	struct phylink_pcs		*sgmii_pcs[MTK_MAX_DEVS];
+ 	struct regmap			*pctl;
+-	bool				hwlro;
+ 	refcount_t			dma_refcnt;
+-	struct mtk_tx_ring		tx_ring;
+-	struct mtk_rx_ring		rx_ring[MTK_MAX_RX_RING_NUM];
+-	struct mtk_rx_ring		rx_ring_qdma;
+-	struct napi_struct		tx_napi;
+-	struct napi_struct		rx_napi;
+ 	void				*scratch_ring;
+ 	dma_addr_t			phy_scratch_ring;
+ 	void				*scratch_head[MTK_FQ_DMA_HEAD];
+@@ -1391,32 +1419,11 @@
+ 	struct mii_bus			*mii_bus;
+ 	unsigned int			mdc_divider;
+ 	struct work_struct		pending_work;
+-	unsigned long			state;
+-
+-	const struct mtk_soc_data	*soc;
+ 
+ 	spinlock_t			dim_lock;
+ 
+-	u32				rx_events;
+-	u32				rx_packets;
+-	u32				rx_bytes;
+-	struct dim			rx_dim;
+-
+-	u32				tx_events;
+-	u32				tx_packets;
+-	u32				tx_bytes;
+-	struct dim			tx_dim;
+-
+-	int				ip_align;
+-
+-	struct metadata_dst		*dsa_meta[MTK_MAX_DSA_PORTS];
+-
+-	u8				qos_toggle;
+-	struct mtk_ppe			*ppe[3];
+ 	struct rhashtable		flow_table;
+ 
+-	struct bpf_prog			__rcu *prog;
+-
+ 	struct {
+ 		struct delayed_work monitor_work;
+ 		u32 wdidx;
+@@ -1426,6 +1433,20 @@
+ 	} reset;
+ };
+ 
++/* Guard the cache-line grouping above: each fast-path-written group
++ * must start on its own cache line so it cannot invalidate the
++ * read-mostly lines shared by both CPUs.
++ */
++static_assert(offsetof(struct mtk_eth, page_lock) % SMP_CACHE_BYTES == 0,
++	      "mtk_eth: page_lock must start a cache line");
++static_assert(offsetof(struct mtk_eth, tx_irq_lock) % SMP_CACHE_BYTES == 0,
++	      "mtk_eth: TX write group must start a cache line");
++static_assert(offsetof(struct mtk_eth, rx_irq_lock) % SMP_CACHE_BYTES == 0,
++	      "mtk_eth: RX write group must start a cache line");
++static_assert(offsetof(struct mtk_eth, page_lock) >=
++	      offsetof(struct mtk_eth, qos_toggle) + sizeof(u8),
++	      "mtk_eth: read-mostly group must precede write groups");
++
+ /* struct mtk_mac -	the structure that holds the info about the MACs of the
+  *			SoC
+  * @id:			The number of the MAC
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.h
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.h
+@@ -249,6 +249,21 @@
+ 	};
+ };
+ 
++/* The FOE entry layout is consumed directly by the PPE hardware (the
++ * table is handed to it via MTK_PPE_TB_BASE).  Field offsets are part
++ * of the hardware interface and must never be reordered.  MT7622 (v1)
++ * uses 80-byte entries, so consecutive entries straddle cache lines by
++ * design; that cannot be fixed in software.
++ */
++static_assert(sizeof(struct mtk_foe_entry) == MTK_FOE_ENTRY_V3_SIZE,
++	      "mtk_foe_entry is a hardware DMA format");
++static_assert(offsetof(struct mtk_foe_ipv4, ib2) == 12,
++	      "mtk_foe_ipv4 is a hardware DMA format");
++static_assert(offsetof(struct mtk_foe_ipv6, ib2) == 52,
++	      "mtk_foe_ipv6 is a hardware DMA format");
++static_assert(offsetof(struct mtk_foe_bridge, ib2) == 16,
++	      "mtk_foe_bridge is a hardware DMA format");
++
+ enum {
+ 	MTK_PPE_CPU_REASON_TTL_EXCEEDED			= 0x02,
+ 	MTK_PPE_CPU_REASON_OPTION_HEADER		= 0x03,
