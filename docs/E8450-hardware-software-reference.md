@@ -35,7 +35,7 @@ Updated 2026-07-09 (live-router probe, packet-steering validation) on
 | WAN→WLAN fwd | PPE → WDMA → **WED v1** → mt7915 | validated (counters + MIB) |
 | Bridged LAN↔WLAN | nft bridging offload (`999-ppe-90/91/89`) | built, boots; helper/procedure added, E2E bind proof still pending |
 | QoS | PPPQ per-port queues + TCP-ACK prio (conntrack builtin) + DSCP learning (ppe-12/17) | validated |
-| Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | built; functional test pending |
+| Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | **validated live** (2026-07-10): BQL per-queue inflight during router-originated iperf3 — unmarked→tx-4 (DSA+3 path), mark 5→tx-5, mark 11→tx-11, mark 200 (≥16, out of range)→tx-4 fallback. Method: temp `nft` table `inet marktest` (route hook output, `meta mark set N`) + `/sys/class/net/eth0/queues/tx-*/byte_queue_limits/inflight` sampling (no tc/ftrace in image; feed kmods don't match self-built kernel). |
 | SW flowtable hash | seeded xxh32 tuple hash (`999-ppe-92`) | flashed; bind verified |
 | IRQ/RPS spread | `network.globals.packet_steering=2` + static hardirq pinning via `files/etc/rc.local` (eth0 RX IRQ→CPU0, eth0 TX IRQ→CPU1, mt7915e/mt7615e IRQs→CPU1) | **validated live** (2026-07-09): NET_RX softirq CPU0 10.8M / CPU1 7.1M (~1.5:1), vs. 5:1 pre-steering. NET_TX skew (~7.9:1) is real but not fixable this way — see Next-direction #6 (closed). |
 | SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | now testable (WED live) |
@@ -140,9 +140,11 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
 
 1. **cpufreq governor A/B** — `ondemand` (437 MHz floor) vs `performance`
    for latency jitter under WED+PPE load.
-2. **Bridged-offload E2E validation** (ppe-90) with two LAN clients, then
-   the eth-27 mark→queue functional check.
-   See `docs/e8450-bridged-offload-validation.md`.
+2. **Bridged-offload E2E validation** (ppe-90) with two LAN clients —
+   needs one wired + one Wi-Fi client on br-lan; procedure in
+   `docs/e8450-bridged-offload-validation.md`. (The eth-27 mark→queue
+   functional check that used to share this slot was **validated
+   2026-07-10** — see Software paths table.)
 3. **WED soak/perf** at real WAN speeds (current upstream hop is ~100 Mbps
    now — worth revisiting for real throughput numbers, was previously
    blocked at ~5 Mbps).
