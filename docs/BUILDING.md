@@ -12,3 +12,11 @@
   `KERNEL_MAGIC_SYSRQ`, `KERNEL_DETECT_HUNG_TASK`,
   `KERNEL_CC_OPTIMIZE_FOR_SIZE` (target config-6.12 cannot override these).
 - Detached builds: `nohup setsid sh -c 'make ... ' &`, log + `BUILD-EXIT=`.
+- Toolchain cache: `./scripts/toolchain-cache.sh save|restore|upload|refresh`
+  tars `staging_dir/host` + `staging_dir/toolchain-*` (~172M zstd) keyed by
+  the tools/ + toolchain/ tree-hash fingerprint, published as a GitHub
+  release asset on tags `toolchain-<date>-<fp>` / `toolchain-latest`
+  (`upload` needs one-time `gh auth login`). After `make dirclean` or a
+  fresh clone at the SAME path, `restore` skips the toolchain rebuild.
+  `refresh` is manual by choice (no cron): run it after bumping anything
+  under tools/ or toolchain/.
