@@ -1,0 +1,39 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: build datapath objects with -O2
+
+This kernel is built with CONFIG_CC_OPTIMIZE_FOR_SIZE (-Os).  On the
+in-order dual Cortex-A53 (MT7622) the datapath hot loops pay for -Os's
+reduced instruction scheduling and unrolling with no OoO window to hide
+it.  Compile the two objects that carry the per-packet CPU path with
+-O2:
+
+- mtk_eth_soc.o: mtk_start_xmit, TX/RX NAPI polls, ring handling
+- mtk_ppe.o: __mtk_ppe_check_skb, FOE entry commit (runs for every
+  unbound/slow-path packet)
+
+mtk_wed.o is deliberately excluded (control/attach/reset only on WED
+v1 — no per-packet software path), as are mtk_ppe_offload.o and the
+debugfs/path objects (per-flow setup and management plane).
+
+Per-object CFLAGS_$@ is appended after KBUILD_CFLAGS, so -O2 overrides
+the global -Os (last flag wins).
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+ drivers/net/ethernet/mediatek/Makefile | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+--- a/drivers/net/ethernet/mediatek/Makefile
++++ b/drivers/net/ethernet/mediatek/Makefile
+@@ -5,6 +5,11 @@
+
+ obj-$(CONFIG_NET_MEDIATEK_SOC) += mtk_eth.o
+ mtk_eth-y := mtk_eth_soc.o mtk_eth_path.o mtk_ppe.o mtk_ppe_debugfs.o mtk_ppe_offload.o
++
++# Per-packet datapath: keep hot objects at -O2 on -Os kernels (in-order
++# A53 can't hide -Os's weaker scheduling in the xmit/NAPI/PPE-check loops)
++CFLAGS_mtk_eth_soc.o += -O2
++CFLAGS_mtk_ppe.o += -O2
+ mtk_eth-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed.o mtk_wed_mcu.o mtk_wed_wo.o
+ ifdef CONFIG_DEBUG_FS
+ mtk_eth-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_debugfs.o
