@@ -1,7 +1,8 @@
 # E8450 / MT7622 — Condensed Hardware & Software-Path Reference
 
-Updated 2026-07-05 (evening, live-router probe) on `e8450-hw-driven`.
-Supersedes scattered notes; raw probes in `.recall/router-probes/`.
+Updated 2026-07-09 (live-router probe, packet-steering validation) on
+`e8450-hw-driven`. Supersedes scattered notes; raw probes in
+`.recall/router-probes/`.
 
 ## Hardware map (verified live)
 
@@ -24,7 +25,7 @@ Supersedes scattered notes; raw probes in `.recall/router-probes/`.
 | Watchdog | `mtk-wdt 10212000` | **cannot recover AXI-fabric hangs** |
 | Serial | ttyS0 console in DT — **no populated UART header** | pstore/ramoops instead |
 | Recovery | u-boot: `pstore check` → boots recovery volume when crash dumps present; reset-button TFTP path exists | see rules below |
-| IRQs | 31 IRQs set 0-1 affinity (both CPUs), 1 on CPU0 only, 1 on CPU1 only; but NET_RX softirq: CPU0 3.3M vs CPU1 618K (5:1 skew). `tc` not installed (no iproute2-tc). Wired clients via lan1 only today; lan2-4 NO-CARRIER | tuning target |
+| IRQs | 31 IRQs set 0-1 affinity (both CPUs). NET_RX softirq skew improved from 5:1 to ~1.5:1 CPU0:CPU1 after enabling `packet_steering` (see Closed investigations). `tc` not installed (no iproute2-tc). |
 
 ## Software paths — status
 
@@ -36,7 +37,7 @@ Supersedes scattered notes; raw probes in `.recall/router-probes/`.
 | QoS | PPPQ per-port queues + TCP-ACK prio (conntrack builtin) + DSCP learning (ppe-12/17) | validated |
 | Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | built; functional test pending |
 | SW flowtable hash | seeded xxh32 tuple hash (`999-ppe-92`) | flashed; bind verified |
-| IRQ/RPS spread | OpenWrt generic `packet_steering` first-boot default added; **preserved/upgraded configs do NOT get it** (uci-default skipped). Fresh-flash required to test. | needs live validation on fresh install |
+| IRQ/RPS spread | `network.globals.packet_steering=2` + static hardirq pinning via `files/etc/rc.local` (eth0 RX IRQ→CPU0, eth0 TX IRQ→CPU1, mt7915e/mt7615e IRQs→CPU1) | **validated live** (2026-07-09): NET_RX softirq CPU0 10.8M / CPU1 7.1M (~1.5:1), vs. 5:1 pre-steering. NET_TX skew (~7.9:1) is real but not fixable this way — see Next-direction #6 (closed). |
 | SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | now testable (WED live) |
 | Debug | WED-AT tracer + `wed_attach_max_access` gate; eth stop/open stage harness; ramoops console+pmsg; sysrq + hung-task detector | all dormant, params default-off |
 
@@ -54,21 +55,23 @@ here. Supplementary detail not in CLAUDE.md:
    pinned to 1.1.1.1/1.0.0.1 (peerdns=0).
 3. Don't grep dmesg for `-i oops` — matches "ramoops"; use `BUG:|Call trace`.
 
-## Live state snapshot (2026-07-05 probe — 11h39m uptime)
+## Live state snapshot (2026-07-09 probe — 4d11h30m uptime)
 
 ```
-Build : OpenWrt 25.12.4 r32933-4ccb782af7, kernel 6.12.87 (GCC 14.3.0)
-CPU   : 2x Cortex-A53 @ 1350 MHz (both at max at probe time)
-RAM   : 501 MB total, 69 MB used, 384 MB free
-Temp  : CPU 60.4°C / mt7615 60°C / mt7915 54°C (light real traffic)
-WAN   : DHCP 71.61.93.132/23, GW 71.61.92.1, IPv6 /128 DHCPv6
-LAN   : 192.168.1.0/24, 10 DHCP leases, lan1 wired up / lan2-4 empty
-Wifi  : wl0 "OpenWrt2" ch1 2.4G 20MHz / wl1 "OpenWrt5" ch36 5G 40MHz (both open)
-WED   : wed_enable=Y; dmesg confirms "attaching wed device 0 version 1"
-Offld : flow_offloading_hw=1; nft flowtable ft with flags offload active
-PPE   : ppe0 debugfs present; conntrack 42 entries / 31744 max
-Traffic: eth0 RX 33.9 GB / TX 13.9 GB; wl1 RX 790 MB / TX 2.0 GB in 11h
-tc    : NOT installed (iproute2-tc not in build)
+Build : OpenWrt 25.12.4 r32933-4ccb782af7, kernel 6.12.87
+CPU   : 2x Cortex-A53 @ 1137 MHz (ondemand, mid-scale under ~100Mbps live load)
+RAM   : 501 MB total, 68 MB used, 385 MB free
+Temp  : CPU 56.6°C (down from 60.4°C — better core balance, see below)
+WAN   : DHCP 71.61.93.132/23, GW 71.61.92.1, up, ~100Mbps active w/ live clients
+LAN   : 192.168.1.0/24, 4 DHCP leases at probe time
+Wifi  : wireless.default_radio0 "OpenWrt2" / default_radio1 "OpenWrt5",
+        encryption=sae-mixed on both (changed from open; SSID names are
+        still OpenWrt defaults, NOT renamed — don't assume otherwise)
+Offld : flow_offloading=1, flow_offloading_hw=1
+PPE   : conntrack 48 entries / 31744 max
+Traffic (cumulative, eth0): RX 307.25 GB / TX 234.10 GB over 4.48 days
+softirqs: NET_RX CPU0 10.85M / CPU1 7.07M (~1.5:1); NET_TX CPU0 236K / CPU1 30K (~7.9:1)
+dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
 ```
 
 ## Closed investigations (do not reopen)
@@ -87,6 +90,15 @@ tc    : NOT installed (iproute2-tc not in build)
   internally. Upstream 2026 SMCC support (`066d65a`) targets MT7981/MT7986/
   MT7987/MT7988 secure-firmware access and is not applicable to MT7622.
 
+- Packet steering validation (2026-07-09): `network.globals.packet_steering`
+  manually set to `2` on the live (preserved-config) router; confirmed via
+  `/proc/softirqs` under real ~100Mbps WAN traffic. NET_RX skew improved
+  from 5:1 to ~1.5:1 CPU0:CPU1. NET_TX stayed skewed ~7.9:1 (steering
+  doesn't touch TX queue affinity — see Next-direction #6, closed
+  not-actionable). The router was also already running a static IRQ
+  affinity script (`/etc/rc.local` — eth0 RX/TX split, wifi IRQs on
+  CPU1) that had never been committed; now tracked as
+  `files/etc/rc.local`.
 - EIP97/crypto SDK patches: no silicon. RSS/HWLRO: netsys v2/v3 caps only.
 - pcie-01..04 SDK: gen3 controller only (MT7622 = gen2 driver).
 - WED filogic patch series: v1 mainline works; revisit wed-03/13/14/16 only
@@ -96,24 +108,34 @@ tc    : NOT installed (iproute2-tc not in build)
 
 ## Next-direction candidates (ranked)
 
-1. **Validate packet steering live** — first-boot default confirmed NOT applied
-   to this preserved config (probe 2026-07-05). Requires fresh sysupgrade
-   (--force-non-upgrade or no keep-settings) to test. Current box has
-   NET_RX skew 5:1 CPU0:CPU1; after enabling, check `/proc/softirqs` for
-   balance.
-2. **cpufreq governor A/B** — `ondemand` (437 MHz floor) vs `performance`
+1. **cpufreq governor A/B** — `ondemand` (437 MHz floor) vs `performance`
    for latency jitter under WED+PPE load.
-3. **Bridged-offload E2E validation** (ppe-90) with two LAN clients, then
+2. **Bridged-offload E2E validation** (ppe-90) with two LAN clients, then
    the eth-27 mark→queue functional check.
    See `docs/e8450-bridged-offload-validation.md`.
-4. **WED soak/perf** at real WAN speeds (current upstream hop is ~5 Mbps —
-   inadequate for throughput numbers).
-5. **SER / `wed_v1_txbm_quiesce` A/B** — the original harness plan, now
+3. **WED soak/perf** at real WAN speeds (current upstream hop is ~100 Mbps
+   now — worth revisiting for real throughput numbers, was previously
+   blocked at ~5 Mbps).
+4. **SER / `wed_v1_txbm_quiesce` A/B** — the original harness plan, now
    unblocked.
-6. Optional upstream reports: runtime-bind WED AXI lock, mt7915e rebind
+5. Optional upstream reports: runtime-bind WED AXI lock, mt7915e rebind
    AXI lock, mt76 SER-during-probe NULL deref (evidence in
    `.recall/router-probes/2026-07-04-firstbind-wed-lock/`).
-7. Housekeeping: real SSIDs/PSKs (currently open "OpenWrt"). Fresh installs
-   now also default firewall4 flow offload + hardware flow offload ON for
-   E8450/RT3200 via `files/etc/uci-defaults/99-e8450-flow-offload`;
-   upgraded/preserved configs keep their existing setting.
+6. ~~NET_TX softirq skew~~ — **closed, not actionable** (2026-07-09): root
+   is `mtk_eth_soc.c`'s custom `ndo_select_queue = mtk_select_queue`
+   (the PPPQ/mark-based QoS queue picker, 999-eth-27), which overrides
+   the stack's generic `netdev_pick_tx()` entirely — `xps_cpus` is
+   inert on this NIC, confirmed by reading the driver. `/etc/rc.local`
+   (now in `files/etc/rc.local`) already pins the TX-side hardirq to
+   CPU1 correctly; the softirq skew is a different, uncorrelated thing
+   — `dev_queue_xmit()` fires on whatever CPU originates the send, which
+   for this router is mostly local/control-plane traffic (hostapd,
+   dnsmasq, dropbear), not the PPE-hardware-offloaded bulk WAN traffic
+   that never touches Linux's TX softirq path at all. Volume confirms
+   it: 266K TX softirq events vs. 17.9M RX over the same 4.5-day window
+   — two orders of magnitude smaller, not worth chasing further via
+   sysfs/rc.local. Would need a change inside `mtk_select_queue()`
+   itself to move the needle, a different scope of change entirely.
+7. Real PSKs — SSIDs/encryption were changed from open to `sae-mixed`
+   (2026-07-09) but SSID names are still the OpenWrt defaults
+   ("OpenWrt2"/"OpenWrt5"), not renamed.
