@@ -1,0 +1,33 @@
+From 496ba79b9496b8b3747cbc764ebd33ee7325e806 Mon Sep 17 00:00:00 2001
+From: Felix Gu <ustc.gu@gmail.com>
+Date: Sun, 10 May 2026 01:55:37 +0800
+Subject: [PATCH] spi: mtk-snfi: Fix resource leak in
+ mtk_snand_read_page_cache()
+
+When the DMA read times out in mtk_snand_read_page_cache(), the code
+jumps to the cleanup label, which skips disabling the ECC engine and
+unmapping the DMA buffer. Besides leaking the mapping, mtk_ecc_disable()
+is what releases the ECC engine mutex taken by mtk_ecc_enable(), so a
+single timeout leaves the mutex held forever and every subsequent page
+read deadlocks.
+
+Jump to cleanup2 instead so the ECC engine is disabled and the buffer
+unmapped (cleanup_dma unmaps on error), matching the other failure
+paths in this function.
+
+Signed-off-by: Felix Gu <ustc.gu@gmail.com>
+---
+ drivers/spi/spi-mtk-snfi.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/drivers/spi/spi-mtk-snfi.c
++++ b/drivers/spi/spi-mtk-snfi.c
+@@ -961,7 +961,7 @@ static int mtk_snand_read_page_cache(str
+ 		    &snf->op_done, usecs_to_jiffies(SNFI_POLL_INTERVAL))) {
+ 		dev_err(snf->dev, "DMA timed out for reading from cache.\n");
+ 		ret = -ETIMEDOUT;
+-		goto cleanup;
++		goto cleanup2;
+ 	}
+
+ 	// Wait for BUS_SEC_CNTR returning expected value

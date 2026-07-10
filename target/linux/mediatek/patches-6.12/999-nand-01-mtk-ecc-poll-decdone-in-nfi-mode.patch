@@ -1,0 +1,90 @@
+From: pat <pat@local>
+Subject: [PATCH] mtd: nand: ecc-mtk: let NFI-mode callers poll DECDONE instead of IRQs
+
+On mt7622 the BCH block has pg_irq_sel = 0, i.e. it raises one decode
+interrupt per 512-byte sector. Together with the SNFI DMA-done
+interrupt that is 5 IRQs per 2 KiB page read (live counters on the
+E8450 show mtk-ecc:mtk-snand at ~4:1).
+
+The SNFI read path already sleeps on the NFI DMA-done interrupt and
+then busy-waits for BUS_SEC_CNTR/MASTERSTA, by which time the pipelined
+decoder has all but finished the last sector. Add an opt-in "polling"
+flag to mtk_ecc_config: when set for an NFI-mode decode, the decode
+IRQs are left disabled and mtk_ecc_wait_done() polls the DECDONE bit of
+the last sector instead - the same condition the IRQ handler checked.
+
+The raw-NAND driver (mtk_nand.c) does not set the flag and keeps its
+IRQ behaviour.
+
+--- a/drivers/mtd/nand/ecc-mtk.c
++++ b/drivers/mtd/nand/ecc-mtk.c
+@@ -63,6 +63,7 @@ struct mtk_ecc {
+ 	struct completion done;
+ 	struct mutex lock;
+ 	u32 sectors;
++	bool dec_polling;
+
+ 	u8 *eccdata;
+ };
+@@ -320,7 +321,16 @@ int mtk_ecc_enable(struct mtk_ecc *ecc,
+ 		return ret;
+ 	}
+
+-	if (config->mode != ECC_NFI_MODE || op != ECC_ENCODE) {
++	/*
++	 * In NFI mode the decoder is pipelined with the NFI transfer the
++	 * caller already waits for, so DECDONE can be polled cheaply and
++	 * the per-sector decode IRQs may be left disabled.
++	 */
++	ecc->dec_polling = config->polling && config->mode == ECC_NFI_MODE &&
++			   op == ECC_DECODE;
++
++	if ((config->mode != ECC_NFI_MODE || op != ECC_ENCODE) &&
++	    !ecc->dec_polling) {
+ 		init_completion(&ecc->done);
+ 		reg_val = ECC_IRQ_EN;
+ 		/*
+@@ -374,8 +384,23 @@ EXPORT_SYMBOL(mtk_ecc_disable);
+
+ int mtk_ecc_wait_done(struct mtk_ecc *ecc, enum mtk_ecc_operation op)
+ {
++	u16 val;
+ 	int ret;
+
++	if (op == ECC_DECODE && ecc->dec_polling) {
++		ret = readw_poll_timeout(ecc->regs +
++					 ecc->caps->ecc_regs[ECC_DECDONE],
++					 val, val & ecc->sectors, 0,
++					 ECC_TIMEOUT);
++		if (ret) {
++			dev_err(ecc->dev,
++				"decoder timeout - DECDONE not set\n");
++			return -ETIMEDOUT;
++		}
++		ecc->sectors = 0;
++		return 0;
++	}
++
+ 	ret = wait_for_completion_timeout(&ecc->done, msecs_to_jiffies(500));
+ 	if (!ret) {
+ 		dev_err(ecc->dev, "%s timeout - interrupt did not arrive)\n",
+--- a/drivers/spi/spi-mtk-snfi.c
++++ b/drivers/spi/spi-mtk-snfi.c
+@@ -697,6 +697,7 @@ static int mtk_snand_ecc_init_ctx(struct
+ 	}
+
+ 	ecc_cfg->mode = ECC_NFI_MODE;
++	ecc_cfg->polling = true;
+ 	ecc_cfg->sectors = snf->nfi_cfg.nsectors;
+ 	ecc_cfg->len = snf->caps->sector_size + snf->caps->fdm_ecc_size;
+
+--- a/include/linux/mtd/nand-ecc-mtk.h
++++ b/include/linux/mtd/nand-ecc-mtk.h
+@@ -31,6 +31,7 @@ struct mtk_ecc_config {
+ 	u32 strength;
+ 	u32 sectors;
+ 	u32 len;
++	bool polling;
+ };
+
+ int mtk_ecc_encode(struct mtk_ecc *, struct mtk_ecc_config *, u8 *, u32);
