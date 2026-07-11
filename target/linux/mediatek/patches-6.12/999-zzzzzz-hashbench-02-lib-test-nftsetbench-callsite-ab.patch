@@ -1,0 +1,719 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] lib: add test_nftsetbench nft-set-shaped hash call-site A/B module
+
+Gate-4 companion to test_hashbench (docs/umash-port-task.md): A/Bs
+jhash against the scalar rapidhash V3 Nano low^high fold through
+complete nft-set-shaped lookups - hash + reciprocal_scale/bucket math
++ chain walk + memcmp - on the live kernel, no call-site patches, no
+reflash. Two structures faithful to net/netfilter/nft_set_hash.c: a
+replication of the fixed nft_hash backend and the real lib/rhashtable
+driven like nft_rhash (cmp-arg key, hashfn/obj_hashfn/obj_cmpfn).
+Matrix: klen {16,32,48} x population {1024,65536} x pattern {hot-hit,
+cold-hit, cold-miss}; every table is verified (all inserted keys
+found, absent keys not) before timing.
+
+First run 2026-07-11 on the live router: nano32 won 35/36 cells by
+20-80 cy/lookup (hash delta carries through; -15..-30% cache-warm),
+compressing to -3..-8% at 64k-population cold misses where cache
+stalls dominate. Verdict recorded in the task doc: technically passes
+gate 4 but no conversion patch until a real workload profile shows
+nft set lookups hot.
+
+Same measurement infra as test_hashbench: dependent-latency chaining,
+IRQ-off min-of-chunks, direct A53 PMU register reads, standard exports
+only, -EAGAIN on purpose so re-runs need no rmmod.
+
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -2301,6 +2301,18 @@
+ 
+ 	  If unsure, say N.
+ 
++config TEST_NFTSETBENCH
++	tristate "nft-set-shaped hash call-site A/B benchmark"
++	depends on ARM64 && ARCH_SUPPORTS_INT128
++	help
++	  Kernel module that A/Bs jhash against a scalar rapidhash V3 port
++	  through nft-set-shaped lookups: a replication of the fixed
++	  nft_hash backend and the real rhashtable driven like nft_rhash,
++	  at several key sizes and populations. Results are printed to the
++	  kernel log at module load; init returns -EAGAIN by design.
++
++	  If unsure, say N.
++
+ config KPROBES_SANITY_TEST
+ 	tristate "Kprobes sanity tests" if !KUNIT_ALL_TESTS
+ 	depends on DEBUG_KERNEL
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -69,6 +69,7 @@
+ obj-$(CONFIG_HASH_KUNIT_TEST) += test_hash.o
+ obj-$(CONFIG_TEST_IDA) += test_ida.o
+ obj-$(CONFIG_TEST_HASHBENCH) += test_hashbench.o
++obj-$(CONFIG_TEST_NFTSETBENCH) += test_nftsetbench.o
+ obj-$(CONFIG_TEST_UBSAN) += test_ubsan.o
+ CFLAGS_test_ubsan.o += $(call cc-disable-warning, vla)
+ CFLAGS_test_ubsan.o += $(call cc-disable-warning, unused-but-set-variable)
+--- /dev/null
++++ b/lib/test_nftsetbench.c
+@@ -0,0 +1,660 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Gate-4 call-site A/B for the nft set hash (docs/umash-port-task.md,
++ * OpenWrt e8450 branch): measures complete set-lookup cost — hash +
++ * reciprocal_scale/bucket math + chain walk + key memcmp — with the
++ * hash function swapped between jhash (baseline) and the scalar
++ * rapidhash V3 Nano low^high fold (candidate), on the live kernel
++ * without call-site patches or a reflash.
++ *
++ * Two structures, both faithful to net/netfilter/nft_set_hash.c:
++ *  - "nfthash": replication of the fixed-size nft_hash lookup
++ *    (jhash -> reciprocal_scale -> hlist_for_each + memcmp; elements
++ *    individually kmalloc'd like real set elements)
++ *  - "rhash": the kernel's real rhashtable (lib/rhashtable.c) driven
++ *    exactly like nft_rhash (cmp-arg key, hashfn/obj_hashfn/obj_cmpfn)
++ *
++ * Matrix: klen {16,32,48} x population {1024,65536} x pattern
++ * {hot-hit, cold-hit, cold-miss}.  cold walks keys in a
++ * result-dependent pseudo-random order (bucket cache misses included,
++ * the realistic case); hot hammers one key (upper bound of hash
++ * significance).  Each table is verified (all inserted keys found,
++ * absent keys not) before it is timed.
++ *
++ * Measurement infra (PMU register reads, IRQ-off min-of-chunks,
++ * dependent chaining, bench_cpu pinning, -EAGAIN on purpose) matches
++ * lib/test_hashbench.c; results in dmesg.
++ */
++
++#define pr_fmt(fmt) "nftsetbench: " fmt
++
++#include <linux/init.h>
++#include <linux/jhash.h>
++#include <linux/kernel.h>
++#include <linux/ktime.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/perf_event.h>
++#include <linux/prandom.h>
++#include <linux/random.h>
++#include <linux/rhashtable.h>
++#include <linux/sched.h>
++#include <linux/slab.h>
++#include <linux/unaligned.h>
++#include <linux/vmalloc.h>
++
++#include <asm/barrier.h>
++#include <asm/sysreg.h>
++
++static int bench_cpu = 1;
++module_param(bench_cpu, int, 0444);
++MODULE_PARM_DESC(bench_cpu, "CPU to pin the benchmark to (default 1)");
++
++#define NB_ITERS	1024
++#define NB_WARM_CHUNKS	4
++#define NB_CHUNKS	32
++#define NB_KLEN_MAX	48
++
++/*
++ * rapidhash V3 Nano port + fold, identical to lib/test_hashbench.c
++ * (differentially verified there against upstream: 24080 cases).
++ * Secret is per-boot random; timing is secret-independent.
++ */
++static u64 nb_rapid_secret[8] __read_mostly;
++
++static __always_inline void rapid_mum(u64 *a, u64 *b)
++{
++	unsigned __int128 r = (unsigned __int128)*a * *b;
++
++	*a = (u64)r;
++	*b = (u64)(r >> 64);
++}
++
++static __always_inline u64 rapid_mix(u64 a, u64 b)
++{
++	rapid_mum(&a, &b);
++	return a ^ b;
++}
++
++static u64 rapidhash_nano64(const void *key, size_t len, u64 seed,
++			    const u64 *secret)
++{
++	const u8 *p = key;
++	u64 a = 0, b = 0;
++	size_t i = len;
++
++	seed ^= rapid_mix(seed ^ secret[2], secret[1]);
++	if (likely(len <= 16)) {
++		if (len >= 4) {
++			seed ^= len;
++			if (len >= 8) {
++				a = get_unaligned_le64(p);
++				b = get_unaligned_le64(p + len - 8);
++			} else {
++				a = get_unaligned_le32(p);
++				b = get_unaligned_le32(p + len - 4);
++			}
++		} else if (len > 0) {
++			a = ((u64)p[0] << 45) | p[len - 1];
++			b = p[len >> 1];
++		}
++	} else {
++		if (i > 48) {
++			u64 see1 = seed, see2 = seed;
++
++			do {
++				seed = rapid_mix(get_unaligned_le64(p) ^ secret[0],
++						 get_unaligned_le64(p + 8) ^ seed);
++				see1 = rapid_mix(get_unaligned_le64(p + 16) ^ secret[1],
++						 get_unaligned_le64(p + 24) ^ see1);
++				see2 = rapid_mix(get_unaligned_le64(p + 32) ^ secret[2],
++						 get_unaligned_le64(p + 40) ^ see2);
++				p += 48;
++				i -= 48;
++			} while (i > 48);
++			seed ^= see1;
++			seed ^= see2;
++		}
++		if (i > 16) {
++			seed = rapid_mix(get_unaligned_le64(p) ^ secret[2],
++					 get_unaligned_le64(p + 8) ^ seed);
++			if (i > 32)
++				seed = rapid_mix(get_unaligned_le64(p + 16) ^ secret[2],
++						 get_unaligned_le64(p + 24) ^ seed);
++		}
++		a = get_unaligned_le64(p + i - 16) ^ i;
++		b = get_unaligned_le64(p + i - 8);
++	}
++	a ^= secret[1];
++	b ^= seed;
++	rapid_mum(&a, &b);
++	return rapid_mix(a ^ secret[7], b ^ secret[1] ^ i);
++}
++
++static u32 nb_nano32(const void *key, u32 len, u32 seed)
++{
++	u64 h = rapidhash_nano64(key, len, (u64)seed, nb_rapid_secret);
++
++	return (u32)(h ^ (h >> 32));
++}
++
++static u32 nb_jhash(const void *key, u32 len, u32 seed)
++{
++	return jhash(key, len, seed);
++}
++
++typedef u32 (*nb_hashfn_t)(const void *, u32, u32);
++
++/*
++ * "nfthash": replication of the fixed nft_hash set backend's lookup.
++ */
++struct nb_hash_elem {
++	struct hlist_node node;
++	u32 pad;	/* stand-in for the nft_set_ext header words */
++	u8 key[];
++};
++
++struct nb_hash {
++	u32 seed;
++	u32 buckets;
++	struct hlist_head *table;
++	struct nb_hash_elem **elems;
++	u32 nelems;
++};
++
++static u32 nb_hash_buckets(u32 size)
++{
++	return roundup_pow_of_two((u64)size * 4 / 3);
++}
++
++static struct nb_hash_elem *nb_hash_lookup(const struct nb_hash *h,
++					   const u8 *key, u32 klen,
++					   nb_hashfn_t fn)
++{
++	struct nb_hash_elem *he;
++	u32 hash;
++
++	hash = fn(key, klen, h->seed);
++	hash = reciprocal_scale(hash, h->buckets);
++	hlist_for_each_entry(he, &h->table[hash], node) {
++		if (!memcmp(he->key, key, klen))
++			return he;
++	}
++	return NULL;
++}
++
++static void nb_hash_destroy(struct nb_hash *h)
++{
++	u32 i;
++
++	if (h->elems) {
++		for (i = 0; i < h->nelems; i++)
++			kfree(h->elems[i]);
++		kvfree(h->elems);
++	}
++	kvfree(h->table);
++	memset(h, 0, sizeof(*h));
++}
++
++static int nb_hash_build(struct nb_hash *h, const u8 *keys, u32 pop,
++			 u32 klen, nb_hashfn_t fn)
++{
++	u32 i, hash;
++
++	h->buckets = nb_hash_buckets(pop);
++	get_random_bytes(&h->seed, sizeof(h->seed));
++	h->table = kvcalloc(h->buckets, sizeof(*h->table), GFP_KERNEL);
++	h->elems = kvcalloc(pop, sizeof(*h->elems), GFP_KERNEL);
++	if (!h->table || !h->elems)
++		goto err;
++
++	for (i = 0; i < pop; i++) {
++		struct nb_hash_elem *he;
++
++		he = kmalloc(sizeof(*he) + klen, GFP_KERNEL);
++		if (!he)
++			goto err;
++		memcpy(he->key, keys + (size_t)i * klen, klen);
++		h->elems[i] = he;
++		h->nelems = i + 1;
++		hash = fn(he->key, klen, h->seed);
++		hash = reciprocal_scale(hash, h->buckets);
++		hlist_add_head(&he->node, &h->table[hash]);
++	}
++	return 0;
++err:
++	nb_hash_destroy(h);
++	return -ENOMEM;
++}
++
++/*
++ * "rhash": the real rhashtable, driven the way nft_rhash drives it.
++ */
++struct nb_rh_elem {
++	struct rhash_head node;
++	u32 pad;
++	u8 key[];
++};
++
++struct nb_cmp_arg {
++	const u8 *key;
++};
++
++static nb_hashfn_t nb_rh_fn;	/* hash under test for the active table */
++
++static u32 nb_rh_key_hash(const void *data, u32 len, u32 seed)
++{
++	const struct nb_cmp_arg *arg = data;
++
++	return nb_rh_fn(arg->key, len, seed);
++}
++
++static u32 nb_rh_obj_hash(const void *data, u32 len, u32 seed)
++{
++	const struct nb_rh_elem *he = data;
++
++	return nb_rh_fn(he->key, len, seed);
++}
++
++static int nb_rh_cmp(struct rhashtable_compare_arg *arg, const void *ptr)
++{
++	const struct nb_cmp_arg *a = arg->key;
++	const struct nb_rh_elem *he = ptr;
++
++	return memcmp(he->key, a->key, arg->ht->p.key_len);
++}
++
++struct nb_rh {
++	struct rhashtable ht;
++	struct rhashtable_params params;
++	struct nb_rh_elem **elems;
++	u32 nelems;
++	bool live;
++};
++
++static void nb_rh_free_elem(void *ptr, void *arg)
++{
++	/* elements are freed via elems[]; nothing to do per node */
++}
++
++static void nb_rh_destroy(struct nb_rh *r)
++{
++	u32 i;
++
++	if (r->live)
++		rhashtable_free_and_destroy(&r->ht, nb_rh_free_elem, NULL);
++	if (r->elems) {
++		for (i = 0; i < r->nelems; i++)
++			kfree(r->elems[i]);
++		kvfree(r->elems);
++	}
++	memset(r, 0, sizeof(*r));
++}
++
++static int nb_rh_build(struct nb_rh *r, const u8 *keys, u32 pop, u32 klen,
++		       nb_hashfn_t fn)
++{
++	u32 i;
++	int err;
++
++	nb_rh_fn = fn;
++	r->params = (struct rhashtable_params) {
++		.head_offset	= offsetof(struct nb_rh_elem, node),
++		.key_len	= klen,
++		.hashfn		= nb_rh_key_hash,
++		.obj_hashfn	= nb_rh_obj_hash,
++		.obj_cmpfn	= nb_rh_cmp,
++		.nelem_hint	= pop,
++	};
++	err = rhashtable_init(&r->ht, &r->params);
++	if (err)
++		return err;
++	r->live = true;
++
++	r->elems = kvcalloc(pop, sizeof(*r->elems), GFP_KERNEL);
++	if (!r->elems)
++		goto err;
++
++	for (i = 0; i < pop; i++) {
++		struct nb_rh_elem *he;
++
++		he = kmalloc(sizeof(*he) + klen, GFP_KERNEL);
++		if (!he)
++			goto err;
++		memcpy(he->key, keys + (size_t)i * klen, klen);
++		r->elems[i] = he;
++		r->nelems = i + 1;
++		err = rhashtable_insert_fast(&r->ht, &he->node, r->params);
++		if (err)
++			goto err;
++	}
++	return 0;
++err:
++	nb_rh_destroy(r);
++	return err ? err : -ENOMEM;
++}
++
++static struct nb_rh_elem *nb_rh_lookup(struct nb_rh *r, const u8 *key)
++{
++	struct nb_cmp_arg arg = { .key = key };
++
++	return rhashtable_lookup(&r->ht, &arg, r->params);
++}
++
++/*
++ * Measurement infra: direct A53 PMU register reads, as in
++ * lib/test_hashbench.c.
++ */
++#define NB_NO_COUNTER	-1
++#define NB_CYCLE_IDX	31
++
++static struct perf_event *nb_ev_cycles;
++static struct perf_event *nb_ev_instrs;
++static int nb_cycles_idx = NB_NO_COUNTER;
++static int nb_instrs_idx = NB_NO_COUNTER;
++static u32 nb_sink;
++
++static struct perf_event *nb_counter_create(u64 config)
++{
++	struct perf_event_attr attr = {
++		.type		= PERF_TYPE_HARDWARE,
++		.size		= sizeof(attr),
++		.config		= config,
++		.pinned		= 1,
++		.exclude_user	= 1,
++	};
++
++	return perf_event_create_kernel_counter(&attr, bench_cpu, NULL,
++						NULL, NULL);
++}
++
++static int nb_counter_idx(struct perf_event *ev)
++{
++	if (!ev || ev->state != PERF_EVENT_STATE_ACTIVE)
++		return NB_NO_COUNTER;
++	return ev->hw.idx;
++}
++
++static __always_inline u64 nb_read_counter(int idx)
++{
++	isb();
++	if (idx == NB_CYCLE_IDX)
++		return read_sysreg(pmccntr_el0);
++	write_sysreg(idx, pmselr_el0);
++	isb();
++	return read_sysreg(pmxevcntr_el0);
++}
++
++static __always_inline u64 nb_cycles(void)
++{
++	if (nb_cycles_idx != NB_NO_COUNTER)
++		return nb_read_counter(nb_cycles_idx);
++	return ktime_get_ns();
++}
++
++static __always_inline u64 nb_instrs(void)
++{
++	if (nb_instrs_idx != NB_NO_COUNTER)
++		return nb_read_counter(nb_instrs_idx);
++	return 0;
++}
++
++/*
++ * Lookup-loop drivers.  idx chains on the previous lookup result so
++ * consecutive lookups are dependent, as in a real packet path; the
++ * multiplicative step spreads cold-pattern accesses across the table.
++ * pop is always a power of two here.
++ */
++enum nb_pattern { NB_HOT_HIT, NB_COLD_HIT, NB_COLD_MISS };
++static const char *const nb_pattern_name[] = {
++	"hot-hit", "cold-hit", "cold-miss"
++};
++
++struct nb_ctx {
++	const struct nb_hash *h;	/* one of h/r is used */
++	struct nb_rh *r;
++	const u8 *keys;			/* hit or miss key array */
++	u32 pop;
++	u32 klen;
++	nb_hashfn_t fn;
++	enum nb_pattern pat;
++};
++
++static noinline u32 nb_chunk(const struct nb_ctx *c, u32 idx, int iters)
++{
++	int i;
++
++	for (i = 0; i < iters; i++) {
++		const u8 *key = c->keys +
++			(size_t)(c->pat == NB_HOT_HIT ? 0 : idx) * c->klen;
++		const void *e;
++
++		if (c->r)
++			e = nb_rh_lookup(c->r, key);
++		else
++			e = nb_hash_lookup(c->h, key, c->klen, c->fn);
++		idx = (idx * 2654435761u + (u32)(uintptr_t)e + 1) &
++		      (c->pop - 1);
++	}
++	return idx;
++}
++
++static void nb_run(const char *sname, const char *fname,
++		   const struct nb_ctx *c)
++{
++	u64 min_cy = U64_MAX, min_in = U64_MAX, sum_cy = 0;
++	u64 c0, c1, i0, i1;
++	unsigned long flags;
++	u32 idx = 0;
++	int k;
++
++	for (k = -NB_WARM_CHUNKS; k < NB_CHUNKS; k++) {
++		local_irq_save(flags);
++		rcu_read_lock();
++		i0 = nb_instrs();
++		c0 = nb_cycles();
++		idx = nb_chunk(c, idx, NB_ITERS);
++		c1 = nb_cycles();
++		i1 = nb_instrs();
++		rcu_read_unlock();
++		local_irq_restore(flags);
++		nb_sink ^= idx;
++		if (k < 0)
++			continue;
++		min_cy = min(min_cy, c1 - c0);
++		min_in = min(min_in, (u64)(u32)(i1 - i0));
++		sum_cy += c1 - c0;
++		cond_resched();
++	}
++
++	min_cy = min_cy * 100 / NB_ITERS;
++	min_in = min_in * 100 / NB_ITERS;
++	sum_cy = sum_cy * 100 / ((u64)NB_ITERS * NB_CHUNKS);
++
++	pr_info("%-7s %-6s klen=%2u pop=%5u %-9s min=%4llu.%02llu mean=%4llu.%02llu %s/lookup insn=%llu.%02llu\n",
++		sname, fname, c->klen, c->pop, nb_pattern_name[c->pat],
++		min_cy / 100, min_cy % 100, sum_cy / 100, sum_cy % 100,
++		nb_cycles_idx != NB_NO_COUNTER ? "cy" : "ns",
++		min_in / 100, min_in % 100);
++}
++
++/*
++ * Correctness pass before timing: every inserted key found, no absent
++ * key found.
++ */
++static int nb_verify(const struct nb_ctx *hit, const struct nb_ctx *miss)
++{
++	u32 i;
++
++	for (i = 0; i < hit->pop; i++) {
++		const u8 *key = hit->keys + (size_t)i * hit->klen;
++		const u8 *mkey = miss->keys + (size_t)i * miss->klen;
++		const void *e, *m;
++
++		rcu_read_lock();
++		if (hit->r) {
++			e = nb_rh_lookup(hit->r, key);
++			m = nb_rh_lookup(hit->r, mkey);
++		} else {
++			e = nb_hash_lookup(hit->h, key, hit->klen, hit->fn);
++			m = nb_hash_lookup(hit->h, mkey, hit->klen, hit->fn);
++		}
++		rcu_read_unlock();
++		if (!e || m)
++			return -EINVAL;
++	}
++	return 0;
++}
++
++static const u32 nb_klens[] = { 16, 32, 48 };
++static const u32 nb_pops[]  = { 1024, 65536 };
++
++static const struct nb_fn_case {
++	const char *name;
++	nb_hashfn_t fn;
++} nb_fns[] = {
++	{ "jhash",  nb_jhash },
++	{ "nano32", nb_nano32 },
++};
++
++static int __init nb_init(void)
++{
++	u8 *keys_in = NULL, *keys_out = NULL;
++	struct rnd_state rnd;
++	int ki, pi, fi, si, err = -EAGAIN;
++	u32 i;
++
++	get_random_bytes(nb_rapid_secret, sizeof(nb_rapid_secret));
++	for (i = 0; i < ARRAY_SIZE(nb_rapid_secret); i++)
++		nb_rapid_secret[i] |= 1;
++
++	if (bench_cpu < 0 || bench_cpu >= nr_cpu_ids ||
++	    !cpu_online(bench_cpu)) {
++		pr_err("bench_cpu=%d not online\n", bench_cpu);
++		return -EINVAL;
++	}
++	if (set_cpus_allowed_ptr(current, cpumask_of(bench_cpu))) {
++		pr_err("cannot pin to cpu%d\n", bench_cpu);
++		return -EINVAL;
++	}
++
++	nb_ev_cycles = nb_counter_create(PERF_COUNT_HW_CPU_CYCLES);
++	if (IS_ERR(nb_ev_cycles)) {
++		pr_warn("no PMU cycle counter (%ld), reporting ktime ns\n",
++			PTR_ERR(nb_ev_cycles));
++		nb_ev_cycles = NULL;
++	}
++	nb_ev_instrs = nb_counter_create(PERF_COUNT_HW_INSTRUCTIONS);
++	if (IS_ERR(nb_ev_instrs))
++		nb_ev_instrs = NULL;
++	nb_cycles_idx = nb_counter_idx(nb_ev_cycles);
++	nb_instrs_idx = nb_counter_idx(nb_ev_instrs);
++	if (nb_cycles_idx != NB_NO_COUNTER &&
++	    nb_read_counter(nb_cycles_idx) == nb_read_counter(nb_cycles_idx))
++		nb_cycles_idx = NB_NO_COUNTER;
++	if (nb_instrs_idx != NB_NO_COUNTER &&
++	    nb_read_counter(nb_instrs_idx) == nb_read_counter(nb_instrs_idx))
++		nb_instrs_idx = NB_NO_COUNTER;
++
++	/* deterministic key material, unique per array with overwhelming
++	 * probability at these populations */
++	keys_in = kvmalloc((size_t)nb_pops[ARRAY_SIZE(nb_pops) - 1] *
++			   NB_KLEN_MAX, GFP_KERNEL);
++	keys_out = kvmalloc((size_t)nb_pops[ARRAY_SIZE(nb_pops) - 1] *
++			    NB_KLEN_MAX, GFP_KERNEL);
++	if (!keys_in || !keys_out) {
++		err = -ENOMEM;
++		goto out;
++	}
++	prandom_seed_state(&rnd, 0x6a09e667f3bcc908ull);
++	prandom_bytes_state(&rnd, keys_in,
++			    (size_t)nb_pops[ARRAY_SIZE(nb_pops) - 1] *
++			    NB_KLEN_MAX);
++	prandom_seed_state(&rnd, 0xbb67ae8584caa73bull);
++	prandom_bytes_state(&rnd, keys_out,
++			    (size_t)nb_pops[ARRAY_SIZE(nb_pops) - 1] *
++			    NB_KLEN_MAX);
++
++	pr_info("cpu%d counters=%s chunks=%dx%d chain=dependent\n",
++		bench_cpu,
++		nb_cycles_idx != NB_NO_COUNTER ?
++			(nb_instrs_idx != NB_NO_COUNTER ? "pmu-cy+insn"
++							: "pmu-cy")
++			: "ktime-ns",
++		NB_CHUNKS, NB_ITERS);
++
++	for (si = 0; si < 2; si++) {			/* 0 nfthash, 1 rhash */
++		for (fi = 0; fi < ARRAY_SIZE(nb_fns); fi++) {
++			for (ki = 0; ki < ARRAY_SIZE(nb_klens); ki++) {
++				for (pi = 0; pi < ARRAY_SIZE(nb_pops); pi++) {
++					u32 klen = nb_klens[ki];
++					u32 pop = nb_pops[pi];
++					struct nb_hash h = {};
++					struct nb_rh r = {};
++					struct nb_ctx hit = {
++						.keys = keys_in,
++						.pop = pop, .klen = klen,
++						.fn = nb_fns[fi].fn,
++					};
++					struct nb_ctx miss;
++					int rc;
++
++					if (si == 0) {
++						rc = nb_hash_build(&h, keys_in, pop,
++								   klen, nb_fns[fi].fn);
++						hit.h = &h;
++					} else {
++						rc = nb_rh_build(&r, keys_in, pop,
++								 klen, nb_fns[fi].fn);
++						hit.r = &r;
++					}
++					if (rc) {
++						pr_err("build %s %s klen=%u pop=%u failed (%d)\n",
++						       si ? "rhash" : "nfthash",
++						       nb_fns[fi].name, klen, pop, rc);
++						continue;
++					}
++					miss = hit;
++					miss.keys = keys_out;
++
++					if (nb_verify(&hit, &miss)) {
++						pr_err("VERIFY FAILED %s %s klen=%u pop=%u\n",
++						       si ? "rhash" : "nfthash",
++						       nb_fns[fi].name, klen, pop);
++					} else {
++						hit.pat = NB_HOT_HIT;
++						nb_run(si ? "rhash" : "nfthash",
++						       nb_fns[fi].name, &hit);
++						hit.pat = NB_COLD_HIT;
++						nb_run(si ? "rhash" : "nfthash",
++						       nb_fns[fi].name, &hit);
++						miss.pat = NB_COLD_MISS;
++						nb_run(si ? "rhash" : "nfthash",
++						       nb_fns[fi].name, &miss);
++					}
++
++					if (si == 0)
++						nb_hash_destroy(&h);
++					else
++						nb_rh_destroy(&r);
++					cond_resched();
++				}
++			}
++		}
++	}
++
++	pr_info("done (sink=0x%08x); returning -EAGAIN by design\n", nb_sink);
++out:
++	kvfree(keys_in);
++	kvfree(keys_out);
++	if (nb_ev_cycles)
++		perf_event_release_kernel(nb_ev_cycles);
++	if (nb_ev_instrs)
++		perf_event_release_kernel(nb_ev_instrs);
++	set_cpus_allowed_ptr(current, cpu_possible_mask);
++	return err;
++}
++module_init(nb_init);
++
++MODULE_DESCRIPTION("nft-set-shaped hash call-site A/B: jhash vs rapidhash nano32 (Cortex-A53)");
++MODULE_LICENSE("GPL");

@@ -317,6 +317,123 @@ jhash, full stop. Whether a ~30–60 net cy/hash saving is material at
 any real call site still requires the gate-4 call-site A/B and gate-5
 threshold before any conversion patch.
 
+## Gate-4 nft-set call-site A/B — run 2026-07-11
+
+Run without touching the image: `test_nftsetbench.ko` (same PMU/chunk
+infra as the microbench, scp'd onto the running kernel) A/Bs the
+complete lookup — hash + `reciprocal_scale`/bucket math + chain walk +
+key `memcmp` — through two structures faithful to
+`net/netfilter/nft_set_hash.c`: a replication of the fixed `nft_hash`
+backend (individually kmalloc'd elements, hlist buckets) and the
+**real** `lib/rhashtable.c` driven exactly like `nft_rhash`
+(cmp-arg + `hashfn`/`obj_hashfn`/`obj_cmpfn`). Every table passed a
+full verify (all 64k inserted keys found, no absent key found) before
+timing. Patterns: hot-hit (one key hammered — upper bound), cold-hit /
+cold-miss (result-dependent pseudo-random key order — realistic,
+bucket cache misses included).
+
+Min cycles/lookup, jhash → nano32:
+
+| Structure | klen | pop | hot-hit | cold-hit | cold-miss |
+|---|---|---|---|---|---|
+| nfthash | 16 | 1k | 132→108 (−18%) | 148→126 (−15%) | 142→120 (−16%) |
+| nfthash | 16 | 64k | 154→108 (−30%) | 169→191 (**+13%**) | 575→553 (−4%) |
+| nfthash | 32 | 1k | 195→135 (−31%) | 199→154 (−22%) | 179→140 (−22%) |
+| nfthash | 32 | 64k | 179→151 (−16%) | 212→195 (−8%) | 626→581 (−7%) |
+| nfthash | 48 | 1k | 237→160 (−32%) | 239→172 (−28%) | 220→160 (−27%) |
+| nfthash | 48 | 64k | 221→160 (−28%) | 335→252 (−25%) | 759→701 (−8%) |
+| rhash | 16 | 1k | 211→151 (−28%) | 198→165 (−17%) | 185→159 (−14%) |
+| rhash | 16 | 64k | 176→151 (−14%) | 208→177 (−15%) | 608→591 (−3%) |
+| rhash | 32 | 1k | 218→176 (−19%) | 237→194 (−18%) | 222→180 (−19%) |
+| rhash | 32 | 64k | 218→176 (−19%) | 267→239 (−11%) | 670→626 (−7%) |
+| rhash | 48 | 1k | 260→201 (−23%) | 286→220 (−23%) | 261→202 (−23%) |
+| rhash | 48 | 64k | 260→201 (−23%) | 315→245 (−22%) | 795→729 (−8%) |
+
+Findings:
+
+- **The microbench delta survives at the call-site level.** nano32 wins
+  35 of 36 cells by 20–80 cycles absolute — consistent with its
+  30–60 cy hash-level advantage carrying straight through the bucket
+  math and chain walk. Instruction counts drop 25–45%.
+- **Cache dominates the realistic worst case.** At 64k population with
+  cold random misses, total lookup cost is 550–800 cy of which
+  ~400–600 cy is bucket/element cache-miss stall — the hash choice
+  compresses to −3…−8% there. The hash matters most when tables are
+  cache-resident (small sets, hot flows).
+- One anomalous cell (nfthash 16 B/64k cold-hit, +13%): different
+  per-table random seeds give different bucket layouts; treat as
+  layout/noise, not a systematic nano32 loss — the neighbouring cells
+  and both miss columns at the same size go the other way.
+- rhashtable costs ~40–60 cy more per lookup than the fixed nft_hash
+  table at equal load — structure overhead, independent of hash choice.
+
+**Verdict:** gate 4 *passes technically* — the improvement is
+repeatable, outside run noise, with no loss of keying, context safety,
+or architecture coverage (gate 5's mechanical criteria). But the
+policy's first sentence still gates deployment: no workload on this
+box has shown nft set lookups to be hot. With PPE/WED hw-offload,
+established flows bypass nft entirely; set lookups run on slow-path
+packets only, and the live ruleset's sets are small (cache-resident,
+where the win is real but the absolute rate is low). **Decision: do
+NOT write the conversion patch now.** File this as a ready-to-go
+optimization with measured numbers; reopen only if a profile ever
+shows `nft_hash_lookup`/`nft_rhash_lookup` material in a real
+workload, at which point the conversion (nft_set_hash.c only, one
+subsystem, one image) is pre-validated by this A/B.
+
+## Wider-kernel beneficiary audit — 2026-07-11 (negative result)
+
+With the cost model measured (nano32 wins 16–48 B keys by 30–60 cy,
+Micro only differentiates ≥64–80 B, wins compress to 3–8% when
+cache-miss-bound, DoS-keyed sites off-limits), the whole tree was
+swept for other homes: `jhash/jhash2` call sites across net/, fs/,
+kernel/, mm/, lib/, drivers/net/, security/, cross-checked against
+this target's config and the **live router's** actual paths
+(qdiscs, ruleset, conntrack, frag/BPF/xfrm counters probed
+2026-07-11).
+
+Every per-packet hash on this box falls into one of three buckets:
+
+1. **Already hardware-hashed.** mtk_eth_soc RX sets
+   `skb_set_hash(jhash_1word(FOE id))` for every PPE-parsed packet
+   (v1 rxd4 path), so RPS (`rps_cpus=3`) and mac80211's fq
+   (`fq_flow_classify` → plain `skb_get_hash()`, 6.12) *reuse* the
+   existing hash; router-originated traffic reuses `sk_txhash`.
+   Software flow dissection is a corner path (non-IP, PPE-missed,
+   WiFi→WiFi bridged TX).
+2. **Deliberately DoS-keyed siphash — never swap (policy).** The
+   software flow dissector itself (siphash over ~52 B flow_keys since
+   v5.4), conntrack `hash_conntrack_raw`, and every
+   `skb_get_hash_perturb` user. These are the *biggest* per-packet
+   hash consumers left, and they are security constructs, not
+   performance hashes.
+3. **Cold on this workload.** Live probe: **zero nft sets in the
+   running ruleset**, 42 conntrack entries total, ReasmReqds=0 (no
+   frag reassembly since boot), no BPF maps, no xfrm state, no
+   fq_codel qdiscs (eth0=mq hw queues, rest noqueue). ip_fragment,
+   xfrm_hash, bpf hashtab, tcp_cong, workqueue/lockdep, UBIFS r5
+   name hashing, dcache (already word-at-a-time) — all cold here.
+   The remaining grep hits (mlx5, batman, ovs, nfsd, dlm, …) aren't
+   even built for this target.
+
+The single technically-eligible site is one we already own:
+`999-ppe-92`'s seeded-xxh32 flowtable tuple hash (~52 B). Measured
+delta xxh32→nano32 at 48 B is 81→71 net cy — ~10 cy on a path that
+only runs for not-yet-hw-offloaded flows. Not worth the churn; noted
+for bundling only if that patch is ever touched again.
+
+**Micro specifically has no customer:** no hot path in this kernel
+hashes ≥64 B. Its niche (long-key bulk loop) exists upstream in
+workloads this box doesn't run (BPF maps with large keys, OVS flow
+tables, storage dedup).
+
+Verdict: the investigation stays closed. The E8450's architecture is
+the reason — PPE/WED move established flows off the CPU and the
+driver hands the leftover stack a precomputed hash, so the kernel's
+remaining hashing is either security-keyed or cold. The rapidhash
+port's value on this box is as a shelved, pre-validated building
+block, not a deployable win.
+
 ## Future directions
 
 The default recommendation is **no replacement** until profiling identifies a
