@@ -353,13 +353,6 @@
 &snfi {
 	pinctrl-names = "default";
 	pinctrl-0 = <&serial_nand_pins>;
-	/*
-	 * The validated default is univpll2_d8 (50 MHz).  Use the next
-	 * conservative, exact clock-tree step for the staged SNFI test:
-	 * univpll1_d8 = 75 MHz would be +50%; univpll3_d2 is 60 MHz (+20%).
-	 */
-	assigned-clocks = <&topckgen CLK_TOP_NFI_INFRA_SEL>;
-	assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL3_D2>;
 	status = "okay";
 
 	snand: flash@0 {
