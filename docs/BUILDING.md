@@ -38,6 +38,20 @@
   compile load).
 - Tree and ccache dir live on the NVMe root — keep it that way.
 
+## E8450 image scope
+
+The seed deliberately omits iptables/xt-offload, GRE/PPTP/L2TP/UDP-tunnel,
+macvlan, netconsole, conntrack-event userspace, DNS auth/nftset extensions,
+TFTP, and OpenSSL's legacy algorithms/engine support. The hardware and
+live-path audit establishes fw4/nft as the firewall, no crypto engine or
+exposed USB port, no tunnel requirement, no active nft sets, and a broken
+netconsole path. Keep the retained IPv6, DNSSEC, conntrack, `perf`, pstore,
+and Wi-Fi/RPC support: each has an active operational or validation use
+documented for this target. DNSSEC pulls `libnettle`/`libgmp`; the selected
+`wpad-openssl` package itself pulls the OpenSSL legacy-provider package even
+though all legacy algorithms are disabled. Re-add a removed item only with a
+concrete deployment need.
+
 - Toolchain cache: `./scripts/toolchain-cache.sh save|restore|upload|refresh`
   tars `staging_dir/host` + `staging_dir/toolchain-*` (~172M zstd) keyed by
   the tools/ + toolchain/ tree-hash fingerprint, published as a GitHub
