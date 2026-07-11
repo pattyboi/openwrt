@@ -61,8 +61,9 @@ A candidate must pass all of these gates before entering an image:
    an undeclared CPU extension.
 3. **Microbenchmark:** compare against `jhash_1word`, `jhash_3words`, and
    `jhash` at 4, 8, 12, 16, 17, 32, 48, and 64 bytes on MT7622. Pin one CPU,
-   use the performance governor, run enough iterations to report cycles/hash
-   and instructions/hash, and measure first-use separately from steady state.
+   leave the router's normal `ondemand` policy unchanged, run enough iterations
+   to report cycles/hash and instructions/hash, and measure first-use separately
+   from steady state.
    The concrete candidate matrix for the next phase is fixed in
    §Next-phase microbenchmark below.
 4. **Call-site A/B:** isolate one subsystem per image. Use TCP connection rate
@@ -150,8 +151,8 @@ replacement candidate (unkeyed beyond the seed).
 ## Next-phase microbenchmark — candidate matrix (pre/post-flash)
 
 All measurements on the E8450 itself (in-order A53, not the build host),
-per gate 3: pinned CPU, performance governor, cycles/hash and
-instructions/hash, first-use measured separately from steady state.
+per gate 3: fixed CPU affinity, the normal `ondemand` policy, cycles/hash and
+instructions/hash, with first-use measured separately from steady state.
 
 ### Baselines — jhash family (what is in the image today)
 

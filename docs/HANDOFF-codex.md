@@ -1,10 +1,17 @@
-# Handoff — E8450 / MT7622 WED — RESOLVED
+# Historical handoff — E8450 / MT7622 WED
 
-Updated 2026-07-05 on branch `e8450-hw-driven`.
+Updated 2026-07-05 on branch `e8450-hw-driven`. This file is retained as a
+chronological investigation record, not as current operating guidance.
 
-**START HERE: `docs/E8450-hardware-software-reference.md`** — the condensed
+**START HERE: `docs/E8450-hardware-software-reference.md`** — the current
 hardware map, software-path status, operating rules, closed investigations,
 and ranked next directions. This file below is the historical record.
+
+For the complete documentation map, see [`docs/README.md`](README.md).
+
+The historical sections below intentionally preserve contradictory intermediate
+observations. They must not override the current reference, including its
+updated LAN access path and SER results.
 
 2026-07-04/05 additions since resolution: SDK re-audit cherry-picks landed
 and flashed (commit f544b83cde): 999-ppe-89/90/91 (nft bridged-flow offload
@@ -47,7 +54,8 @@ artifact:
 5. A fast power-replug (1-2 s) preserves ramoops across a "cold" cycle.
 6. `setsid` survives dropbear disconnect; `nohup &` does not.
 7. Never trust reachability from the build laptop alone (its r8169 is
-   flaky); confirm via the router WAN (192.168.3.15) from the house net.
+  flaky); confirm through an independent path, following the current operating
+  rules in `CLAUDE.md`.
 
 ## Reverted / superseded
 
@@ -98,8 +106,8 @@ Key findings, in order:
    WANDERS -> asynchronous killer: the mt7915 firmware bootstrap resets
    the card bus interface while WED holds outstanding transactions; the
    WED block wedges; the next WED register access hangs the AXI bus.
-4. WMAC-awake (wl0 AP up) does NOT prevent it. ASPM already off
-   (performance policy). Kernel-side runtime PM inactive.
+4. WMAC-awake (wl0 AP up) does NOT prevent it. ASPM was already off.
+   Kernel-side runtime PM was inactive.
 5. **VANILLA locks too**: an image with ALL 999 patches removed
    (unpatched OpenWrt 25.12.4 / kernel 6.12.87) hard-locks identically
    on first-bind `wed_enable=1`. The patch stack is exonerated — this is

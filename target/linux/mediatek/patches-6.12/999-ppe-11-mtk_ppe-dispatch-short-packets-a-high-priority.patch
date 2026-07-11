@@ -179,13 +179,15 @@ Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
  	struct mtk_wdma_info info = {};
  	struct nf_conn *ct = NULL;
  	struct mtk_mac *mac;
-@@ -246,23 +331,30 @@
+@@ -246,25 +331,32 @@
  		queue = (pse_port == PSE_GDM3_PORT) ? 2 : pse_port - 1;
  	}
  
  	if (f->flow && f->flow->ct) {
  		ct = f->flow->ct;
+ #if defined(CONFIG_NF_CONNTRACK_MARK)
  		ct_mark = ct->mark;
+ #endif
  	}
  
 -	if (eth->qos_toggle == 2 && mtk_ppe_check_pppq_path(mac, idev, dsa_port))

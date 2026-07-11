@@ -228,9 +228,11 @@ build_dir, **not yet flashed or hardware-validated**:
 Naming sorts them after the harness patches (zzzz) and before the
 cacheline series (zzzzzz); neither later patch touches these regions.
 
-**NAND clock status:** the unvalidated 100 MHz SNFI DTS experiment has been
-reverted. Current images retain the validated default 50 MHz pad clock; do not
-reintroduce 100 MHz without a recovery-boot validation plan.
+**NAND clock status:** the unvalidated 100 MHz SNFI DTS experiment and the
+follow-up 60 MHz parent-clock experiment have both been reverted. Current
+images retain the validated default 50 MHz pad clock. Changing the SNFI parent
+is unsafe to test until a recovery-boot and flash-integrity validation plan is
+available; do not reintroduce either experiment meanwhile.
 
 ## Minimal protocol
 

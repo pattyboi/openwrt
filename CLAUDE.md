@@ -27,15 +27,17 @@ doc's "Operating rules" section points back here; don't fork a second copy.
 
 ## Build notes
 
-See `docs/BUILDING.md` (canonical seed `configs/e8450-ubi.config`, run
-`./scripts/build-e8450.sh`).
+See `docs/BUILDING.md` (canonical seed `configs/e8450-ubi.config`, run the
+interactive `./build-e8450v2.sh`).
 
 ## Status
 
 PROJECT GOALS MET: full offload stack (PPE hw-NAT, PPPQ QoS, WED v1,
 bridged-flow offload, fwmark→queue steering) live and hardware-verified.
 Current status, pending validation, and ranked next directions: see
-reference doc §Software paths — status / §Next-direction candidates.
+reference doc §Software paths — status / §Next-direction candidates. The
+actionable investigation order and safety gates are in
+`docs/OPTIMIZATION-ROADMAP.md`.
 
 ## Cache line audit task — CLOSED 2026-07-10
 

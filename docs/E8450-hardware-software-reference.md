@@ -1,8 +1,18 @@
 # E8450 / MT7622 — Condensed Hardware & Software-Path Reference
 
-Updated 2026-07-10 (SER quiesce first run — MCU-side failure, WED
-exonerated) on `e8450-hw-driven`. Supersedes scattered notes; raw probes
-in `.recall/router-probes/`.
+Updated 2026-07-11 (SER quiesce first run — no SoC/TX-BM lock, MCU-side
+failure) on `e8450-hw-driven`. This is the current interpretation of the
+recorded evidence; the live snapshot below was captured on 2026-07-09 and is
+not a claim about the router's present uptime or network address. Raw probes
+are in `.recall/router-probes/` when that local evidence store is available.
+
+Status labels in this document mean:
+
+- **tree fact** — directly visible in the DTS, Kconfig, patch, or packaged
+  script in this checkout;
+- **live-validated** — observed on hardware in a dated probe; scope and test
+  method are stated where they matter;
+- **candidate** — compiled or reasoned about, but not hardware-validated.
 
 ## Hardware map (verified live)
 
@@ -13,33 +23,33 @@ in `.recall/router-probes/`.
 | RAM | 512 MB DDR3 (489 MB usable, ~385 MB free) | ample |
 | Crypto | **No EIP97** (no clock gate in SoC clk tree — verdict final). ARMv8 CE active: aes/pmull/sha1/sha2; `*-ce` kernel drivers loaded | best-available in use |
 | Ethernet | mtk_eth `1b100000`, netsys **v1**, QDMA (16 TX queues live), 1 PDMA RX ring. No RSS/HWLRO hardware | PPE+PPPQ active |
-| Switch | MT7530 (mdio-bus:1f), 5 PHYs, DSA "mtk" tag; lan1-4 + wan | — |
+| Switch | **MT7531** at MDIO address `0x1f`, 5 user PHY ports, DSA `mtk` tag; lan1-4 + wan | tree fact; forwarding path live-validated |
 | PPE | 1 unit; debugfs `/sys/kernel/debug/ppe0/`; hw-NAT validated | active |
 | WED | v1 x2 (`1020a000`/`1020b000`); dmesg: `mt7915e 0000:01:00.0: attaching wed device 0 version 1` **confirmed hardware-attached**; debugfs `/sys/kernel/debug/wed0/` (regidx/regval/txinfo) | **WORKING** (boot-load only) |
 | Wi-Fi | wl0 = MT7622 WMAC (2.4G, mt7615e, phy0); wl1 = MT7915E PCIe `0000:01:00.0`, Gen2 x1 (5 GT/s, phy1) | both AP-capable |
-| PCIe | port0 = mt7915; **port1 (`1a145000`) enabled but no device/slot** | port1 dead weight |
+| PCIe | port0 carries MT7915E; port1 node (`1a145000`) is enabled in the DTS but no endpoint/slot was observed | port1 unused in the recorded live probe; do not infer a hardware fault from absence of an endpoint |
 | USB | xHCI + 3-phy T-PHY up, usb1/usb2 root hubs — **no external port on E8450** | unused |
 | Storage | SPI-NAND 128 MB UBI (bl2 + ubi), ECC engine `1100e000` | — |
 | Thermal | `cpu-thermal` zone (60.4 °C under light real traffic), mt7615_phy0 60°C, mt7915_phy1 54°C, auxadc | headroom OK |
 | TRNG | `1020f000.rng` (legacy MMIO mtk-rng) | active HWRNG; live-read and runtime-PM verified |
 | Watchdog | `mtk-wdt 10212000` | **cannot recover AXI-fabric hangs** |
 | Serial | ttyS0 console in DT — **no populated UART header** | pstore/ramoops instead |
-| Recovery | u-boot: `pstore check` → boots recovery volume when crash dumps present; reset-button TFTP path exists | see rules below |
+| Recovery | u-boot `pstore check` boots the recovery volume when crash dumps are present; reset-button/TFTP recovery is reported in the board workflow | recovery path is safety-critical; verify before destructive tests |
 | IRQs | 31 IRQs set 0-1 affinity (both CPUs). NET_RX softirq skew improved from 5:1 to ~1.5:1 CPU0:CPU1 after enabling `packet_steering` (see Closed investigations). `tc` not installed (no iproute2-tc). |
 
 ## Software paths — status
 
 | Path | Mechanism | Status |
 |---|---|---|
-| Routed v4 fwd | PPE hw-NAT (BND entries) | validated |
+| Routed v4 fwd | PPE hw-NAT (BND entries) | live-validated under recorded routed traffic |
 | WAN→WLAN fwd | PPE → WDMA → **WED v1** → mt7915 | validated (counters + MIB) |
 | Bridged LAN↔WLAN | nft bridging offload (`999-ppe-90/91/89`) | built, boots; helper/procedure added, E2E bind proof still pending |
-| QoS | PPPQ per-port queues + TCP-ACK prio (conntrack builtin) + DSCP learning (ppe-12/17) | validated |
-| Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | **validated live** (2026-07-10): BQL per-queue inflight during router-originated iperf3 — unmarked→tx-4 (DSA+3 path), mark 5→tx-5, mark 11→tx-11, mark 200 (≥16, out of range)→tx-4 fallback. Method: temp `nft` table `inet marktest` (route hook output, `meta mark set N`) + `/sys/class/net/eth0/queues/tx-*/byte_queue_limits/inflight` sampling (no tc/ftrace in image; feed kmods don't match self-built kernel). |
+| QoS | PPPQ per-port queues + TCP-ACK priority (conntrack builtin) + DSCP learning (ppe-12/17) | PPPQ/TCP-ACK path live-validated; DSCP behavior remains narrower and should be tested with bound transit flows |
+| Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | **live-validated only for router-originated traffic** (2026-07-10): BQL per-queue inflight showed unmarked→tx-4, mark 5→tx-5, mark 11→tx-11, and out-of-range mark 200→tx-4 fallback. Transit traffic that becomes PPE-bound bypasses this software TX selector; validate that separately before claiming a forwarding benefit. |
 | SW flowtable hash | seeded xxh32 tuple hash (`999-ppe-92`) | flashed; bind verified |
 | Inet/nft set hashes | upstream `jhash_1word()` / `jhash_3words()` / `jhash()` | experimental UMASH replacements removed 2026-07-10: no measured speedup, 64-bit collision claim lost after `u32` truncation, unsafe generic arm64 PMULL gate, and no differential test vectors. Reconsider only behind the benchmark/correctness gates in `docs/umash-port-task.md` — successor audit done 2026-07-11 (rapidhash selected, Komihash/XXH3 rejected) and the microbench candidate matrix is fixed there (§Next-phase microbenchmark). |
-| IRQ/RPS spread | `network.globals.packet_steering=2` + static hardirq pinning via `files/etc/rc.local` (eth0 RX IRQ→CPU0, eth0 TX IRQ→CPU1, mt7915e/mt7615e IRQs→CPU1) | **validated live** (2026-07-09): NET_RX softirq CPU0 10.8M / CPU1 7.1M (~1.5:1), vs. 5:1 pre-steering. NET_TX skew (~7.9:1) is real but not fixable this way — see Next-direction #6 (closed). |
-| SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | quiesce leg run 2026-07-10: **no SoC lock, no TX-BM hang** (breadcrumb reached start-entry ph=4 id=40), but mt7915 MCU died (msg 0x13ed timeout) → mt76 restart loop, wifi down until power cycle. Failure is MCU-side, not WED. Baseline quiesce=0 leg pending. See `docs/WED-breadcrumb-harness-design.md` §First SER quiesce run |
+| IRQ/RPS spread | `network.globals.packet_steering=2` + static hardirq pinning via `files/etc/rc.local` (eth0 RX IRQ→CPU0, eth0 TX IRQ→CPU1, mt7915e/mt7615e IRQs→CPU1) | **live-validated in one 2026-07-09 probe**: NET_RX improved from ~5:1 to ~1.5:1 under ~100 Mbps WAN traffic. NET_TX remained ~7.9:1 and is not evidence of a forwarding bottleneck because PPE-bound traffic bypasses the software TX path. |
+| SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | one quiesce=1 run reached WED start-entry without a SoC/TX-BM lock, but the MT7915 MCU died (`0x13ed` timeout) and Wi-Fi required a power cycle. This does not prove the patches fix SER; quiesce=0 control and a clean repeated run remain required. |
 | Debug | WED-AT tracer + `wed_attach_max_access` gate; eth stop/open stage harness; ramoops console+pmsg; sysrq + hung-task detector | all dormant, params default-off |
 
 ## Operating rules (hard-won — do not violate)
@@ -56,7 +66,7 @@ here. Supplementary detail not in CLAUDE.md:
    pinned to 1.1.1.1/1.0.0.1 (peerdns=0).
 3. Don't grep dmesg for `-i oops` — matches "ramoops"; use `BUG:|Call trace`.
 
-## Live state snapshot (2026-07-09 probe — 4d11h30m uptime)
+## Last recorded live snapshot (2026-07-09 probe — 4d11h30m uptime)
 
 ```
 Build : OpenWrt 25.12.4 r32933-4ccb782af7, kernel 6.12.87
@@ -153,17 +163,15 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
 
 ## Next-direction candidates (ranked)
 
-1. **cpufreq governor A/B** — `ondemand` (437 MHz floor) vs `performance`
-   for latency jitter under WED+PPE load.
-2. **Bridged-offload E2E validation** (ppe-90) with two LAN clients —
+1. **Bridged-offload E2E validation** (ppe-90) with two LAN clients —
    needs one wired + one Wi-Fi client on br-lan; procedure in
    `docs/e8450-bridged-offload-validation.md`. (The eth-27 mark→queue
    functional check that used to share this slot was **validated
    2026-07-10** — see Software paths table.)
-3. **WED soak/perf** at real WAN speeds (current upstream hop is ~100 Mbps
+2. **WED soak/perf** at real WAN speeds (current upstream hop is ~100 Mbps
    now — worth revisiting for real throughput numbers, was previously
    blocked at ~5 Mbps).
-4. **SER / `wed_v1_txbm_quiesce` A/B** — quiesce leg done 2026-07-10:
+3. **SER / `wed_v1_txbm_quiesce` A/B** — quiesce leg done 2026-07-10:
    no SoC lock / no TX-BM FIFO hang; instead the mt7915 MCU wedged
    (0x13ed = FW_LOG_2_HOST timeout → `mt7915_mac_full_reset` 10×
    restart loop, wifi down until power cycle). Code trace + SER patch
@@ -174,15 +182,18 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
    2026-07-10** as `999-zzzzz-wed-ser-01/-02` (compile-validated,
    applied to build_dir, NOT hardware-validated). The unvalidated NAND
    100 MHz DTS experiment was reverted, so current images retain the
-   default 50 MHz pad clock. Next steps: (a) 2×2 discriminator — WED
+   default 50 MHz pad clock. The 60 MHz follow-up was also reverted: changing
+   the SNFI parent is unsafe to test until a recovery-boot and flash-integrity
+   validation plan is available. Do not reintroduce either clock experiment.
+   Next steps: (a) 2×2 discriminator — WED
    attached/detached × quiesce=0/1, logging both params into dmesg at
    trigger time; (b) flash + retest SER with the backports. Full record:
    `docs/WED-breadcrumb-harness-design.md` §Code trace / §SER patch
    re-audit; evidence `docs/logs/wed-quiesce-ramoops-20260710.txt`.
-5. Optional upstream reports: runtime-bind WED AXI lock, mt7915e rebind
+4. Optional upstream reports: runtime-bind WED AXI lock, mt7915e rebind
    AXI lock, mt76 SER-during-probe NULL deref (evidence in
    `.recall/router-probes/2026-07-04-firstbind-wed-lock/`).
-6. ~~NET_TX softirq skew~~ — **closed, not actionable** (2026-07-09): root
+5. ~~NET_TX softirq skew~~ — **closed, not actionable** (2026-07-09): root
    is `mtk_eth_soc.c`'s custom `ndo_select_queue = mtk_select_queue`
    (the PPPQ/mark-based QoS queue picker, 999-eth-27), which overrides
    the stack's generic `netdev_pick_tx()` entirely — `xps_cpus` is
@@ -197,6 +208,6 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
    — two orders of magnitude smaller, not worth chasing further via
    sysfs/rc.local. Would need a change inside `mtk_select_queue()`
    itself to move the needle, a different scope of change entirely.
-7. Real PSKs — SSIDs/encryption were changed from open to `sae-mixed`
+6. Real PSKs — SSIDs/encryption were changed from open to `sae-mixed`
    (2026-07-09) but SSID names are still the OpenWrt defaults
    ("OpenWrt2"/"OpenWrt5"), not renamed.

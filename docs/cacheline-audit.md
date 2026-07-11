@@ -1,5 +1,10 @@
 # Cache line audit — MediaTek networking structs (MT7622 / E8450)
 
+> **Closed historical audit.** The measurements and flash-cycle notes below are
+> retained as evidence from 2026-07-10. They are not a pending test plan; use
+> the current [hardware/software reference](E8450-hardware-software-reference.md)
+> for project status.
+
 Date: 2026-07-10.  Methodology: net-next-6.8 networking struct
 reorganization (Coco Li / Paolo Abeni) — group read-mostly fast-path
 fields, isolate fast-path-written fields on their own cache lines,
@@ -11,23 +16,20 @@ cores (no OoO to hide the ~. L2/coherency miss penalty).  Kernel
 
 ## Status / deliverables
 
-- **Patch 01 (ACTIVE)**: `target/linux/mediatek/patches-6.12/`
+- **Patch 01 (RETAINED)**: `target/linux/mediatek/patches-6.12/`
   `999-zzzzzz-cacheline-01-mtk_eth-hot-cold-split.patch` — struct
   mtk_eth hot/cold split + static_assert guards + hardware-format
-  asserts in mtk_ppe.h.  Compile-verified, pahole-verified, built into
-  the image pending flash.
-- **Patch 02 (STAGED)**: `target/linux/mediatek/patches-staged/`
+  asserts in mtk_ppe.h. Compile-verified, pahole-verified, and retained
+  after hardware measurement.
+- **Patch 02 (RETAINED)**: `target/linux/mediatek/patches-6.12/`
   `999-zzzzzz-cacheline-02-mtk_tx_ring-writer-split.patch` — struct
-  mtk_tx_ring writer split.  Compile- and pahole-verified, then
-  reverted from the tree.  For flash cycle 2, `mv` it into
-  `patches-6.12/` and rebuild.  NOTE: it must live in a separate
-  directory, not as `.patch.disabled` — `scripts/patch-kernel.sh`
-  applies `${patchdir}/*` (every file, any suffix), so a "disabled"
-  suffix does not disable anything.
+  mtk_tx_ring writer split. It was compile- and pahole-verified, then
+  measured in the second flash cycle and retained after the neutral result.
 - `configs/e8450-ubi.config`: added `CONFIG_KERNEL_PERF_EVENTS=y` and
   `CONFIG_PACKAGE_perf=y` — the previous kernel had **no perf support**,
   so the Phase-5 measurements below were impossible until now.
-- NOT flashed.  One struct per flash cycle.
+- Both patches are now in the active patch directory; the flash-cycle results
+  below are historical measurements, not instructions to repeat them.
 
 ## Phase 1 — pahole layout survey
 
@@ -200,7 +202,7 @@ touches exactly one shared-dirty line instead of two.
   `offsetof(mtk_foe_ipv4.ib2) == 12`, `offsetof(mtk_foe_ipv6.ib2) ==
   52`, `offsetof(mtk_foe_bridge.ib2) == 16`.
 
-## Phase 5 — measurement plan (for the flash tomorrow)
+## Phase 5 — measurement plan and results
 
 **Take the baseline BEFORE flashing** — but note the old kernel has no
 perf support, so the baseline must be throughput/sirq-based:
@@ -236,11 +238,9 @@ structs.  To exercise the reorganized code use one of:
   the CPU path through `mtk_ppe_check_skb`).
 
 Success criterion: lower `l1d_cache_refill`-per-packet and/or higher
-slow-path iperf3 Mbps at equal CPU.  If patch 01 verifies healthy,
-enable patch 02 (`mv target/linux/mediatek/patches-staged/999-zzzzzz-
-cacheline-02-*.patch target/linux/mediatek/patches-6.12/`), rebuild
-(`make target/linux/clean && GOOGLE_CLANG=0 ./scripts/build-e8450.sh`),
-flash cycle 2, re-measure.
+slow-path iperf3 Mbps at equal CPU. The procedure below is retained as the
+historical measurement record; both patches have since been measured and are
+already in `target/linux/mediatek/patches-6.12/`.
 
 ### Cycle-1 results (2026-07-10, patch 01 + perf-O2 image live)
 

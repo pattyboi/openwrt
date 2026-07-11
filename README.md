@@ -23,13 +23,22 @@ image usable to migrate from a vendor stock firmware to OpenWrt, try the
 If your device is supported, please follow the **Info** link to see install
 instructions or consult the support resources listed below.
 
-## 
+## Download and support
 
 An advanced user may require additional or specific package. (Toolchain, SDK, ...) For everything else than simple firmware download, try the wiki download page:
 
 * [OpenWrt Wiki Download](https://openwrt.org/downloads)
 
 ## Development
+
+### E8450 project helpers
+
+The target-specific documentation map is in [`docs/README.md`](docs/README.md);
+build and flash workflows are documented in [`docs/BUILDING.md`](docs/BUILDING.md)
+and [`docs/FLASHING.md`](docs/FLASHING.md).
+
+Run `./build-e8450v2.sh` for the interactive E8450 build assistant and
+`./scripts/flashing/flash.sh` for the interactive flashing assistant.
 
 To build your own firmware you need a GNU/Linux, BSD or macOS system (case
 sensitive filesystem required). Cygwin is unsupported because of the lack of a

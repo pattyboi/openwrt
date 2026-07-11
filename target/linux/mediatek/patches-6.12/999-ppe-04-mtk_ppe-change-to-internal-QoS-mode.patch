@@ -78,7 +78,7 @@ Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
  		mtk_foe_entry_set_wdma(eth, foe, info.wdma_idx, info.queue,
  				       info.bss, info.wcid, info.amsdu);
  		if (mtk_is_netsys_v2_or_greater(eth)) {
-@@ -219,24 +225,50 @@
+@@ -219,24 +225,52 @@
  		goto out;
  	}
  
@@ -111,7 +111,9 @@ Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
 +
 +	if (f->flow && f->flow->ct) {
 +		ct = f->flow->ct;
++#if defined(CONFIG_NF_CONNTRACK_MARK)
 +		ct_mark = ct->mark;
++#endif
 +	}
 +
 +	if (eth->qos_toggle == 2 && mtk_ppe_check_pppq_path(mac, idev, dsa_port))

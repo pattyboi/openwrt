@@ -1,0 +1,19 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# Safer approach — look up IRQ by device name at boot time
+ETH_RX=$(grep "1b100000.ethernet" /proc/interrupts | \
+  head -1 | awk -F: '{print $1}' | tr -d ' ')
+ETH_TX=$(grep "1b100000.ethernet" /proc/interrupts | \
+  tail -1 | awk -F: '{print $1}' | tr -d ' ')
+MT7915=$(grep "mt7915e" /proc/interrupts | \
+  awk -F: '{print $1}' | tr -d ' ')
+WMAC=$(grep "mt7615e" /proc/interrupts | \
+  awk -F: '{print $1}' | tr -d ' ')
+
+echo 1 > /proc/irq/${ETH_RX}/smp_affinity
+echo 2 > /proc/irq/${ETH_TX}/smp_affinity
+echo 2 > /proc/irq/${MT7915}/smp_affinity
+echo 2 > /proc/irq/${WMAC}/smp_affinity
+
+exit 0

@@ -1,5 +1,11 @@
 # Phase 3 — SDK Patch Compatibility Verdicts (hardware-evidence driven)
 
+> **Historical verdict record.** This document captures the Phase 3 review and
+> its evidence as it stood on 2026-07-02. Some strategic conclusions were later
+> superseded by the WED/SER work. Use the [current hardware/software
+> reference](E8450-hardware-software-reference.md) for present status and
+> [docs/README.md](README.md) for the document map.
+
 Board: **Linksys E8450 (UBI)** · SoC **MediaTek MT7622** (NETSYSv1, WED v1) ·
 kernel 6.12.87 · OpenWrt 25.12.4 vanilla baseline (`ba915c2ee7`).
 

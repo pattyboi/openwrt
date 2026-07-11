@@ -1,8 +1,14 @@
 # E8450 / MT7622 — Project Summary & Reference
 
-**Authoritative consolidated reference (2026-07-02).** Basis for future patch
-investigation. Every claim here was cross-checked against saved hardware profile,
-git state, and built `build_dir` source. Companion doc:
+> **Historical snapshot — 2026-07-02.** This document is retained as an
+> investigation record. It is not current status. Start with
+> [`docs/README.md`](README.md) and the [current hardware/software
+> reference](E8450-hardware-software-reference.md) before building, flashing,
+> or interpreting any verdict below.
+
+This was the authoritative consolidated reference at the time of the snapshot.
+Every claim was cross-checked against the saved hardware profile, git state,
+and built `build_dir` source. Companion doc:
 [`PHASE3-patch-verdicts.md`](PHASE3-patch-verdicts.md) (per-patch verdicts).
 
 ---

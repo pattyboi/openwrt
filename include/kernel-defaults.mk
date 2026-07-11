@@ -11,6 +11,12 @@ INITRAMFS_EXTRA_FILES ?= $(GENERIC_PLATFORM_DIR)/image/initramfs-base-files.txt
 
 export HOST_EXTRACFLAGS=-I$(STAGING_DIR_HOST)/include
 
+ifneq ($(filter thin full,$(KERNEL_LTO)),)
+  ifeq ($(strip $(KERNEL_LLVM)),)
+    $(error KERNEL_LTO=$(KERNEL_LTO) requires a Clang kernel toolchain)
+  endif
+endif
+
 # defined in quilt.mk
 Kernel/Patch:=$(Kernel/Patch/Default)
 
@@ -112,6 +118,7 @@ endef
 define Kernel/Configure/Default
 	rm -f $(LINUX_DIR)/localversion
 	$(LINUX_CONF_CMD) > $(LINUX_DIR)/.config.target
+	$(if $(filter thin,$(KERNEL_LTO)),sed -i -e '/^CONFIG_LTO_NONE=/d' -e '/^# CONFIG_LTO_NONE is not set/d' -e '/^CONFIG_LTO_CLANG_FULL=/d' -e '/^# CONFIG_LTO_CLANG_FULL is not set/d' -e '/^CONFIG_LTO_CLANG_THIN=/d' -e '/^# CONFIG_LTO_CLANG_THIN is not set/d' $(LINUX_DIR)/.config.target; echo 'CONFIG_LTO_CLANG_THIN=y' >> $(LINUX_DIR)/.config.target;, $(if $(filter full,$(KERNEL_LTO)),sed -i -e '/^CONFIG_LTO_NONE=/d' -e '/^# CONFIG_LTO_NONE is not set/d' -e '/^CONFIG_LTO_CLANG_FULL=/d' -e '/^# CONFIG_LTO_CLANG_FULL is not set/d' -e '/^CONFIG_LTO_CLANG_THIN=/d' -e '/^# CONFIG_LTO_CLANG_THIN is not set/d' $(LINUX_DIR)/.config.target; echo 'CONFIG_LTO_CLANG_FULL=y' >> $(LINUX_DIR)/.config.target;,))
 # copy CONFIG_KERNEL_* settings over to .config.target
 	awk '/^(#[[:space:]]+)?CONFIG_KERNEL/{sub("CONFIG_KERNEL_","CONFIG_");print}' $(TOPDIR)/.config >> $(LINUX_DIR)/.config.target
 	echo "# CONFIG_KALLSYMS_EXTRA_PASS is not set" >> $(LINUX_DIR)/.config.target
@@ -125,6 +132,7 @@ define Kernel/Configure/Default
 		cp $(LINUX_DIR)/.config.set $(LINUX_DIR)/.config; \
 		cp $(LINUX_DIR)/.config.set $(LINUX_DIR)/.config.prev; \
 	}
+	$(if $(filter thin full,$(KERNEL_LTO)),$(_SINGLE)$(KERNEL_MAKE) olddefconfig)
 	$(_SINGLE) [ -d $(LINUX_DIR)/user_headers ] || $(KERNEL_MAKE) $(if $(findstring uml,$(BOARD)),ARCH=$(ARCH)) INSTALL_HDR_PATH=$(LINUX_DIR)/user_headers headers_install
 	grep '=[ym]' $(LINUX_DIR)/.config.set | LC_ALL=C sort | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
 endef

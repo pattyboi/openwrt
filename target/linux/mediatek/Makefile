@@ -19,6 +19,10 @@ DEFAULT_PACKAGES += \
 # scripts/Kconfig.include hard-rejects mold: "Sorry, this linker is not
 # supported"). Keep release/flash images on binutils ld (default) — the
 # linker is a validated variable on this box.
+ifneq ($(filter thin full,$(KERNEL_LTO)),)
+  FASTLD:=1
+endif
+
 ifneq ($(strip $(FASTLD)),)
   FAST_LD:=$(shell command -v ld.lld 2>/dev/null)
   ifeq ($(FAST_LD),)
