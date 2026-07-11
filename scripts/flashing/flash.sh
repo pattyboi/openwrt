@@ -57,8 +57,19 @@ command -v tftp >/dev/null 2>&1 || tftp_missing=1
 image=${1:-}
 vendor=${2:-}
 if [[ -z $image ]]; then
-    printf 'Firmware image: '
-    read -r image
+    # Default to this repo's built E8450 sysupgrade image when it exists.
+    repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+    default_image=$repo_root/bin/targets/mediatek/mt7622/openwrt-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb
+    if [[ -f $default_image ]]; then
+        printf 'Latest built E8450 image (%s):\n  %s\n' \
+            "$(date -r "$default_image" '+%Y-%m-%d %H:%M')" "$default_image"
+        printf 'Firmware image [press Enter for the image above]: '
+        read -r image
+        image=${image:-$default_image}
+    else
+        printf 'Firmware image: '
+        read -r image
+    fi
 fi
 [[ -f $image ]] || { printf 'Image not found: %s\n' "$image" >&2; exit 2; }
 
