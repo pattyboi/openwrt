@@ -110,6 +110,11 @@ eth-28, eth-36, eth-37, eth-38`, `ppe-20` (adaptive PPPQ needs NETSYSv3 shaper),
 
 **SER/forced-reset chain (not needed — baseline stable, no SER events):**
 `eth-04, eth-05, eth-11, eth-32`. *(Revisit only if instability observed.)*
+*(2026-07-10 update: a deliberate SER test wedged the mt7915 MCU — these
+four were re-read and stay SKIP (eth side stayed healthy; they're the FE
+reset framework, not a fix). But the audit promoted **wed-03 hunk 1** and
+**wed-13** to backport candidates — see
+`docs/WED-breadcrumb-harness-design.md` §SER patch re-audit.)*
 
 **Tuning not required for goal (revisit only if a specific need appears):**
 `eth-12` (EEE), `eth-17` (napi weight 256), `eth-29` (tx-full counter),

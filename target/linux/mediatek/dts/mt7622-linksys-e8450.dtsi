@@ -353,10 +353,6 @@
 &snfi {
 	pinctrl-names = "default";
 	pinctrl-0 = <&serial_nand_pins>;
-	/* default nfi_infra_sel parent univpll2_d8 gives a 50 MHz pad clock;
-	 * the W25N01GV is rated to 104 MHz, so use univpll2_d4 (100 MHz) */
-	assigned-clocks = <&topckgen CLK_TOP_NFI_INFRA_SEL>;
-	assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL2_D4>;
 	status = "okay";
 
 	snand: flash@0 {

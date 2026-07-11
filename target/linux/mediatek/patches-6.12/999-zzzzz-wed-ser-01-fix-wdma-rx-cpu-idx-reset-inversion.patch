@@ -1,0 +1,34 @@
+From: Rex Lu <rex.lu@mediatek.com>
+Subject: net: ethernet: mtk_wed: fix wdma rx hang on wed after SER
+
+Backport of hunk 1 of MTK SDK patch
+"[PATCH 03/15] fix wdma rx hang on wed1 after SER"
+(999-wed-03-fix-wdma-rx-hang-on-wed1-after-SER, recover the original via
+`git show eef2a51256:target/linux/mediatek/patches-6.12/...`).
+
+The desc check in mtk_wdma_rx_reset() is inverted: the CPU_IDX zeroing
+is applied only to rings that have NO descriptors, so every *active*
+WDMA RX ring comes out of an SER reset with a stale CPU index and the
+WDMA RX side resumes mid-ring. Verified still inverted in both vanilla
+6.12.87 and mainline master as of 2026-07-10 — never upstreamed.
+
+Motivation on this box: 2026-07-10 SER quiesce test wedged the mt7915
+MCU (FW_LOG_2_HOST 0x13ed timeout, mt7915_mac_full_reset 10x loop);
+mtk_wdma_rx_reset() runs inside that recovery path (breadcrumb id 32).
+See docs/WED-breadcrumb-harness-design.md "SER patch re-audit".
+
+Adaptation: hunk 2 of the SDK patch (WDMA RX prefetch SIDX/FIFO clears)
+is dropped — MTK_WED_WDMA_RX_PREF_CFG is v3-only hardware; MT7622 is
+WED v1.
+
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -361,7 +361,7 @@ mtk_wdma_rx_reset(struct mtk_wed_device
+ 	wdma_w32(dev, MTK_WDMA_RESET_IDX, 0);
+
+ 	for (i = 0; i < ARRAY_SIZE(dev->rx_wdma); i++) {
+-		if (dev->rx_wdma[i].desc)
++		if (!dev->rx_wdma[i].desc)
+ 			continue;
+
+ 		wdma_w32(dev,

@@ -1,0 +1,82 @@
+From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Subject: net: ethernet: mtk_wed: add WDMA disable flow to WiFi L1 SER
+
+Backport of MTK SDK patch
+"[PATCH 13/15] net: ethernet: mtk_wed: add WDMA disable flow to WiFi L1
+SER" (999-wed-13, recover the original via
+`git show eef2a51256:target/linux/mediatek/patches-6.12/...`).
+
+Original rationale (SDK commit message): without this, the WED driver
+cannot prevent packets from entering WDMA during WiFi L1 SER, causing
+incomplete packets to get stuck in the PSE, and the PSE buffer
+management transitions to a chaotic state.
+
+Motivation on this box: the 2026-07-10 SER quiesce test ran with live
+clients pushing traffic; the mt7915 MCU never answered again after the
+reset (FW_LOG_2_HOST 0x13ed timeout loop). This closes the window where
+the PPE keeps feeding WDMA while WED/WPDMA are being torn down.
+
+Adaptations vs the SDK original:
+- SDK's PSE_WDMA_PORT(id)/mtk_pse_wdma_enable assumed the v2+ port map
+  (8/9/13, second FE_GLO_CFG instance). NETSYSv1 maps WDMA to PSE port
+  3 (see the !mtk_is_netsys_v2_or_greater() branch in
+  mtk_flow_set_output_device()), single FE_GLO_CFG at 0x00, link-down
+  bit BIT(11) — the same register+bit family mtk_prepare_for_reset()
+  already uses. Helper is therefore v1-only and takes no port id.
+- Call sites gated with mtk_wed_is_v1() so v2/v3 behavior is unchanged
+  (this tree only drives MT7622, but keep it explicit).
+
+mtk_wed_reset_dma() is only reachable as the .reset_dma op (SER path);
+mtk_wed_start() always follows, so the disable/enable pairing is
+balanced. Both WED instances share PSE port 3 on v1; the bit toggle is
+idempotent.
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1636,6 +1636,25 @@
+ u32 mtk_r32(struct mtk_eth *eth, unsigned reg);
+ u32 mtk_m32(struct mtk_eth *eth, u32 mask, u32 set, unsigned int reg);
+ 
++/* Stop/resume traffic entering WDMA by toggling the FE link-down bit
++ * of the PSE WDMA port, so no partial packets lodge in the PSE while
++ * WED is reset during WiFi L1 SER. NETSYSv1 only: v1 maps WDMA to PSE
++ * port 3 (see mtk_flow_set_output_device()); v2/v3 WDMA ports (8/9/13)
++ * may need the second FE_GLO_CFG instance and are not wired here.
++ */
++static inline void mtk_pse_wdma_enable(struct mtk_eth *eth, bool enable)
++{
++	u32 port = 3;	/* NETSYSv1 PSE WDMA port */
++	u32 val;
++
++	val = mtk_r32(eth, MTK_FE_GLO_CFG(port));
++	if (enable)
++		val &= ~MTK_FE_LINK_DOWN_P(port);
++	else
++		val |= MTK_FE_LINK_DOWN_P(port);
++	mtk_w32(eth, val, MTK_FE_GLO_CFG(port));
++}
++
+ int mtk_gmac_sgmii_path_setup(struct mtk_eth *eth, int mac_id);
+ int mtk_gmac_2p5gphy_path_setup(struct mtk_eth *eth, int mac_id);
+ int mtk_gmac_gephy_path_setup(struct mtk_eth *eth, int mac_id);
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -1888,6 +1888,9 @@
+ 	u32 val;
+ 	int i;
+ 
++	if (mtk_wed_is_v1(dev->hw))
++		mtk_pse_wdma_enable(dev->hw->eth, false);
++
+ 	wed_bc_mark(WED_BC_PH_RESET_DMA, 30, 0);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(dev->tx_ring); i++) {
+@@ -2553,6 +2556,8 @@
+ 	mtk_wed_amsdu_init(dev);
+ 
+ 	mtk_wed_dma_enable(dev);
++	if (mtk_wed_is_v1(dev->hw))
++		mtk_pse_wdma_enable(dev->hw->eth, true);
+ 	dev->running = true;
+ }
+ 

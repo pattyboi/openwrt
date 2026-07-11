@@ -1,8 +1,8 @@
 # E8450 / MT7622 — Condensed Hardware & Software-Path Reference
 
-Updated 2026-07-09 (live-router probe, packet-steering validation) on
-`e8450-hw-driven`. Supersedes scattered notes; raw probes in
-`.recall/router-probes/`.
+Updated 2026-07-10 (SER quiesce first run — MCU-side failure, WED
+exonerated) on `e8450-hw-driven`. Supersedes scattered notes; raw probes
+in `.recall/router-probes/`.
 
 ## Hardware map (verified live)
 
@@ -39,7 +39,7 @@ Updated 2026-07-09 (live-router probe, packet-steering validation) on
 | SW flowtable hash | seeded xxh32 tuple hash (`999-ppe-92`) | flashed; bind verified |
 | Inet/nft set hashes | upstream `jhash_1word()` / `jhash_3words()` / `jhash()` | experimental UMASH replacements removed 2026-07-10: no measured speedup, 64-bit collision claim lost after `u32` truncation, unsafe generic arm64 PMULL gate, and no differential test vectors. Reconsider only behind the benchmark/correctness gates in `docs/umash-port-task.md` — successor audit done 2026-07-11 (rapidhash selected, Komihash/XXH3 rejected) and the microbench candidate matrix is fixed there (§Next-phase microbenchmark). |
 | IRQ/RPS spread | `network.globals.packet_steering=2` + static hardirq pinning via `files/etc/rc.local` (eth0 RX IRQ→CPU0, eth0 TX IRQ→CPU1, mt7915e/mt7615e IRQs→CPU1) | **validated live** (2026-07-09): NET_RX softirq CPU0 10.8M / CPU1 7.1M (~1.5:1), vs. 5:1 pre-steering. NET_TX skew (~7.9:1) is real but not fixable this way — see Next-direction #6 (closed). |
-| SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | now testable (WED live) |
+| SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | quiesce leg run 2026-07-10: **no SoC lock, no TX-BM hang** (breadcrumb reached start-entry ph=4 id=40), but mt7915 MCU died (msg 0x13ed timeout) → mt76 restart loop, wifi down until power cycle. Failure is MCU-side, not WED. Baseline quiesce=0 leg pending. See `docs/WED-breadcrumb-harness-design.md` §First SER quiesce run |
 | Debug | WED-AT tracer + `wed_attach_max_access` gate; eth stop/open stage harness; ramoops console+pmsg; sysrq + hung-task detector | all dormant, params default-off |
 
 ## Operating rules (hard-won — do not violate)
@@ -140,8 +140,14 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
   Everything else v2/v3-era is hardware-gated (WED RX/RRO/AMSDU, WO fw,
   SRAM rings, v3 rate format).
 - pcie-01..04 SDK: gen3 controller only (MT7622 = gen2 driver).
-- WED filogic patch series: v1 mainline works; revisit wed-03/13/14/16 only
-  if SER tests show WDMA hangs.
+- WED filogic patch series: v1 mainline works for steady-state. **Reopened
+  for SER (2026-07-10)**: the SER quiesce run motivated a re-audit —
+  wed-03 hunk 1 (WDMA RX CPU_IDX reset inversion, still broken in
+  mainline master) and wed-13 (PSE→WDMA packet block during SER) are now
+  backport candidates; wed-14 is v3-only, wed-16 medium/hold. Full audit:
+  `docs/WED-breadcrumb-harness-design.md` §SER patch re-audit. Patch
+  files recoverable via `git show eef2a51256:target/linux/mediatek/patches-6.12/999-wed-*.patch`
+  (eth ones: `f994c928e7`).
 - eth0 stop/open "lock": was host-NIC misdiagnosis; path is fine.
 - mtk_eth_set_dma_device close/reopen: exonerated.
 
@@ -157,8 +163,22 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
 3. **WED soak/perf** at real WAN speeds (current upstream hop is ~100 Mbps
    now — worth revisiting for real throughput numbers, was previously
    blocked at ~5 Mbps).
-4. **SER / `wed_v1_txbm_quiesce` A/B** — the original harness plan, now
-   unblocked.
+4. **SER / `wed_v1_txbm_quiesce` A/B** — quiesce leg done 2026-07-10:
+   no SoC lock / no TX-BM FIFO hang; instead the mt7915 MCU wedged
+   (0x13ed = FW_LOG_2_HOST timeout → `mt7915_mac_full_reset` 10×
+   restart loop, wifi down until power cycle). Code trace + SER patch
+   re-audit done (see harness doc): prime fix candidates are SDK
+   wed-03 hunk 1 (WDMA RX CPU_IDX reset inversion — verified still
+   broken in mainline master) and wed-13 (PSE→WDMA block during SER,
+   needs v1 port-macro adaptation). **Both backports prepared
+   2026-07-10** as `999-zzzzz-wed-ser-01/-02` (compile-validated,
+   applied to build_dir, NOT hardware-validated; next image also
+   carries the unvalidated NAND 100 MHz dtsi — resolve before
+   flashing). Next steps: (a) 2×2 discriminator — WED
+   attached/detached × quiesce=0/1, logging both params into dmesg at
+   trigger time; (b) flash + retest SER with the backports. Full record:
+   `docs/WED-breadcrumb-harness-design.md` §Code trace / §SER patch
+   re-audit; evidence `docs/logs/wed-quiesce-ramoops-20260710.txt`.
 5. Optional upstream reports: runtime-bind WED AXI lock, mt7915e rebind
    AXI lock, mt76 SER-during-probe NULL deref (evidence in
    `.recall/router-probes/2026-07-04-firstbind-wed-lock/`).
