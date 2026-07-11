@@ -228,10 +228,9 @@ build_dir, **not yet flashed or hardware-validated**:
 Naming sorts them after the harness patches (zzzz) and before the
 cacheline series (zzzzzz); neither later patch touches these regions.
 
-**FLASH WARNING:** any image built now also carries the unvalidated
-NAND 100 MHz dtsi change (see `bd`/memory note from the aborted NAND
-validation) — revert or consciously accept that before flashing an
-SER-fix build.
+**NAND clock status:** the unvalidated 100 MHz SNFI DTS experiment has been
+reverted. Current images retain the validated default 50 MHz pad clock; do not
+reintroduce 100 MHz without a recovery-boot validation plan.
 
 ## Minimal protocol
 

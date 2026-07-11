@@ -172,9 +172,9 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
    broken in mainline master) and wed-13 (PSE→WDMA block during SER,
    needs v1 port-macro adaptation). **Both backports prepared
    2026-07-10** as `999-zzzzz-wed-ser-01/-02` (compile-validated,
-   applied to build_dir, NOT hardware-validated; next image also
-   carries the unvalidated NAND 100 MHz dtsi — resolve before
-   flashing). Next steps: (a) 2×2 discriminator — WED
+   applied to build_dir, NOT hardware-validated). The unvalidated NAND
+   100 MHz DTS experiment was reverted, so current images retain the
+   default 50 MHz pad clock. Next steps: (a) 2×2 discriminator — WED
    attached/detached × quiesce=0/1, logging both params into dmesg at
    trigger time; (b) flash + retest SER with the backports. Full record:
    `docs/WED-breadcrumb-harness-design.md` §Code trace / §SER patch
