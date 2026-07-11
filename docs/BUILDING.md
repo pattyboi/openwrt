@@ -1,11 +1,26 @@
 # Building the E8450 image
 
-- Canonical build seed: `configs/e8450-ubi.config`. Run
-  `./scripts/build-e8450.sh`, or `CLEAN=1 ./scripts/build-e8450.sh` for a
-  clean build; set `JOBS` to override the default `nproc` parallelism. The
-  wrapper defaults to pinned Google Clang 20 (`clang-r547379`) for the kernel
-  and kernel modules while retaining GCC for userspace; set `GOOGLE_CLANG=0`
-  for the GCC kernel baseline. The toolchain is cached outside the tree.
+- Canonical build seed: `configs/e8450-ubi.config`. Run the interactive
+  `./build-e8450v2.sh`; it asks for jobs, optional system Clang, optional
+  Google Clang where the host supports the pinned x86_64 bundle, optional LLD,
+  clean build, and the make target. `./scripts/build-e8450v2.sh` is a compatibility
+  entry point for callers that expect the script under `scripts/`.
+- System Clang and Google Clang affect the kernel and kernel modules; userspace
+  remains GCC. The options are opt-in on unsupported or unvalidated hosts.
+  LLD is opt-in and should not be used for an image intended for hardware
+  flashing until that image has been validated.
+- The equivalent manual build-tree switch is
+  `make target/linux/compile SYSTEM_CLANG=1`; it fails clearly if `clang` is
+  not in `PATH`. Do not combine `SYSTEM_CLANG=1` with `GOOGLE_CLANG=1`.
+- When either system Clang or the pinned Google Clang toolchain is selected, the
+  assistant offers kernel `LTO_NONE`, experimental `ThinLTO`, or experimental
+  `Full LTO`. ThinLTO is the sensible iteration candidate; Full LTO can consume
+  substantially more memory and link time. Either LTO mode automatically
+  enables the LLD fast-link path and fails if `ld.lld` is unavailable. GCC
+  builds remain LTO-free.
+- The current build host is `aarch64`, has no system `clang`, and cannot run the
+  pinned Linux-x86 Google prebuilt. The assistant detects this and falls back to
+  GCC instead of attempting an unusable toolchain.
 - Patches: `target/linux/mediatek/patches-6.12/999-*` (diffs vs vanilla;
   quilt applies in filename order — 999-ppe-90/91 are rebased ON ppe-17/21).
 - Kernel debug/size flags are buildroot symbols in the UNTRACKED `.config`:
@@ -23,8 +38,8 @@
   do not swap it for a non-crypto hash (see
   `docs/umash-port-task.md` for the closed rapidhash investigation).
 - **Fast kernel link — opt-in, iteration builds only**:
-  `FASTLD=1 ./scripts/build-e8450.sh target/linux/compile` (hook in
-  `target/linux/mediatek/Makefile` passes `LD=ld.lld` to kbuild).
+  Select the LLD option in `./build-e8450v2.sh` for iteration builds (the hook
+  in `target/linux/mediatek/Makefile` passes `LD=ld.lld` to kbuild).
   It requires the host `lld` package and fails explicitly if `ld.lld` is
   unavailable; verify with `ld.lld --version` before relying on it.
   mold was tried first and is a dead end for the kernel: 6.12's
@@ -33,9 +48,6 @@
   stays installed for potential host-side use. Deliberately NOT the
   default: the linker is a validated variable — build anything you
   intend to FLASH with the default binutils ld.
-- **Governor**: `build-e8450.sh` pins all CPUs to `performance`
-  (best-effort; Pi 5 default schedutil ramps late under bursty
-  compile load).
 - Tree and ccache dir live on the NVMe root — keep it that way.
 
 ## E8450 image scope
@@ -43,11 +55,12 @@
 The seed deliberately omits iptables/xt-offload, GRE/PPTP/L2TP/UDP-tunnel,
 macvlan, netconsole, conntrack-event userspace, DNS auth/nftset extensions,
 TFTP, and OpenSSL's legacy algorithms/engine support. The hardware and
-live-path audit establishes fw4/nft as the firewall, no crypto engine or
-exposed USB port, no tunnel requirement, no active nft sets, and a broken
-netconsole path. Keep the retained IPv6, DNSSEC, conntrack, `perf`, pstore,
-and Wi-Fi/RPC support: each has an active operational or validation use
-documented for this target. DNSSEC pulls `libnettle`/`libgmp`; the selected
+live-path audit establishes fw4/nft as the firewall, no crypto engine, no
+tunnel requirement, no active nft sets, and a broken netconsole path. Keep
+the retained IPv6, DNSSEC, conntrack, `perf`, pstore, USB mass-storage/FAT
+support (for the guarded USB sysupgrade recovery path), and Wi-Fi/RPC support:
+each has an active operational or validation use documented for this target.
+DNSSEC pulls `libnettle`/`libgmp`; the selected
 `wpad-openssl` package itself pulls the OpenSSL legacy-provider package even
 though all legacy algorithms are disabled. Re-add a removed item only with a
 concrete deployment need.

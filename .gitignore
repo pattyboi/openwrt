@@ -14,6 +14,11 @@
 /feeds
 /feeds.conf
 /files
+!/files/
+!/files/etc/
+!/files/etc/hotplug.d/
+!/files/etc/hotplug.d/block/
+!/files/etc/hotplug.d/block/95-e8450-usb-sysupgrade
 /target/linux/feeds
 /overlay
 /package/feeds

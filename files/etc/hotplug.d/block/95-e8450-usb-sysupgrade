@@ -1,0 +1,73 @@
+#!/bin/sh
+# Flash an E8450 sysupgrade image from a specifically prepared USB drive.
+# The image is staged in RAM so it remains available after sysupgrade pivots
+# to its ramfs.  This is deliberately automatic once the exact filename is
+# detected: it is an out-of-band recovery path when SSH is unavailable.
+
+IMAGE_NAME=e8450-sysupgrade.itb
+MOUNT_DIR=/tmp/e8450-usb-sysupgrade-mount
+STAGED_IMAGE=/tmp/e8450-usb-sysupgrade.itb
+LOCK_DIR=/tmp/e8450-usb-sysupgrade.lock
+
+log() {
+	logger -t e8450-usb-sysupgrade -- "$*"
+}
+
+[ "${ACTION:-}" = add ] || exit 0
+[ "${DEVTYPE:-}" = partition ] || exit 0
+case ${DEVNAME:-} in
+	sd[a-z][0-9]*) ;;
+	*) exit 0 ;;
+esac
+
+# Only one insertion can initiate an upgrade.  Keep the lock once a valid
+# image has been found: the router will immediately reboot into sysupgrade.
+mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+
+cleanup() {
+	umount "$MOUNT_DIR" 2>/dev/null || true
+	rmdir "$MOUNT_DIR" 2>/dev/null || true
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
+mkdir -p "$MOUNT_DIR" || {
+	log "cannot create temporary mount directory"
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+	exit 1
+}
+
+# FAT/FAT32 keeps the recovery drive easy to prepare on any workstation.
+if ! mount -t vfat -o ro,nosuid,nodev,noexec "/dev/$DEVNAME" "$MOUNT_DIR"; then
+	cleanup
+	exit 0
+fi
+
+image="$MOUNT_DIR/$IMAGE_NAME"
+if [ ! -f "$image" ]; then
+	cleanup
+	exit 0
+fi
+
+log "found $IMAGE_NAME on /dev/$DEVNAME; staging image"
+if ! cp "$image" "$STAGED_IMAGE" || ! sync; then
+	log "failed to stage $IMAGE_NAME from /dev/$DEVNAME"
+	cleanup
+	exit 1
+fi
+
+umount "$MOUNT_DIR" || {
+	log "cannot unmount /dev/$DEVNAME after staging"
+	cleanup
+	exit 1
+}
+rmdir "$MOUNT_DIR" 2>/dev/null || true
+
+if ! /sbin/sysupgrade -T "$STAGED_IMAGE"; then
+	log "rejected invalid or incompatible USB sysupgrade image"
+	rm -f "$STAGED_IMAGE"
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+	exit 1
+fi
+
+log "validated USB image; commencing sysupgrade with saved configuration"
+exec /sbin/sysupgrade "$STAGED_IMAGE"
