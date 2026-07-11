@@ -124,55 +124,39 @@ fi
 cp configs/e8450-ubi.config .config
 make defconfig
 
-# This repository's generated target metadata does not preserve these hidden
-# string symbols during defconfig, even though the selector symbols remain.
-# Restore them before invoking any target build so KERNEL_PATCHVER and the
-# E8450 device profile resolve deterministically.
-sed -i \
-	-e '/^CONFIG_TARGET_mediatek=/d' \
-	-e '/^CONFIG_TARGET_mediatek_mt7622=/d' \
-	-e '/^CONFIG_TARGET_mediatek_mt7622_DEVICE_linksys_e8450-ubi=/d' \
-	-e '/^CONFIG_TARGET_BOARD=/d' \
-	-e '/^CONFIG_TARGET_SUBTARGET=/d' \
-	-e '/^CONFIG_TARGET_PROFILE=/d' \
-	-e '/^CONFIG_ARCH=/d' \
-	-e '/^CONFIG_TARGET_ARCH_PACKAGES=/d' \
-	-e '/^CONFIG_CPU_TYPE=/d' \
-	-e '/^CONFIG_PACKAGE_dropbear=/d' \
-	-e '/^CONFIG_PACKAGE_kmod-fs-vfat=/d' \
-	-e '/^CONFIG_PACKAGE_kmod-usb-storage=/d' \
-	-e '/^CONFIG_PACKAGE_kmod-usb-xhci-mtk=/d' \
-	-e '/^CONFIG_PACKAGE_kmod-usb3=/d' \
-	.config
-cat >> .config <<'EOF'
-CONFIG_TARGET_mediatek=y
-CONFIG_TARGET_mediatek_mt7622=y
-CONFIG_TARGET_mediatek_mt7622_DEVICE_linksys_e8450-ubi=y
-CONFIG_TARGET_BOARD="mediatek"
-CONFIG_TARGET_SUBTARGET="mt7622"
-CONFIG_TARGET_PROFILE="DEVICE_linksys_e8450-ubi"
-CONFIG_ARCH="aarch64"
-CONFIG_TARGET_ARCH_PACKAGES="aarch64_cortex-a53"
-CONFIG_CPU_TYPE="cortex-a53"
-CONFIG_PACKAGE_dropbear=y
-CONFIG_PACKAGE_kmod-fs-vfat=y
-CONFIG_PACKAGE_kmod-usb-storage=y
-CONFIG_PACKAGE_kmod-usb-xhci-mtk=y
-CONFIG_PACKAGE_kmod-usb3=y
-EOF
-
-# Generated target Kconfig also drops this explicit package selection during
-# defconfig. Reapply it with the restored target metadata, then fail closed if
-# a future config change removes the SSH daemon from a flash image.
-require_config_symbol 'CONFIG_PACKAGE_dropbear=y'
-require_config_symbol 'CONFIG_PACKAGE_kmod-fs-vfat=y'
-require_config_symbol 'CONFIG_PACKAGE_kmod-usb-storage=y'
-require_config_symbol 'CONFIG_PACKAGE_kmod-usb-xhci-mtk=y'
-require_config_symbol 'CONFIG_PACKAGE_kmod-usb3=y'
+# defconfig deletes any symbol the generated Kconfig metadata does not know.
+# That only happens when tmp/ holds a stale or failed target scan (the
+# toplevel targetinfo dump rule hides scan errors), and it silently strips
+# every profile default package from the image — 2026-07-11 incident. Never
+# patch the symbols back into .config; the next config sync discards them
+# again. Fail loudly and point at the cure.
+check_defconfig_kept() {
+	grep -Fqx "$1" .config || die "$1 vanished during defconfig — target metadata is stale or broken; run: rm -rf tmp && ./build-e8450v2.sh"
+}
+check_defconfig_kept 'CONFIG_TARGET_mediatek_mt7622_DEVICE_linksys_e8450-ubi=y'
+check_defconfig_kept 'CONFIG_TARGET_PROFILE="DEVICE_linksys_e8450-ubi"'
+check_defconfig_kept 'CONFIG_PACKAGE_dropbear=y'
+check_defconfig_kept 'CONFIG_PACKAGE_kmod-fs-vfat=y'
+check_defconfig_kept 'CONFIG_PACKAGE_kmod-usb-storage=y'
+check_defconfig_kept 'CONFIG_PACKAGE_kmod-usb-xhci-mtk=y'
+check_defconfig_kept 'CONFIG_PACKAGE_kmod-usb3=y'
 
 printf '%s\n' '==========================================='
 printf 'Building target %s with -j%s (system Clang=%s, Google Clang=%s, LTO=%s, FASTLD=%s)\n' \
 	"$target" "$jobs" "$SYSTEM_CLANG" "$GOOGLE_CLANG" "$KERNEL_LTO" "$FASTLD"
 printf '%s\n' '==========================================='
-if [ "$target" = all ]; then exec make -j"$jobs"; fi
-exec make -j"$jobs" "$target"
+if [ "$target" = all ]; then
+	make -j"$jobs"
+else
+	exec make -j"$jobs" "$target"
+fi
+
+# The .config checks above cannot see a config re-sync that happens inside
+# make, so gate the shipped artifact itself: a flash image without these
+# packages has no SSH and no USB recovery path.
+manifest=bin/targets/mediatek/mt7622/openwrt-mediatek-mt7622-linksys_e8450-ubi.manifest
+[ -f "$manifest" ] || die "build finished but $manifest is missing"
+for pkg in dropbear firewall4 kmod-mt7615e kmod-mt7915e kmod-fs-vfat kmod-usb-storage; do
+	grep -q "^$pkg " "$manifest" || die "built image is missing '$pkg' ($manifest) — DO NOT FLASH; target metadata was stale during the build; run: rm -rf tmp && ./build-e8450v2.sh"
+done
+printf 'Image manifest verified: SSH, firewall, wifi, and USB recovery packages are present.\n'

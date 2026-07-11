@@ -85,29 +85,38 @@ if [[ $vendor == e8450 ]]; then
     exec "$helper" "$image"
 fi
 
-[[ ${tftp_missing:-0} -eq 0 ]] || { printf 'tftp is required for legacy TFTP flashing.\n' >&2; exit 2; }
 case $vendor in
     asus|linksys|toshiba) ;;
     *) printf 'Unknown flash method: %s\n' "$vendor" >&2; usage >&2; exit 2 ;;
 esac
+[[ ${tftp_missing:-0} -eq 0 ]] || { printf 'tftp is required for legacy TFTP flashing.\n' >&2; exit 2; }
 
 case $vendor in
     asus|linksys) host=192.168.1.1 ;;
     toshiba) host=192.168.10.1 ;;
 esac
 
+# tftp takes the filename literally (it is not a shell), so %q escaping would
+# corrupt it; names with whitespace cannot be passed through tftp's line input.
+[[ $image != *[[:space:]]* ]] || { printf 'Image path must not contain whitespace for TFTP transfer.\n' >&2; exit 2; }
+
 cat <<EOF
 Connect the computer directly to a LAN port and set a static address on the
-same subnet as $host. Do not interrupt power while the router writes flash.
+same subnet as $host, with the router still POWERED OFF (Asus: power on in
+recovery with the reset button held; be sure boot_wait is set to yes).
+The transfer retries until the bootloader answers: start it first, THEN
+power the router on. Do not interrupt power while the router writes flash.
 EOF
-printf 'Ready to send %s to %s? (y/N): ' "$image" "$host"
+printf 'Ready to start sending %s to %s? (y/N): ' "$image" "$host"
 read -r confirm
 [[ $confirm == y || $confirm == Y ]] || { printf 'Cancelled.\n'; exit 0; }
-
 if [[ $vendor == asus ]]; then
     printf 'get ASUSSPACELINK\x01\x01\xa8\xc0 /dev/null\nquit\n' | tftp "$host"
-    printf 'binary\nput %q ASUSSPACELINK\nquit\n' "$image" | tftp "$host"
+    printf 'binary\nput %s ASUSSPACELINK\nquit\n' "$image" | tftp "$host"
 else
-    printf 'rexmt 1\ntrace\nbinary\nput %q\nquit\n' "$image" | tftp "$host"
+    printf 'rexmt 1\ntrace\nbinary\nput %s\nquit\n' "$image" | tftp "$host"
 fi
-printf 'Transfer complete. Follow the router LEDs and keep power connected until it reboots.\n'
+# Classic tftp clients exit 0 even on timeout, so success cannot be asserted
+# here — the transfer status lines above are the only reliable indicator.
+printf 'tftp session ended — check its output above for "Sent" confirmation or errors.\n'
+printf 'If the transfer succeeded, follow the router LEDs and keep power connected until it reboots.\n'
