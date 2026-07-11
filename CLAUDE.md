@@ -45,8 +45,9 @@ and 999-zzzzzz-perf-01 (-O2 datapath) are live in `patches-6.12/` and
 stay. Verdict: GbE line rate is not cache-limited on this box; don't
 reopen struct-reorg work unless a workload binds on l1d refills/CPU.
 
-## UMASH port task
+## Hash replacement investigation
 
-See `docs/umash-port-task.md` for the experimental UMASH hash-port brief
-(objective, port structure, hard constraints, and audit procedure for
-finding more call sites). Only load it when actively working on that task.
+The experimental UMASH port was removed after correctness and benchmark
+review. See `docs/umash-port-task.md` for the closed-investigation verdict,
+reasons it must not be restored as-is, and the benchmark gate for any future
+hash replacement or PMULL experiment.

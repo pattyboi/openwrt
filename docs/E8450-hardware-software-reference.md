@@ -37,6 +37,7 @@ Updated 2026-07-09 (live-router probe, packet-steering validation) on
 | QoS | PPPQ per-port queues + TCP-ACK prio (conntrack builtin) + DSCP learning (ppe-12/17) | validated |
 | Mark-based QoS | `skb->mark` 1..N-1 → QDMA queue (`999-eth-27`) | **validated live** (2026-07-10): BQL per-queue inflight during router-originated iperf3 — unmarked→tx-4 (DSA+3 path), mark 5→tx-5, mark 11→tx-11, mark 200 (≥16, out of range)→tx-4 fallback. Method: temp `nft` table `inet marktest` (route hook output, `meta mark set N`) + `/sys/class/net/eth0/queues/tx-*/byte_queue_limits/inflight` sampling (no tc/ftrace in image; feed kmods don't match self-built kernel). |
 | SW flowtable hash | seeded xxh32 tuple hash (`999-ppe-92`) | flashed; bind verified |
+| Inet/nft set hashes | upstream `jhash_1word()` / `jhash_3words()` / `jhash()` | experimental UMASH replacements removed 2026-07-10: no measured speedup, 64-bit collision claim lost after `u32` truncation, unsafe generic arm64 PMULL gate, and no differential test vectors. Reconsider only behind the benchmark/correctness gates in `docs/umash-port-task.md` — successor audit done 2026-07-11 (rapidhash selected, Komihash/XXH3 rejected) and the microbench candidate matrix is fixed there (§Next-phase microbenchmark). |
 | IRQ/RPS spread | `network.globals.packet_steering=2` + static hardirq pinning via `files/etc/rc.local` (eth0 RX IRQ→CPU0, eth0 TX IRQ→CPU1, mt7915e/mt7615e IRQs→CPU1) | **validated live** (2026-07-09): NET_RX softirq CPU0 10.8M / CPU1 7.1M (~1.5:1), vs. 5:1 pre-steering. NET_TX skew (~7.9:1) is real but not fixable this way — see Next-direction #6 (closed). |
 | SER recovery | `wl1 mt76 sys_recovery`; `wed_v1_txbm_quiesce` A/B harness in tree | now testable (WED live) |
 | Debug | WED-AT tracer + `wed_attach_max_access` gate; eth stop/open stage harness; ramoops console+pmsg; sysrq + hung-task detector | all dormant, params default-off |
@@ -120,6 +121,14 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
   is now enabled in `config-6.12`; note the CCI PMU can't arbitrate
   intra-cluster false sharing (that's SCU territory) and a multiplexed
   CCI event group costs ~100 Mbps while counting.
+- UMASH hash-port experiment (2026-07-10): **closed and removed**. The
+  hand port and inet/nft call-site conversions were compile/boot tested but
+  had no isolated performance measurement. More importantly, the converted
+  tables consumed only the low 32 bits, so the advertised full-width UMASH
+  collision bound did not describe their effective hash; the generic arm64
+  Kconfig gate also did not guarantee PMULL. Keep the upstream jhash baseline.
+  Any future replacement must pass the differential-vector, target microbench,
+  and one-subsystem-per-image gates in `docs/umash-port-task.md`.
 - Netsys v2/v3 backport audit (2026-07-10): surveyed upstream
   drivers/net/ethernet/mediatek v6.12..master for v1-applicable WED/PPPQ
   work — **nothing left to take**. 6.12-LTS already carries the QDMA

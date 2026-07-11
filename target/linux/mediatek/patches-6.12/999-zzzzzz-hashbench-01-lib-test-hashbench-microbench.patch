@@ -1,0 +1,576 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] lib: add test_hashbench short-key hash microbenchmark module
+
+On-target microbenchmark for the hash-replacement candidate matrix in
+docs/umash-port-task.md (gate 3): dependent-latency cycles/hash and
+retired instructions/hash for jhash_1word/jhash_3words/jhash (baseline),
+a scalar rapidhash V3 Nano/Micro port with low^high 32-bit fold and
+per-boot random secret (candidates), and xxh32 (control), at 4-64 byte
+keys on the MT7622's Cortex-A53.
+
+The rapidhash port is differentially verified against upstream
+rapidhash V3 (github.com/Nicoshev/rapidhash): 24080 cases, lengths
+0-300 x alignment offsets 0-7 x 5 seeds, Nano and Micro, 0 mismatches.
+Codegen check: 128-bit products compile to mul+umulh pairs, no
+__multi3 libcalls.
+
+perf kernel counters own and program the PMU counters, but reads go
+straight to the registers (PMCCNTR_EL0, PMSELR_EL0+PMXEVCNTR_EL0;
+hw.idx 0-30 = PMEVCNTR<n>, 31 = cycle counter in 6.12 arm_pmuv3), so
+the module needs no symbols beyond standard exports - notably not
+perf_event_read_local(), which 6.12 does not export - and can be
+loaded on a running kernel built from this tree without reflashing.
+Falls back to ktime ns if no PMU. Built as unpackaged =m: the .ko
+lands in the kernel build dir for scp, the image is unchanged.
+
+Usage (on the router, output in dmesg):
+  insmod test_hashbench.ko [bench_cpu=1] [rapid_fixed=1] [align_offset=N]
+Init returns -EAGAIN by design so re-runs need no rmmod.
+
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -2288,6 +2288,19 @@
+ 
+ 	  If unsure, say N.
+ 
++config TEST_HASHBENCH
++	tristate "On-target short-key hash microbenchmark"
++	depends on ARM64 && ARCH_SUPPORTS_INT128
++	select XXHASH
++	help
++	  Kernel module that measures dependent-latency cycles/hash and
++	  retired instructions/hash for jhash, xxh32 and a scalar
++	  rapidhash V3 port at packet-path key sizes (4-64 bytes), using
++	  perf kernel counters. Results are printed to the kernel log at
++	  module load; init returns -EAGAIN by design so it can be re-run.
++
++	  If unsure, say N.
++
+ config KPROBES_SANITY_TEST
+ 	tristate "Kprobes sanity tests" if !KUNIT_ALL_TESTS
+ 	depends on DEBUG_KERNEL
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -68,6 +68,7 @@
+ obj-$(CONFIG_TEST_IOV_ITER) += kunit_iov_iter.o
+ obj-$(CONFIG_HASH_KUNIT_TEST) += test_hash.o
+ obj-$(CONFIG_TEST_IDA) += test_ida.o
++obj-$(CONFIG_TEST_HASHBENCH) += test_hashbench.o
+ obj-$(CONFIG_TEST_UBSAN) += test_ubsan.o
+ CFLAGS_test_ubsan.o += $(call cc-disable-warning, vla)
+ CFLAGS_test_ubsan.o += $(call cc-disable-warning, unused-but-set-variable)
+--- /dev/null
++++ b/lib/test_hashbench.c
+@@ -0,0 +1,512 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * On-target short-key hash microbenchmark for the MT7622/Cortex-A53
++ * candidate matrix (docs/umash-port-task.md, OpenWrt e8450 branch):
++ *
++ *   baselines : jhash_1word @4, jhash_3words @12, jhash @16/17/32/48/64
++ *   candidates: rapidhash_nano32 @12/16/17/32/48, rapidhash_micro32 @32/64
++ *   control   : xxh32 @4/12/16/17/32/48/64
++ *
++ * Methodology: dependent-latency chain (each result feeds the next call's
++ * seed/initval, modelling hash->table-lookup paths), min-of-chunks with
++ * IRQs off per chunk.  Cycles and retired instructions come from the A53
++ * PMU: perf kernel counters are created to own and program the counters,
++ * but the registers are read directly (PMCCNTR_EL0 / PMSELR_EL0 +
++ * PMXEVCNTR_EL0) so the module needs no symbols beyond what every 6.12.87
++ * kernel here exports — it can be scp'd onto the running router kernel
++ * without a reflash.  Falls back to ktime ns if the PMU is unavailable.
++ *
++ * rapidhashNano/Micro are scalar-GPR transliterations of rapidhash V3
++ * (github.com/Nicoshev/rapidhash). By default the secret words and the
++ * seed are regenerated per load from get_random_bytes() with each word
++ * forced odd; rapid_fixed=1 keeps the upstream default constants so the
++ * printed h32 vectors can be checked against the userspace reference.
++ *
++ * Run on the target; results land in dmesg:
++ *   insmod test_hashbench.ko [bench_cpu=1] [rapid_fixed=1] [align_offset=N]
++ * Init intentionally returns -EAGAIN after printing so a re-run needs no
++ * rmmod.
++ */
++
++#define pr_fmt(fmt) "hashbench: " fmt
++
++#include <linux/init.h>
++#include <linux/jhash.h>
++#include <linux/kernel.h>
++#include <linux/ktime.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/perf_event.h>
++#include <linux/random.h>
++#include <linux/sched.h>
++#include <linux/unaligned.h>
++#include <linux/xxhash.h>
++
++#include <asm/barrier.h>
++#include <asm/sysreg.h>
++
++static int bench_cpu = 1;
++module_param(bench_cpu, int, 0444);
++MODULE_PARM_DESC(bench_cpu, "CPU to pin the benchmark to (default 1)");
++
++static bool rapid_fixed;
++module_param(rapid_fixed, bool, 0444);
++MODULE_PARM_DESC(rapid_fixed, "keep upstream rapidhash secret/seed constants (differential vector checks)");
++
++static uint align_offset;
++module_param(align_offset, uint, 0444);
++MODULE_PARM_DESC(align_offset, "byte offset (0-7) of the key inside a 64B-aligned buffer");
++
++#define HB_ITERS	1024
++#define HB_WARM_CHUNKS	8
++#define HB_CHUNKS	64
++
++/*
++ * rapidhash V3 port, Nano and Micro variants, scalar GPR only.  Kept as
++ * structural transliterations of the upstream functions so they can be
++ * diffed against rapidhash.h and checked with upstream vectors
++ * (rapid_fixed=1).
++ */
++static u64 hb_rapid_secret[8] __read_mostly = {
++	0x2d358dccaa6c78a5ull, 0x8bb84b93962eacc9ull,
++	0x4b33a62ed433d4a3ull, 0x4d5a2da51de1aa47ull,
++	0xa0761d6478bd642full, 0xe7037ed1a0b428dbull,
++	0x90ed1765281c388cull, 0xaaaaaaaaaaaaaaaaull,
++};
++static u64 hb_rapid_seed __read_mostly;
++
++static __always_inline void rapid_mum(u64 *a, u64 *b)
++{
++	unsigned __int128 r = (unsigned __int128)*a * *b;
++
++	*a = (u64)r;
++	*b = (u64)(r >> 64);
++}
++
++static __always_inline u64 rapid_mix(u64 a, u64 b)
++{
++	rapid_mum(&a, &b);
++	return a ^ b;
++}
++
++static u64 rapidhash_nano64(const void *key, size_t len, u64 seed,
++			    const u64 *secret)
++{
++	const u8 *p = key;
++	u64 a = 0, b = 0;
++	size_t i = len;
++
++	seed ^= rapid_mix(seed ^ secret[2], secret[1]);
++	if (likely(len <= 16)) {
++		if (len >= 4) {
++			seed ^= len;
++			if (len >= 8) {
++				a = get_unaligned_le64(p);
++				b = get_unaligned_le64(p + len - 8);
++			} else {
++				a = get_unaligned_le32(p);
++				b = get_unaligned_le32(p + len - 4);
++			}
++		} else if (len > 0) {
++			a = ((u64)p[0] << 45) | p[len - 1];
++			b = p[len >> 1];
++		}
++	} else {
++		if (i > 48) {
++			u64 see1 = seed, see2 = seed;
++
++			do {
++				seed = rapid_mix(get_unaligned_le64(p) ^ secret[0],
++						 get_unaligned_le64(p + 8) ^ seed);
++				see1 = rapid_mix(get_unaligned_le64(p + 16) ^ secret[1],
++						 get_unaligned_le64(p + 24) ^ see1);
++				see2 = rapid_mix(get_unaligned_le64(p + 32) ^ secret[2],
++						 get_unaligned_le64(p + 40) ^ see2);
++				p += 48;
++				i -= 48;
++			} while (i > 48);
++			seed ^= see1;
++			seed ^= see2;
++		}
++		if (i > 16) {
++			seed = rapid_mix(get_unaligned_le64(p) ^ secret[2],
++					 get_unaligned_le64(p + 8) ^ seed);
++			if (i > 32)
++				seed = rapid_mix(get_unaligned_le64(p + 16) ^ secret[2],
++						 get_unaligned_le64(p + 24) ^ seed);
++		}
++		a = get_unaligned_le64(p + i - 16) ^ i;
++		b = get_unaligned_le64(p + i - 8);
++	}
++	a ^= secret[1];
++	b ^= seed;
++	rapid_mum(&a, &b);
++	return rapid_mix(a ^ secret[7], b ^ secret[1] ^ i);
++}
++
++static u64 rapidhash_micro64(const void *key, size_t len, u64 seed,
++			     const u64 *secret)
++{
++	const u8 *p = key;
++	u64 a = 0, b = 0;
++	size_t i = len;
++
++	seed ^= rapid_mix(seed ^ secret[2], secret[1]);
++	if (likely(len <= 16)) {
++		if (len >= 4) {
++			seed ^= len;
++			if (len >= 8) {
++				a = get_unaligned_le64(p);
++				b = get_unaligned_le64(p + len - 8);
++			} else {
++				a = get_unaligned_le32(p);
++				b = get_unaligned_le32(p + len - 4);
++			}
++		} else if (len > 0) {
++			a = ((u64)p[0] << 45) | p[len - 1];
++			b = p[len >> 1];
++		}
++	} else {
++		if (i > 80) {
++			u64 see1 = seed, see2 = seed;
++			u64 see3 = seed, see4 = seed;
++
++			do {
++				seed = rapid_mix(get_unaligned_le64(p) ^ secret[0],
++						 get_unaligned_le64(p + 8) ^ seed);
++				see1 = rapid_mix(get_unaligned_le64(p + 16) ^ secret[1],
++						 get_unaligned_le64(p + 24) ^ see1);
++				see2 = rapid_mix(get_unaligned_le64(p + 32) ^ secret[2],
++						 get_unaligned_le64(p + 40) ^ see2);
++				see3 = rapid_mix(get_unaligned_le64(p + 48) ^ secret[3],
++						 get_unaligned_le64(p + 56) ^ see3);
++				see4 = rapid_mix(get_unaligned_le64(p + 64) ^ secret[4],
++						 get_unaligned_le64(p + 72) ^ see4);
++				p += 80;
++				i -= 80;
++			} while (i > 80);
++			seed ^= see1;
++			see2 ^= see3;
++			seed ^= see4;
++			seed ^= see2;
++		}
++		if (i > 16) {
++			seed = rapid_mix(get_unaligned_le64(p) ^ secret[2],
++					 get_unaligned_le64(p + 8) ^ seed);
++			if (i > 32) {
++				seed = rapid_mix(get_unaligned_le64(p + 16) ^ secret[2],
++						 get_unaligned_le64(p + 24) ^ seed);
++				if (i > 48) {
++					seed = rapid_mix(get_unaligned_le64(p + 32) ^ secret[1],
++							 get_unaligned_le64(p + 40) ^ seed);
++					if (i > 64)
++						seed = rapid_mix(get_unaligned_le64(p + 48) ^ secret[1],
++								 get_unaligned_le64(p + 56) ^ seed);
++				}
++			}
++		}
++		a = get_unaligned_le64(p + i - 16) ^ i;
++		b = get_unaligned_le64(p + i - 8);
++	}
++	a ^= secret[1];
++	b ^= seed;
++	rapid_mum(&a, &b);
++	return rapid_mix(a ^ secret[7], b ^ secret[1] ^ i);
++}
++
++/*
++ * Benchmark wrappers.  Common signature so one chunk loop drives all
++ * candidates through the same indirect call; the nop case measures that
++ * shared loop+call overhead.  The chain argument is the previous result,
++ * fed into each hash's seed/initval slot: this measures the dependent
++ * latency a hash->lookup path sees, not standalone throughput.
++ *
++ * jhash_1word/jhash_3words take their words as arguments at real call
++ * sites; the loads below are included for comparability with the
++ * buffer-taking candidates.
++ *
++ * hb_rapid_nano32/hb_rapid_micro32 are the exact candidate construction
++ * from the task doc: low^high fold of the 64-bit result, per-boot random
++ * seed/secret owned by this translation unit, with the chain XORed into
++ * the seed the way a call site would mix in table-local key material.
++ */
++typedef u32 (*hb_fn_t)(const u8 *, u32, u32);
++
++static u32 hb_nop(const u8 *buf, u32 len, u32 chain)
++{
++	return chain + 1;
++}
++
++static u32 hb_jhash_1word(const u8 *buf, u32 len, u32 chain)
++{
++	return jhash_1word(get_unaligned((const u32 *)buf), chain);
++}
++
++static u32 hb_jhash_3words(const u8 *buf, u32 len, u32 chain)
++{
++	return jhash_3words(get_unaligned((const u32 *)buf),
++			    get_unaligned((const u32 *)(buf + 4)),
++			    get_unaligned((const u32 *)(buf + 8)), chain);
++}
++
++static u32 hb_jhash(const u8 *buf, u32 len, u32 chain)
++{
++	return jhash(buf, len, chain);
++}
++
++static u32 hb_xxh32(const u8 *buf, u32 len, u32 chain)
++{
++	return xxh32(buf, len, chain);
++}
++
++static u32 hb_rapid_nano32(const u8 *buf, u32 len, u32 chain)
++{
++	u64 h = rapidhash_nano64(buf, len, hb_rapid_seed ^ chain,
++				 hb_rapid_secret);
++
++	return (u32)(h ^ (h >> 32));
++}
++
++static u32 hb_rapid_micro32(const u8 *buf, u32 len, u32 chain)
++{
++	u64 h = rapidhash_micro64(buf, len, hb_rapid_seed ^ chain,
++				  hb_rapid_secret);
++
++	return (u32)(h ^ (h >> 32));
++}
++
++/*
++ * Measurement infrastructure.  The perf events reserve and program the
++ * PMU counters; reads bypass the perf core (not exported to modules in
++ * 6.12) and hit the registers directly.  hw.idx in 6.12 arm_pmuv3 is the
++ * architectural counter index: 0-30 = PMEVCNTR<n>, 31 = cycle counter.
++ */
++#define HB_NO_COUNTER	-1
++#define HB_CYCLE_IDX	31
++
++static struct perf_event *hb_ev_cycles;
++static struct perf_event *hb_ev_instrs;
++static int hb_cycles_idx = HB_NO_COUNTER;
++static int hb_instrs_idx = HB_NO_COUNTER;
++static u64 hb_read_overhead;
++static u32 hb_sink;
++static u8 hb_buf[64 + 8] __aligned(64);
++
++static struct perf_event *hb_counter_create(u64 config)
++{
++	struct perf_event_attr attr = {
++		.type		= PERF_TYPE_HARDWARE,
++		.size		= sizeof(attr),
++		.config		= config,
++		.pinned		= 1,
++		.exclude_user	= 1,
++	};
++
++	return perf_event_create_kernel_counter(&attr, bench_cpu, NULL,
++						NULL, NULL);
++}
++
++static int hb_counter_idx(struct perf_event *ev)
++{
++	if (!ev || ev->state != PERF_EVENT_STATE_ACTIVE)
++		return HB_NO_COUNTER;
++	return ev->hw.idx;
++}
++
++static __always_inline u64 hb_read_counter(int idx)
++{
++	isb();
++	if (idx == HB_CYCLE_IDX)
++		return read_sysreg(pmccntr_el0);
++	write_sysreg(idx, pmselr_el0);
++	isb();
++	return read_sysreg(pmxevcntr_el0);
++}
++
++static __always_inline u64 hb_cycles(void)
++{
++	if (hb_cycles_idx != HB_NO_COUNTER)
++		return hb_read_counter(hb_cycles_idx);
++	return ktime_get_ns();
++}
++
++static __always_inline u64 hb_instrs(void)
++{
++	if (hb_instrs_idx != HB_NO_COUNTER)
++		return hb_read_counter(hb_instrs_idx);
++	return 0;
++}
++
++static noinline u32 hb_chunk(hb_fn_t fn, const u8 *buf, u32 len, u32 chain,
++			     int iters)
++{
++	int i;
++
++	for (i = 0; i < iters; i++)
++		chain = fn(buf, len, chain);
++	return chain;
++}
++
++static void hb_run(const char *name, hb_fn_t fn, const u8 *buf, u32 len)
++{
++	u64 min_cy = U64_MAX, min_in = U64_MAX, sum_cy = 0;
++	u64 c0, c1, i0, i1, first;
++	unsigned long flags;
++	u32 chain;
++	int k;
++
++	/* first call at this (fn, len) — cold path, one shot */
++	local_irq_save(flags);
++	c0 = hb_cycles();
++	chain = fn(buf, len, 0);
++	c1 = hb_cycles();
++	local_irq_restore(flags);
++	first = c1 - c0 - min(c1 - c0, hb_read_overhead);
++
++	for (k = -HB_WARM_CHUNKS; k < HB_CHUNKS; k++) {
++		local_irq_save(flags);
++		i0 = hb_instrs();
++		c0 = hb_cycles();
++		chain = hb_chunk(fn, buf, len, chain, HB_ITERS);
++		c1 = hb_cycles();
++		i1 = hb_instrs();
++		local_irq_restore(flags);
++		hb_sink ^= chain;
++		if (k < 0)
++			continue;
++		min_cy = min(min_cy, c1 - c0);
++		/* A53 event counters are 32 bit; min filters perf re-arms */
++		min_in = min(min_in, (u64)(u32)(i1 - i0));
++		sum_cy += c1 - c0;
++		cond_resched();
++	}
++
++	/* fixed point x100 per hash */
++	min_cy = min_cy * 100 / HB_ITERS;
++	min_in = min_in * 100 / HB_ITERS;
++	sum_cy = sum_cy * 100 / ((u64)HB_ITERS * HB_CHUNKS);
++
++	pr_info("%-17s len=%2u h32=0x%08x first=%5llu min=%4llu.%02llu mean=%4llu.%02llu %s/hash insn/hash=%llu.%02llu\n",
++		name, len, fn(buf, len, 0), first,
++		min_cy / 100, min_cy % 100, sum_cy / 100, sum_cy % 100,
++		hb_cycles_idx != HB_NO_COUNTER ? "cy" : "ns",
++		min_in / 100, min_in % 100);
++}
++
++static const u32 hb_sz_nop[]   = { 4 };
++static const u32 hb_sz_1w[]    = { 4 };
++static const u32 hb_sz_3w[]    = { 12 };
++static const u32 hb_sz_jhash[] = { 16, 17, 32, 48, 64 };
++static const u32 hb_sz_nano[]  = { 12, 16, 17, 32, 48 };
++static const u32 hb_sz_micro[] = { 32, 64 };
++static const u32 hb_sz_xxh[]   = { 4, 12, 16, 17, 32, 48, 64 };
++
++static const struct hb_case {
++	const char *name;
++	hb_fn_t fn;
++	const u32 *sizes;
++	int nsizes;
++} hb_cases[] = {
++	{ "nop-overhead",      hb_nop,           hb_sz_nop,   ARRAY_SIZE(hb_sz_nop) },
++	{ "jhash_1word",       hb_jhash_1word,   hb_sz_1w,    ARRAY_SIZE(hb_sz_1w) },
++	{ "jhash_3words",      hb_jhash_3words,  hb_sz_3w,    ARRAY_SIZE(hb_sz_3w) },
++	{ "jhash",             hb_jhash,         hb_sz_jhash, ARRAY_SIZE(hb_sz_jhash) },
++	{ "rapidhash_nano32",  hb_rapid_nano32,  hb_sz_nano,  ARRAY_SIZE(hb_sz_nano) },
++	{ "rapidhash_micro32", hb_rapid_micro32, hb_sz_micro, ARRAY_SIZE(hb_sz_micro) },
++	{ "xxh32",             hb_xxh32,         hb_sz_xxh,   ARRAY_SIZE(hb_sz_xxh) },
++};
++
++static int __init hb_init(void)
++{
++	unsigned long flags;
++	const u8 *key;
++	int i, j, err;
++
++	align_offset &= 7;
++	key = hb_buf + align_offset;
++
++	/* fixed pattern so h32 vectors are comparable across boots */
++	for (i = 0; i < sizeof(hb_buf); i++)
++		hb_buf[i] = (u8)(i * 0x9d + 0x35);
++
++	if (!rapid_fixed) {
++		get_random_bytes(&hb_rapid_seed, sizeof(hb_rapid_seed));
++		get_random_bytes(hb_rapid_secret, sizeof(hb_rapid_secret));
++		/* keep every word odd so no multiplicative lane collapses */
++		for (i = 0; i < ARRAY_SIZE(hb_rapid_secret); i++)
++			hb_rapid_secret[i] |= 1;
++	}
++
++	if (bench_cpu < 0 || bench_cpu >= nr_cpu_ids ||
++	    !cpu_online(bench_cpu)) {
++		pr_err("bench_cpu=%d not online\n", bench_cpu);
++		return -EINVAL;
++	}
++	err = set_cpus_allowed_ptr(current, cpumask_of(bench_cpu));
++	if (err) {
++		pr_err("cannot pin to cpu%d (%d)\n", bench_cpu, err);
++		return err;
++	}
++
++	hb_ev_cycles = hb_counter_create(PERF_COUNT_HW_CPU_CYCLES);
++	if (IS_ERR(hb_ev_cycles)) {
++		pr_warn("no PMU cycle counter (%ld), reporting ktime ns instead\n",
++			PTR_ERR(hb_ev_cycles));
++		hb_ev_cycles = NULL;
++	}
++	hb_ev_instrs = hb_counter_create(PERF_COUNT_HW_INSTRUCTIONS);
++	if (IS_ERR(hb_ev_instrs)) {
++		pr_warn("no PMU instruction counter (%ld)\n",
++			PTR_ERR(hb_ev_instrs));
++		hb_ev_instrs = NULL;
++	}
++	hb_cycles_idx = hb_counter_idx(hb_ev_cycles);
++	hb_instrs_idx = hb_counter_idx(hb_ev_instrs);
++
++	/* sanity: a counter that doesn't advance is as good as absent */
++	if (hb_cycles_idx != HB_NO_COUNTER &&
++	    hb_read_counter(hb_cycles_idx) == hb_read_counter(hb_cycles_idx))
++		hb_cycles_idx = HB_NO_COUNTER;
++	if (hb_instrs_idx != HB_NO_COUNTER &&
++	    hb_read_counter(hb_instrs_idx) == hb_read_counter(hb_instrs_idx))
++		hb_instrs_idx = HB_NO_COUNTER;
++
++	hb_read_overhead = U64_MAX;
++	for (i = 0; i < 16; i++) {
++		u64 a, b;
++
++		local_irq_save(flags);
++		a = hb_cycles();
++		b = hb_cycles();
++		local_irq_restore(flags);
++		hb_read_overhead = min(hb_read_overhead, b - a);
++	}
++
++	pr_info("cpu%d counters=%s cy_idx=%d in_idx=%d chunks=%dx%d chain=dependent rapid_fixed=%d align_offset=%u read_ovh=%llu\n",
++		bench_cpu,
++		hb_cycles_idx != HB_NO_COUNTER ?
++			(hb_instrs_idx != HB_NO_COUNTER ? "pmu-cy+insn" : "pmu-cy")
++			: "ktime-ns",
++		hb_cycles_idx, hb_instrs_idx,
++		HB_CHUNKS, HB_ITERS, rapid_fixed, align_offset,
++		hb_read_overhead);
++
++	for (i = 0; i < ARRAY_SIZE(hb_cases); i++)
++		for (j = 0; j < hb_cases[i].nsizes; j++)
++			hb_run(hb_cases[i].name, hb_cases[i].fn, key,
++			       hb_cases[i].sizes[j]);
++
++	if (hb_ev_cycles)
++		perf_event_release_kernel(hb_ev_cycles);
++	if (hb_ev_instrs)
++		perf_event_release_kernel(hb_ev_instrs);
++	set_cpus_allowed_ptr(current, cpu_possible_mask);
++
++	pr_info("done (sink=0x%08x); returning -EAGAIN by design, insmod again to re-run\n",
++		hb_sink);
++	return -EAGAIN;
++}
++module_init(hb_init);
++
++MODULE_DESCRIPTION("Short-key hash microbenchmark: jhash/xxh32/rapidhash V3 (Cortex-A53)");
++MODULE_LICENSE("GPL");
