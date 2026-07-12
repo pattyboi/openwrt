@@ -1,10 +1,11 @@
 # E8450 / MT7622 — Condensed Hardware & Software-Path Reference
 
-Updated 2026-07-11 (SER quiesce first run — no SoC/TX-BM lock, MCU-side
-failure) on `e8450-hw-driven`. This is the current interpretation of the
-recorded evidence; the live snapshot below was captured on 2026-07-09 and is
-not a claim about the router's present uptime or network address. Raw probes
-are in `.recall/router-probes/` when that local evidence store is available.
+Updated 2026-07-12 (box recovered and reflashed with the repo build —
+first-boot verification recorded below) on `e8450-hw-driven`. This is the
+current interpretation of the recorded evidence; the 2026-07-09 live snapshot
+below predates the recovery/reflash and is not a claim about the router's
+present uptime or network address. Raw probes are in `.recall/router-probes/`
+when that local evidence store is available.
 
 Status labels in this document mean:
 
@@ -61,12 +62,129 @@ so it's cheap insurance re-read every message. Don't fork a second copy
 here. Supplementary detail not in CLAUDE.md:
 
 1. Netconsole is broken on this stack (netpoll drops pre-ndo; beads bug).
-2. LAN SSH: root@192.168.1.1. WAN IP (live): 71.61.93.132/23 via DHCP, GW
-   71.61.92.1, dual-stack (IPv6 delegated 2601:547:cb00:3afa::/64). DNS
-   pinned to 1.1.1.1/1.0.0.1 (peerdns=0).
+2. LAN SSH: root@192.168.1.1 — root password is EMPTY since the 2026-07-12
+   recovery/reflash (set one before exposing WAN). The WAN details recorded
+   with the 2026-07-09 snapshot (71.61.93.132/23 etc.) are historical; WAN
+   is now plain DHCP upstream and the config carried over from the official
+   25.12.5 recovery install, not our previous tuned config.
 3. Don't grep dmesg for `-i oops` — matches "ramoops"; use `BUG:|Call trace`.
 
-## Last recorded live snapshot (2026-07-09 probe — 4d11h30m uptime)
+## 2026-07-12 reflash — first-boot verification (most recent live evidence)
+
+The box had been recovered to official OpenWrt 25.12.5 (r33051-f5dae5ece4,
+kernel 6.12.94), then reflashed with the repo build over the SSH sysupgrade
+path (`scripts/flashing/flash.sh`, artifact set sha256-verified; image =
+the 2026-07-11 21:42 rebuild that passed the post-stale-targetinfo
+`.manifest` gate). sysupgrade signature check passed; config carried over
+(official-25.12.5 fresh defaults). Verified live over SSH ~30 s after the
+reboot:
+
+- Build identity: OpenWrt 25.12.4 **r32933-4ccb782af7**, kernel **6.12.87**,
+  board `linksys,e8450-ubi` — exact match to `bin/targets/.../version.buildinfo`,
+  and the kernel banner shows it was compiled on this build host
+  (`root@DietPi`, GCC 14.3.0 r32933).
+- Our tree's fingerprints present: `wed-breadcrumb@42fef000` reserved-mem
+  node in dmesg; `mt7915e` loaded at boot via `/etc/modules.d/mt7915e`
+  (hard-lock rule 1 respected — no runtime load); MT7915 WM/WA firmware
+  20240429 loaded, WED attach path intact.
+- Not a stripped image: 157 packages installed via `apk` (25.12 uses apk,
+  `opkg` reports 0 — that is expected, not a regression); `/sbin/wifi` and
+  `/usr/sbin/pppd` present; `radio0` up.
+- `/sys/fs/pstore/` empty — clean boot into the main volume, not the
+  u-boot `pstore check` recovery volume (hard-lock rule 3 satisfied).
+
+Caveat: this verifies boot + driver bring-up only. Offload-path claims
+(PPE bind, WED counters, PPPQ) in the table above were validated on earlier
+probes and have not been re-run on this boot.
+
+### Same day, later: system-Clang kernel build + boot verification
+
+The GCC image above was then superseded by a `SYSTEM_CLANG=1` build
+(host Debian clang 19.1.7 / LLD 19.1.7, `KERNEL_LTO=none`, userspace
+still GCC), flashed the same way and verified live at ~1 min uptime:
+
+- `/proc/version`: `Linux version 6.12.87 (root@DietPi) (Debian clang
+  version 19.1.7 (3+b1), Debian LLD 19.1.7)` — the running kernel is
+  clang-compiled and LLD-linked.
+- Same checklist as the GCC boot, all green: r32933 revision match,
+  `wed-breadcrumb` node, mt7915e probed at boot via modules.d (WM/WA
+  firmware loaded), PPE debugfs (`/sys/kernel/debug/ppe0/`) present,
+  157 apk packages, both radios up, zero `BUG:|Call trace` in dmesg.
+- pstore held only `console-ramoops-0` from the previous GCC boot,
+  ending in a clean `reboot: Restarting system` (no `dmesg-*` records,
+  so no u-boot `pstore check` recovery risk); saved nothing, removed it.
+
+The clang build initially FAILED and the failure was a real bug: stock
+OpenWrt patch `package/kernel/mac80211/patches/subsys/350-mac80211-
+allow-scanning-while-on-radar-channel.patch` hoists an
+`ieee80211_can_leave_ch(sdata, req, …)` check in
+`ieee80211_start_roc_work()` above the point where `req` is read from
+`local->scan_req`, so the check consumes an uninitialized pointer that
+`ieee80211_is_radar_required()` dereferences whenever a link has
+`radar_required` set (ROC request while operating a DFS channel). GCC
+14.3 compiled it silently — every earlier GCC image carries this UB —
+clang's `-Werror,-Wuninitialized` rejected it. Fixed by local patch
+`subsys/351-mac80211-fix-uninitialized-scan-req-use-in-start_roc.patch`
+(hoists the `wiphy_dereference()`, drops the now-dead later assignment).
+Candidate for upstreaming to OpenWrt.
+
+### Net-infrastructure audit and IRQ/steering tuning re-fix (2026-07-12)
+
+A broad post-WED-investigation audit of live router config (network,
+wireless, firewall, DHCP, CPU/thermal, conntrack) found the 2026-07-09
+`packet_steering=2` + IRQ-pinning tuning had silently regressed: live
+`NET_RX` skew measured **~24.9:1** (CPU0=5277, CPU1=212) — worse than
+even the pre-tuning historical baseline (5:1). Root cause: `/etc/rc.local`
+had reverted to the stock empty template and `network.globals.
+packet_steering` read `'1'` instead of `'2'`. **This is a sysupgrade
+config-carryover gotcha, not a build defect** — `files/etc/rc.local` in
+this repo has always had the correct pinning script (eth0 RX IRQ→CPU0,
+eth0 TX/mt7915e/mt7615e IRQs→CPU1); sysupgrade treats `/etc/rc.local` as
+preserved user config (it's outside `/etc/config/`), so when this box was
+recovered to stock OpenWrt 25.12.5 and then sysupgraded to our build on
+2026-07-11, the *stock* empty `rc.local` silently rode along and shadowed
+our build's version. **Expect this to recur on every future sysupgrade
+unless the flashing procedure is changed to explicitly reapply
+`files/etc/rc.local` and `packet_steering` post-flash** —
+`docs/BUILDING.md`/`docs/FLASHING.md` should probably get a post-flash
+checklist line for this.
+
+Fix reapplied live 2026-07-12 (no rebuild needed — both are runtime
+config): pushed `files/etc/rc.local` content to `/etc/rc.local` and ran
+it (`smp_affinity` confirmed: eth0 RX=1/CPU0, eth0 TX=2/CPU1,
+mt7915e=2/CPU1, mt7615e=2/CPU1); `uci set
+network.globals.packet_steering='2'` + `uci commit network` +
+`/etc/init.d/network reload` (confirmed `rps_cpus=2` on eth0's RX queue
+afterward). Verified working: softirq deltas during a traffic burst
+showed CPU0:+213/CPU1:+102 (~2:1, a large improvement over the ~24.9:1
+pre-fix state; traffic here was a light wifi ping burst through
+`wlan0`/`br-lan`, not the original ~100 Mbps WAN-transit test, so an
+exact match to the historical 1.5:1 wasn't expected or required to
+confirm the fix is active).
+
+**LAN/WAN subnet collision — documented, not a bug to fix.** While
+auditing, found the E8450's own default route
+(`default via 192.168.1.1 dev wan`) collides with its own LAN address
+(`192.168.1.1` on `br-lan`) whenever its WAN is plugged into another
+router that also defaults to `192.168.1.0/24` (as happened this session,
+WAN → Netgear). `ip route get 192.168.1.1` resolves to
+`local ... dev lo` (the router's own address) rather than the real
+upstream gateway — this is exactly the ambiguity that caused real
+operational friction debugging *this session's own* SSH access from a
+dual-homed Pi client (see `wed-mcu-death-terminal-signature` /
+`e8450-router-access` memory for the policy-routing workaround). Tested
+whether this actually breaks anything for real LAN clients: it does not
+— fresh/uncached DNS lookups (`wikipedia.org`, not cached) and internet
+ping both resolved correctly from a genuine LAN client despite the
+collision; only router-self-originated traffic explicitly targeting
+`192.168.1.1` (e.g. a shell tool run directly on the router) is affected,
+and that's a narrow, low-impact case. Nothing to change in our config —
+this is purely a byproduct of the current double-router test topology and
+will disappear once the E8450's WAN is back on a real upstream (ISP
+modem/ONT) or any router with a different LAN subnet. Documented here so
+it isn't re-diagnosed from scratch next time this topology recurs.
+
+## Last recorded live snapshot (2026-07-09 probe — 4d11h30m uptime, pre-recovery)
 
 ```
 Build : OpenWrt 25.12.4 r32933-4ccb782af7, kernel 6.12.87
@@ -171,25 +289,22 @@ dmesg : no BUG:/Call trace/Oops across the full 4.5-day uptime
 2. **WED soak/perf** at real WAN speeds (current upstream hop is ~100 Mbps
    now — worth revisiting for real throughput numbers, was previously
    blocked at ~5 Mbps).
-3. **SER / `wed_v1_txbm_quiesce` A/B** — quiesce leg done 2026-07-10:
-   no SoC lock / no TX-BM FIFO hang; instead the mt7915 MCU wedged
-   (0x13ed = FW_LOG_2_HOST timeout → `mt7915_mac_full_reset` 10×
-   restart loop, wifi down until power cycle). Code trace + SER patch
-   re-audit done (see harness doc): prime fix candidates are SDK
-   wed-03 hunk 1 (WDMA RX CPU_IDX reset inversion — verified still
-   broken in mainline master) and wed-13 (PSE→WDMA block during SER,
-   needs v1 port-macro adaptation). **Both backports prepared
-   2026-07-10** as `999-zzzzz-wed-ser-01/-02` (compile-validated,
-   applied to build_dir, NOT hardware-validated). The unvalidated NAND
-   100 MHz DTS experiment was reverted, so current images retain the
-   default 50 MHz pad clock. The 60 MHz follow-up was also reverted: changing
-   the SNFI parent is unsafe to test until a recovery-boot and flash-integrity
-   validation plan is available. Do not reintroduce either clock experiment.
-   Next steps: (a) 2×2 discriminator — WED
-   attached/detached × quiesce=0/1, logging both params into dmesg at
-   trigger time; (b) flash + retest SER with the backports. Full record:
-   `docs/WED-breadcrumb-harness-design.md` §Code trace / §SER patch
-   re-audit; evidence `docs/logs/wed-quiesce-ramoops-20260710.txt`.
+3. ~~**SER / `wed_v1_txbm_quiesce` A/B**~~ — **CLOSED 2026-07-12, outside
+   reasonable further gains, do not reopen.** 2×2 discriminator confirmed
+   WED-path-dependent (not quiesce-gated); wed-03/wed-13/wed-16 backports
+   all flashed + hardware-retested, none fix it; live register/ring trace
+   then found the actual terminal signature — `mt7915_mac_full_reset()`
+   exhausts its 10x retry budget (WM firmware's `fw_log_2_host` response
+   never arrives, any attempt, every repro) and gives up
+   (`chip full reset failed`), triggering mac80211's own WARN_ON teardown
+   cascade (not a panic). `WED_TX_FREE_AGENT_EN` and the WED MCU response
+   ring were both live-verified correctly armed throughout — ruled out as
+   host-side causes. No firmware-side diagnostic path exists either
+   (`fw_debug_wm`/`wa`/`bin` circularly depend on the same broken command;
+   no UART on this board). This is now a WM-firmware-side question not
+   diagnosable further from this host. Full record:
+   `docs/WED-breadcrumb-harness-design.md` (§Terminal failure signature
+   onward); memory `wed-mcu-death-terminal-signature`.
 4. Optional upstream reports: runtime-bind WED AXI lock, mt7915e rebind
    AXI lock, mt76 SER-during-probe NULL deref (evidence in
    `.recall/router-probes/2026-07-04-firstbind-wed-lock/`).

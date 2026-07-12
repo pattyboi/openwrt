@@ -17,10 +17,9 @@ Also run `bd prime` and check `bd remember` memories.
    `nohup &` doesn't. Netconsole is broken (netpoll drops silently).
 5. Verify router life from a second, independent path — the build
    laptop's r8169 NIC is flaky and caused historical misdiagnoses.
-   As of 2026-07-10 the build host sits on the router's LAN: reach it
-   at 192.168.1.1 (br-lan). The old WAN check address (192.168.3.15)
-   is no longer reachable from the build host (WAN is now DHCP
-   upstream).
+   Which IP reaches the router and whether it's currently online drifts
+   (it has flipped more than once) — check MEMORY.md's e8450-router-access
+   note for the live state rather than trusting a stale snapshot here.
 
 This is the single source of truth for these hard-locks — the reference
 doc's "Operating rules" section points back here; don't fork a second copy.
@@ -41,15 +40,11 @@ actionable investigation order and safety gates are in
 
 ## Cache line audit task — CLOSED 2026-07-10
 
-See `docs/cacheline-audit.md` for the full record (layout survey,
-patches, cycle-1/2 measurements). Patches 999-zzzzzz-cacheline-01/-02
-and 999-zzzzzz-perf-01 (-O2 datapath) are live in `patches-6.12/` and
-stay. Verdict: GbE line rate is not cache-limited on this box; don't
-reopen struct-reorg work unless a workload binds on l1d refills/CPU.
+Not cache-limited; don't reopen struct-reorg work unless a workload binds
+on l1d refills/CPU. Full record: `docs/cacheline-audit.md`.
 
-## Hash replacement investigation
+## Hash replacement investigation — CLOSED
 
-The experimental UMASH port was removed after correctness and benchmark
-review. See `docs/umash-port-task.md` for the closed-investigation verdict,
-reasons it must not be restored as-is, and the benchmark gate for any future
-hash replacement or PMULL experiment.
+UMASH port removed (correctness + benchmark issues). Any future hash
+replacement or PMULL experiment must clear the gate in
+`docs/umash-port-task.md` before reopening.

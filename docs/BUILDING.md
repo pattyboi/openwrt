@@ -18,9 +18,19 @@
   substantially more memory and link time. Either LTO mode automatically
   enables the LLD fast-link path and fails if `ld.lld` is unavailable. GCC
   builds remain LTO-free.
-- The current build host is `aarch64`, has no system `clang`, and cannot run the
-  pinned Linux-x86 Google prebuilt. The assistant detects this and falls back to
-  GCC instead of attempting an unusable toolchain.
+- The current build host is `aarch64` and cannot run the pinned Linux-x86
+  Google prebuilt; the assistant detects this and disables that option. System
+  Clang (Debian clang 19.1.7 + LLD 19.1.7) is installed and **hardware-validated
+  on 2026-07-12**: a full `SYSTEM_CLANG=1` `KERNEL_LTO=none` image built, passed
+  the manifest gate, flashed over SSH sysupgrade, and booted clean on the E8450
+  (see the reference doc §2026-07-12 reflash). Note `LLVM=` kernel builds link
+  with LLD implicitly even when the FASTLD prompt is answered "n" — the
+  binutils-ld caution below applies to GCC kernel builds only.
+- Clang's `-Werror=uninitialized` is stricter than GCC's: it caught a real
+  uninitialized-pointer bug in stock OpenWrt's mac80211 patch 350 (fixed by our
+  `package/kernel/mac80211/patches/subsys/351-mac80211-fix-uninitialized-scan-
+  req-use-in-start_roc.patch`). Expect a clang build to surface warnings GCC
+  passed; treat new `-Wuninitialized` errors as likely-genuine bugs, not noise.
 - Patches: `target/linux/mediatek/patches-6.12/999-*` (diffs vs vanilla;
   quilt applies in filename order — 999-ppe-90/91 are rebased ON ppe-17/21).
 - Kernel debug/size flags are buildroot symbols in the UNTRACKED `.config`:

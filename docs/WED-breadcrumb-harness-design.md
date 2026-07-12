@@ -137,12 +137,237 @@ all harness params reverted to defaults on boot.
 
 Open follow-ups:
 
-1. Baseline A/B leg: repeat with `wed_v1_txbm_quiesce=0` (and log both
-   param values into dmesg before triggering `sys_recovery`) to see
-   whether the MCU restart-loop is quiesce-dependent or the generic SER
-   outcome on this box.
-2. If the MCU loop reproduces in both legs, the target shifts to the
-   mt76 SER/MCU restart path (message 0x13ed timeout), not WED.
+1. ~~Baseline A/B leg: repeat with `wed_v1_txbm_quiesce=0`~~ DONE
+   2026-07-12, see "2×2 discriminator result" below.
+2. ~~If the MCU loop reproduces in both legs, the target shifts to the
+   mt76 SER/MCU restart path~~ SUPERSEDED — it reproduces in both WED
+   legs but NOT with WED detached, so the target is WED/WDMA reset
+   state after all (see below).
+
+## 2×2 discriminator result (2026-07-12)
+
+Ran the three legs the doc called for (quiesce×WED-attach; quiesce is
+meaningless with WED detached so that cell was skipped), each isolated
+by a clean `reboot` between legs (ethernet/SSH stayed up throughout —
+no AXI/SoC lock in any leg, matching the 07-10 finding):
+
+| Leg | wed_enable | quiesce | Result |
+|---|---|---|---|
+| A | Y | N (0) | **MCU-death loop**: `Message 000013ed timeout` repeating with WM/WA firmware reload banners, indefinitely (watched to seq 4700+ WED-AT trace lines / ~100s, never self-recovered). Breadcrumb replay next boot: `ph=4 id=40 seq=104`. |
+| B | Y | Y (1) | **Same MCU-death loop**, identical `0x13ed` signature, identical breadcrumb (`ph=4 id=40`, seq incremented to 105). Confirms quiesce does not gate this failure in either direction. |
+| C | N (detached via modules.d + reboot) | n/a | **Clean SER recovery.** No `0x13ed`, no retry/firmware-reload loop. `wl1-ap0` came back up normally (AP mode, hostapd alive, SSID served) within ~15s of the trigger. |
+
+Logs: `docs/logs/wed-quiesce-legA-quiesce0-20260712.txt`,
+`-legB-quiesce1-20260712.txt`, `-legC-detached-20260712.txt`.
+
+**Conclusion: the MCU/SER restart failure is WED-dependent, not a
+generic mt76 SER/MCU bug and not quiesce-gated.** This satisfies the
+doc's own decision criterion from the prior audit ("if SER recovers
+without WED and wedges with it, the WED/WDMA reset-state theory is
+confirmed and the wed-03/13 backports are justified") — **the
+backports are now justified**. Next step: flash the prepared
+`999-zzzzz-wed-ser-01` (CPU_IDX inversion fix) and `-02` (PSE/WDMA
+block during reset) and repeat leg A/B to see if the loop clears.
+
+## Backport retest — NEGATIVE result (2026-07-12, same day)
+
+Built and flashed an image with both backports in (clean patch apply,
+clean compile, manifest gate passed — see `docs/BUILDING.md`-style log
+`docs/logs/build-wed-ser-backports-20260712.log`), then reran leg A and
+B against the patched kernel:
+
+| Leg | wed_enable | quiesce | Result |
+|---|---|---|---|
+| A2 (patched) | Y | 0 | **Same MCU-death loop** — `0x13ed` timeout repeating, watched ~100s, never self-recovered. |
+| B2 (patched) | Y | 1 | **Same loop again**, same signature. |
+
+Logs: `docs/logs/wed-quiesce-legA2-patched-quiesce0-20260712.txt`,
+`-legB2-patched-quiesce1-20260712.txt`. Ethernet/SSH stayed alive both
+times (no AXI lock); recovered with a plain `reboot` each time (note:
+`wed_enable` persists across a plain reboot but resets to the
+package-default `N` after a *sysupgrade* — must be re-set via
+modules.d post-flash every time, see [[e8450-router-access]]).
+
+**The wed-03/wed-13 backports do NOT fix this failure mode.** The
+WED-attached-vs-detached discriminator from the same day is still
+valid evidence that the failure is WED-path-dependent, but these two
+specific patches aren't the (or aren't the whole) fix. Per the
+original sequencing plan, the next escalation candidate is
+`999-wed-16-refactor-wdma-init-flow-avoid-double-init` (re-init
+robustness: alloc keyed on `!desc` instead of `!reset`, CPU_IDX
+rewrite on reset) — "take only if 03+13 don't resolve the MCU-death
+loop," which is now the case. Also worth reconsidering: the original
+code-trace theory (host-side response path racing the WM firmware
+reboot, `mtk_wed_device_start()` writing WPDMA regs while WM is still
+coming up) may be closer to the real cause than a WDMA-ring
+reset-state bug — the backports targeted ring/CPU_IDX state, not the
+response-path race.
+
+## wed-16 retest — ALSO NEGATIVE (2026-07-12, same day)
+
+Recovered `999-wed-16-refactor-wdma-init-flow-to-avoid-double-init`
+from the SDK commit (`eef2a51256`) as
+`999-zzzzz-wed-ser-03-refactor-wdma-init-avoid-double-init.patch`. The
+pristine SDK hunk's context matched this tree exactly (the touched
+functions — `mtk_wed_wdma_rx_ring_setup`, `mtk_wed_wdma_tx_ring_setup`,
+`mtk_wed_tx_ring_setup`, `mtk_wed_rx_ring_setup`, `mtk_wed_start` —
+weren't touched by wed-ser-01/-02), so no v1 adaptation was needed;
+only the hunk offsets needed regenerating against this tree (`patch`
+auto-relocated 4 of 5 hunks via fuzzy search, the 5th was applied by
+hand at the unchanged pre-image location and round-tripped byte-
+identical against a clean copy before being committed as a patch file).
+Built, flashed, re-enabled WED (same post-sysupgrade modules.d reset
+gotcha), reran leg A/B a third time:
+
+| Leg | wed_enable | quiesce | Result |
+|---|---|---|---|
+| A3 (wed-16) | Y | 0 | **Same MCU-death loop.** `0x13ed` appeared slightly later (~77s vs ~85-90s in prior runs) but otherwise identical signature, never self-recovered. |
+| B3 (wed-16) | Y | 1 | **Same loop again.** |
+
+Logs: `docs/logs/wed-quiesce-legA3-wed16-quiesce0-20260712.txt`,
+`-legB3-wed16-quiesce1-20260712.txt`. Ethernet/SSH alive throughout,
+recovered via plain reboot each time.
+
+**Three backports in a row (wed-03, wed-13, wed-16) — none fix the
+`0x13ed` MCU-death loop.** All three targeted WDMA/WED-side ring or
+reset-sequencing state. The persistence of an identical failure
+signature across three independent state-management fixes is now
+fairly strong evidence the bug is NOT in WED's ring/reset bookkeeping
+at all, but genuinely in the **mt76/mt7915 MCU response path** — i.e.
+back to the original code-trace theory: `mt7915_mac_full_reset()`'s
+10x retry downloads firmware successfully (`mt7915_firmware_state()`
+passes) but the very first post-download command
+(`mt7915_mcu_fw_log_2_host`, our `0x13ed`) never gets a response,
+every iteration. The WED-attached-vs-detached discriminator still
+holds — so whatever's wrong is something WED *triggers* in that
+response path (e.g. WED still driving WPDMA registers the MCU expects
+to own during its own reboot), not a WED-side data-structure bug in
+scope for any of the three tried patches. **Recommended next step:
+instrument/trace the actual host↔MCU response path during a WED-
+attached SER (mailbox/ring state at the moment `0x13ed` is sent) rather
+than trying more WDMA-side patches from the SDK series 03/13/14/16.**
+
+## Terminal failure signature — live trace (2026-07-12)
+
+All three prior legs (wed-03/13/16 backport retests, above) only watched
+each SER for ~100s and never saw the actual end state — the "MCU-death
+loop" is not infinite. A live trace run long enough (~180s) captured it:
+
+1. `mt7915_mac_full_reset()` retries `mt7915_mac_restart()` up to 10×
+   (~11s/iteration: WM/WA firmware reload, then `0x13ed`/`fw_log_2_host`
+   sent, 5s retry + 5s timeout). The response never arrives on **any** of
+   the 10 attempts.
+2. Driver gives up explicitly: `mt7915e 0000:01:00.0: chip full reset
+   failed` — deliberate retry-budget exhaustion, not a silent hang.
+3. `ieee80211 wl1: Hardware restart was requested` fires mac80211's own
+   `ieee80211_reconfig()` recovery path, which immediately logs `Hardware
+   became unavailable during restart.` and WARN_ONs.
+4. mac80211 force-tears-down every interface
+   (`cfg80211_shutdown_all_interfaces()` → `dev_close()` →
+   `cfg80211_stop_ap()` → `__sta_info_flush()` →
+   `__ieee80211_stop_tx_ba_session()` → `drv_stop()`); each teardown step
+   also fails against the dead hardware and throws its own `WARNING:` — 6
+   separate WARN_ON traces in ~2s. None are panics; pstore stayed clean
+   (`console-ramoops-0` only) before and after — safe within rule 3's
+   boundary.
+5. End state: `wl1-ap0` still exists in `iw dev` (type AP) but has no
+   channel/SSID configured — a zombie interface, hostapd never recovers
+   it without a reboot. `wl0-ap0` (2.4GHz) is separate silicon
+   (`mt7622-wmac`, SoC-integrated, not the mt7915e PCIe chip) and is
+   completely unaffected.
+
+**Live WED ring evidence** (`/sys/kernel/debug/wed0/txinfo`, polled every
+2s across a full failure window, no kernel rebuild needed): the `WED TX
+FREE` / `WED_RING_RX(1)` ring — the WED-bound `MT_RXQ_MCU_WA` completion
+path where `0x13ed`'s response would land — keeps `BASE`/`CNT` configured
+(`0x450a2000`/`0x200`, never torn down) but `CIDX`/`DIDX` are frozen
+absolutely solid (`0x1fa`/`0x1fb`) for the entire ~140s capture, no
+movement at all. The MCU's response genuinely never reaches the host DMA
+path on any retry.
+
+**Two host-driver theories ruled out by code trace before the live
+test** (mt76 2026.03.19~39c960c3):
+- Asymmetric WED ring reset in `mt7915_dma_reset()`: the first cleanup
+  loop skips `mt76_queue_reset()` for `MT_WED_Q_TXFREE` queues, but this
+  is intentional — the later unconditional `mt76_queue_rx_reset()` loop
+  calls `mt76_wed_dma_setup(dev, q, true)` for every queue, which does
+  the real reset+rearm via `mtk_wed_device_txfree_ring_setup()`. Not a
+  skip bug.
+- `MT76_STATE_WED_RESET` / `mt76_wed_dma_reset()` completion-wait: tested
+  (`wed.c:201`) but never set anywhere in the mt76 tree, so always a
+  no-op — looked like missing synchronization, but `mtk_wed_reset_dma()`
+  (the actual WED-side reset) is fully synchronous register polling; this
+  completion pairing belongs to the separate ethernet-FE-side reset flow
+  (`mtk_wed_fe_reset_complete()`), unrelated to this WLAN SER path.
+
+**Conclusion:** wed-03/13/16 were never going to fix this — they target
+WED/WDMA ring-reset bookkeeping, but the driver's 10x retry loop already
+runs to completion correctly and gives up as designed; the defect is that
+WM firmware's `fw_log_2_host` response never arrives at the host on any
+of 10 independent attempts. Points at either (a) WM firmware not
+generating/sending the response while WED is attached, or (b) WED gating
+something at the hardware level (e.g. `MTK_WED_CTRL_WED_TX_FREE_AGENT_EN`
+re-assert timing — `mtk_wed_reset_dma()` explicitly clears it as step 3;
+worth checking it's re-set before *every* retry's `0x13ed`, not just once)
+that discards the response before the host ring ever sees it. `MTK_WED_CTRL_WED_TX_FREE_AGENT_EN` (bit 10, register `MTK_WED_CTRL` =
+`0x00c`) — CLOSED 2026-07-12, ruled out by live trace, not the bug.
+Static code trace first suggested a plausible latch bug:
+`mtk_wed_hw_init()` (where the bit gets re-enabled) has an
+`if (dev->init_done) return;` early-out, and that re-enable code only
+runs once — but `mtk_wed_reset_dma()` (which clears the bit every retry)
+also unconditionally resets `dev->init_done = false` right before its v1
+early-return (line 2011, before the `mtk_wed_is_v1()` branch at 2012),
+so the guard doesn't actually block re-arming on subsequent cycles.
+Live-verified via `/sys/kernel/debug/wed0/regidx`+`regval` (regidx=12 =
+byte offset `0x00c`, no rebuild needed), polled every 1s across a full
+fresh-boot repro (`sys_recovery`=7): `MTK_WED_CTRL` read `0x01000505`
+(bit 10 set) at the very first sample and **never changed** for the
+entire ~200s window, through all 10 `0x13ed` retries and the terminal
+`chip full reset failed`. The register-level enable gate is correctly
+asserted throughout — this is not where the response is being lost.
+
+**Status after this round: three host-driver theories checked and ruled
+out (asymmetric ring reset, dead `MT76_STATE_WED_RESET` completion wait,
+`WED_TX_FREE_AGENT_EN` gating), plus the three SDK backports (wed-03/13/16)
+already proven negative, plus no firmware-side diagnostic channel exists
+(`fw_debug_wm`/`wa`/`bin` circular, no UART).** The WED-bound MCU
+response ring stays hardware-armed and enabled the whole time, yet WM
+firmware's `fw_log_2_host` reply never arrives, on any of 10 independent
+attempts, every single repro run. This is now squarely a WM-firmware-side
+question (does it even generate a reply while WED is attached, or is it
+stuck on something else internally) rather than a host driver/WED
+ring-state bug — and that is not diagnosable from this host without
+either UART access, firmware symbols, or a different WM firmware build to
+compare against. Next-direction candidates: (a) try a different/older WM
+firmware blob if one is available, to see if this is version-specific;
+(b) compare WED-detached-vs-attached MCU behavior more granularly (e.g.
+does a *non-WED* SER's `fw_log_2_host` also occasionally show latency,
+just not enough to hit the 5s timeout?); (c) treat this as accepted
+WED-v1 hardware/firmware limitation on this chip and shift focus to
+avoidance (e.g. keep WED detached during conditions likely to trigger
+SER) rather than continuing to chase a host-side fix.
+
+`fw_debug_wm`/`fw_debug_wa`/`fw_debug_bin` — CLOSED, dead end, do not
+retry (2026-07-12 code trace, no hardware test needed): every one of
+these debugfs setters (`mt7915_fw_debug_wm_set`, `_wa_set`, `_bin_set` —
+the latter unconditionally ends by calling `_wm_set`) funnels through
+`mt7915_mcu_fw_log_2_host()`, which sends `MCU_EXT_CMD_FW_LOG_2_HOST` —
+the exact same `0x13ed` command that's stuck. Worse,
+`mt7915_mcu_init_firmware()` (mcu.c:2413) hardcodes this call with
+`ctrl=0` on every automatic retry, ignoring any previously-set
+`dev->fw.debug_wm`/`debug_bin` state — so there's no way to pre-arm
+verbosity before triggering that survives into the crash-loop's own
+reinit attempts either. The request-to-start-logging message is the same
+message that never gets a response; the log-to-host channel can't be
+turned on to observe why the log-to-host channel is off. No UART exists
+on this board (see top of doc), so there is currently no route to WM/WA
+firmware-side diagnostics for this specific failure at all.
+
+Operational note: `sys_recovery` value **7** (`SER_SET_RECOVER_FULL`) is
+required for deterministic repro — it's the only value that calls
+`mt7915_reset()` directly. Value 1 (L1) only sends MCU commands via
+`mt7915_mcu_set_ser()` and, on a healthy chip, succeeds silently with no
+escalation — confirmed by testing both back to back on a fresh boot.
 
 ## Code trace of the failure (2026-07-10)
 

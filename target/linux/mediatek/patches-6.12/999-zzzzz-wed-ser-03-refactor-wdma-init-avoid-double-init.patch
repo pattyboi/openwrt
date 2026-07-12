@@ -1,0 +1,137 @@
+From: Rex Lu <rex.lu@mediatek.com>
+Subject: net: ethernet: mtk_wed: refactor wdma init flow to avoid double init
+
+Backport of MTK SDK patch "refactor wdma init flow to avoid double
+init" (999-wed-16-refactor-wdma-init-flow-to-avoid-double-init, recover
+the original via `git show eef2a51256:target/linux/mediatek/patches-6.12/...`).
+
+Re-keys the WDMA RX/TX ring and WED TX/RX ring allocation gates from
+"skip alloc if this is a reset" (`!reset`) to "skip alloc if a
+descriptor is already allocated" (`!desc`) — allocation becomes
+idempotent across repeated resets instead of assuming reset==no-alloc.
+CPU_IDX is now only zeroed on `reset` (previously unconditional) in
+mtk_wed_wdma_rx_ring_setup(), and mtk_wed_start()'s redundant
+pre-loop over dev->rx_wdma[] (which called the same setup function
+before the real ring-setup path would anyway) is removed, since ring
+setup is no longer reset-gated at the allocation level.
+
+Motivation on this box: wed-03 (CPU_IDX inversion fix) and wed-13
+(PSE/WDMA link-down during reset) were built, flashed, and hardware
+retested on 2026-07-12 and did NOT clear the mt7915 MCU 0x13ed
+FW_LOG_2_HOST timeout loop that follows a WED SER quiesce trigger
+(`docs/WED-breadcrumb-harness-design.md` "Backport retest — NEGATIVE
+result"). This is the next candidate the SER patch re-audit flagged
+("take only if 03+13 don't resolve the MCU-death loop," now the case):
+double-allocating/re-zeroing ring state across repeated
+mtk_wed_start()/reset cycles (exactly what mt7915_mac_full_reset()'s
+10x retry loop does) could leave WDMA ring state inconsistent with
+what the MCU firmware expects on the Nth retry.
+
+No v1/v3 adaptation needed — the touched functions
+(mtk_wed_wdma_rx_ring_setup, mtk_wed_wdma_tx_ring_setup,
+mtk_wed_tx_ring_setup, mtk_wed_rx_ring_setup, mtk_wed_start) are
+version-generic; verified the pre-image matches this tree exactly
+(this region is untouched by wed-ser-01/-02). Diff regenerated against
+this tree (line numbers differ from the SDK original due to our other
+local patches elsewhere in the file); hunk content is unmodified from
+upstream (verified with a real patch/compile round-trip, not
+hand-transcribed).
+
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -2046,29 +2046,32 @@
+ }
+ 
+ static int
+-mtk_wed_wdma_rx_ring_setup(struct mtk_wed_device *dev, int idx, int size,
+-			   bool reset)
++mtk_wed_wdma_rx_ring_setup(struct mtk_wed_device *dev, int size, bool reset)
+ {
+ 	struct mtk_wed_ring *wdma;
++	int idx;
+ 
+-	if (idx >= ARRAY_SIZE(dev->rx_wdma))
+-		return -EINVAL;
++	for (idx = 0; idx < ARRAY_SIZE(dev->rx_wdma); idx++) {
++		wdma = &dev->rx_wdma[idx];
+ 
+-	wdma = &dev->rx_wdma[idx];
+-	if (!reset && mtk_wed_ring_alloc(dev, wdma, MTK_WED_WDMA_RING_SIZE,
+-					 dev->hw->soc->wdma_desc_size, true))
+-		return -ENOMEM;
++		if (!wdma->desc && mtk_wed_ring_alloc(dev, wdma, MTK_WED_WDMA_RING_SIZE,
++						      dev->hw->soc->wdma_desc_size, true))
++			return -ENOMEM;
+ 
+-	wdma_w32(dev, MTK_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_BASE,
+-		 wdma->desc_phys);
+-	wdma_w32(dev, MTK_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_COUNT,
+-		 size);
+-	wdma_w32(dev, MTK_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_CPU_IDX, 0);
++		wdma->flags |= MTK_WED_RING_CONFIGURED;
+ 
+-	wed_w32(dev, MTK_WED_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_BASE,
+-		wdma->desc_phys);
+-	wed_w32(dev, MTK_WED_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_COUNT,
+-		size);
++		wdma_w32(dev, MTK_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_BASE,
++			wdma->desc_phys);
++		wdma_w32(dev, MTK_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_COUNT,
++			size);
++		if (reset)
++			wdma_w32(dev, MTK_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_CPU_IDX, 0);
++
++		wed_w32(dev, MTK_WED_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_BASE,
++			wdma->desc_phys);
++		wed_w32(dev, MTK_WED_WDMA_RING_RX(idx) + MTK_WED_RING_OFS_COUNT,
++			size);
++	}
+ 
+ 	return 0;
+ }
+@@ -2083,7 +2086,7 @@
+ 		return -EINVAL;
+ 
+ 	wdma = &dev->tx_wdma[idx];
+-	if (!reset && mtk_wed_ring_alloc(dev, wdma, MTK_WED_WDMA_RING_SIZE,
++	if (!wdma->desc && mtk_wed_ring_alloc(dev, wdma, MTK_WED_WDMA_RING_SIZE,
+ 					 dev->hw->soc->wdma_desc_size, true))
+ 		return -ENOMEM;
+ 
+@@ -2506,10 +2509,6 @@
+ 	if (mtk_wed_get_rx_capa(dev) && mtk_wed_rx_buffer_alloc(dev))
+ 		return;
+ 
+-	for (i = 0; i < ARRAY_SIZE(dev->rx_wdma); i++)
+-		if (!dev->rx_wdma[i].desc)
+-			mtk_wed_wdma_rx_ring_setup(dev, i, 16, false);
+-
+ 	if (dev->wlan.hw_rro) {
+ 		for (i = 0; i < MTK_WED_RX_PAGE_QUEUES; i++) {
+ 			u32 addr = MTK_WED_RRO_MSDU_PG_CTRL0(i) +
+@@ -2692,12 +2691,11 @@
+ 	if (WARN_ON(idx >= ARRAY_SIZE(dev->tx_ring)))
+ 		return -EINVAL;
+ 
+-	if (!reset && mtk_wed_ring_alloc(dev, ring, MTK_WED_TX_RING_SIZE,
++	if (!ring->desc && mtk_wed_ring_alloc(dev, ring, MTK_WED_TX_RING_SIZE,
+ 					 sizeof(*ring->desc), true))
+ 		return -ENOMEM;
+ 
+-	if (mtk_wed_wdma_rx_ring_setup(dev, idx, MTK_WED_WDMA_RING_SIZE,
+-				       reset))
++	if (mtk_wed_wdma_rx_ring_setup(dev, MTK_WED_WDMA_RING_SIZE, reset))
+ 		return -ENOMEM;
+ 
+ 	ring->reg_base = MTK_WED_RING_TX(idx);
+@@ -2767,8 +2765,8 @@
+ 	if (WARN_ON(idx >= ARRAY_SIZE(dev->rx_ring)))
+ 		return -EINVAL;
+ 
+-	if (!reset && mtk_wed_ring_alloc(dev, ring, MTK_WED_RX_RING_SIZE,
+-					 sizeof(*ring->desc), false))
++	if (!ring->desc && mtk_wed_ring_alloc(dev, ring, MTK_WED_RX_RING_SIZE,
++					      sizeof(*ring->desc), false))
+ 		return -ENOMEM;
+ 
+ 	if (mtk_wed_wdma_tx_ring_setup(dev, idx, MTK_WED_WDMA_RING_SIZE,

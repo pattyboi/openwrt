@@ -1,0 +1,394 @@
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd034]
+[    0.000000] Linux version 6.12.87 (root@DietPi) (Debian clang version 19.1.7 (3+b1), Debian LLD 19.1.7) #0 SMP Wed May 13 22:42:09 2026
+[    0.000000] Machine model: Linksys E8450 (UBI)
+[    0.000000] earlycon: uart8250 at MMIO32 0x0000000011002000 (options '')
+[    0.000000] printk: legacy bootconsole [uart8250] enabled
+[    0.000000] OF: reserved mem: 0x0000000042ff0000..0x0000000042ffffff (64 KiB) map non-reusable ramoops@42ff0000
+[    0.000000] OF: reserved mem: 0x0000000042fef000..0x0000000042feffff (4 KiB) nomap non-reusable wed-breadcrumb@42fef000
+[    0.000000] OF: reserved mem: 0x0000000043000000..0x000000004302ffff (192 KiB) nomap non-reusable secmon@43000000
+[    0.000000] Zone ranges:
+[    0.000000]   DMA      [mem 0x0000000040000000-0x000000005fffffff]
+[    0.000000]   DMA32    empty
+[    0.000000]   Normal   empty
+[    0.000000] Movable zone start for each node
+[    0.000000] Early memory node ranges
+[    0.000000]   node   0: [mem 0x0000000040000000-0x0000000042feefff]
+[    0.000000]   node   0: [mem 0x0000000042fef000-0x0000000042feffff]
+[    0.000000]   node   0: [mem 0x0000000042ff0000-0x0000000042ffffff]
+[    0.000000]   node   0: [mem 0x0000000043000000-0x000000004302ffff]
+[    0.000000]   node   0: [mem 0x0000000043030000-0x000000005fffffff]
+[    0.000000] Initmem setup node 0 [mem 0x0000000040000000-0x000000005fffffff]
+[    0.000000] psci: probing for conduit method from DT.
+[    0.000000] psci: PSCIv1.1 detected in firmware.
+[    0.000000] psci: Using standard PSCI v0.2 function IDs
+[    0.000000] psci: MIGRATE_INFO_TYPE not supported.
+[    0.000000] psci: SMC Calling Convention v1.5
+[    0.000000] percpu: Embedded 20 pages/cpu s44248 r8192 d29480 u81920
+[    0.000000] pcpu-alloc: s44248 r8192 d29480 u81920 alloc=20*4096
+[    0.000000] pcpu-alloc: [0] 0 [0] 1 
+[    0.000000] Detected VIPT I-cache on CPU0
+[    0.000000] CPU features: kernel page table isolation disabled by kernel configuration
+[    0.000000] CPU features: detected: ARM erratum 843419
+[    0.000000] alternatives: applying boot alternatives
+[    0.000000] Kernel command line: earlycon=uart8250,mmio32,0x11002000 console=ttyS0,115200n1 swiotlb=512 ubi.block=0,fit root=/dev/fit0 rootwait
+[    0.000000] Dentry cache hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[    0.000000] Inode-cache hash table entries: 32768 (order: 6, 262144 bytes, linear)
+[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 131072
+[    0.000000] mem auto-init: stack:off, heap alloc:off, heap free:off
+[    0.000000] software IO TLB: area num 2.
+[    0.000000] software IO TLB: mapped [mem 0x000000005f4c0000-0x000000005f5c0000] (1MB)
+[    0.000000] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=2, Nodes=1
+[    0.000000] rcu: Hierarchical RCU implementation.
+[    0.000000] 	Tracing variant of Tasks RCU enabled.
+[    0.000000] rcu: RCU calculated value of scheduler-enlistment delay is 10 jiffies.
+[    0.000000] RCU Tasks Trace: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.
+[    0.000000] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[    0.000000] Root IRQ handler: gic_handle_irq
+[    0.000000] GIC: Using split EOI/Deactivate mode
+[    0.000000] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.000000] arch_timer: cp15 timer(s) running at 12.50MHz (phys).
+[    0.000000] clocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0x2e2049cda, max_idle_ns: 440795202628 ns
+[    0.000000] sched_clock: 56 bits at 13MHz, resolution 80ns, wraps every 4398046511080ns
+[    0.008445] Calibrating delay loop (skipped), value calculated using timer frequency.. 25.00 BogoMIPS (lpj=125000)
+[    0.018847] pid_max: default: 32768 minimum: 301
+[    0.026462] Mount-cache hash table entries: 1024 (order: 1, 8192 bytes, linear)
+[    0.033811] Mountpoint-cache hash table entries: 1024 (order: 1, 8192 bytes, linear)
+[    0.044707] rcu: Hierarchical SRCU implementation.
+[    0.049527] rcu: 	Max phase no-delay instances is 1000.
+[    0.054994] Timer migration: 1 hierarchy levels; 8 children per group; 1 crossnode level
+[    0.063456] smp: Bringing up secondary CPUs ...
+[    0.068436] Detected VIPT I-cache on CPU1
+[    0.068446] CPU features: SANITY CHECK: Unexpected variation in SYS_CNTFRQ_EL0. Boot CPU: 0x00000000bebc20, CPU1: 0x00000000000000
+[    0.068468] CPU features: Unsupported CPU feature variation detected.
+[    0.068536] CPU1: Booted secondary processor 0x0000000001 [0x410fd034]
+[    0.068630] smp: Brought up 1 node, 2 CPUs
+[    0.101565] SMP: Total of 2 processors activated.
+[    0.106282] CPU: All CPU(s) started at EL2
+[    0.110393] CPU features: detected: 32-bit EL0 Support
+[    0.115547] CPU features: detected: CRC32 instructions
+[    0.120727] alternatives: applying system-wide alternatives
+[    0.126491] CPU features: emulated: Privileged Access Never (PAN) using TTBR0_EL1 switching
+[    0.135021] Memory: 497740K/524288K available (8384K kernel code, 938K rwdata, 2712K rodata, 512K init, 299K bss, 24700K reserved, 0K cma-reserved)
+[    0.152778] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 19112604462750000 ns
+[    0.162682] futex hash table entries: 512 (order: 3, 32768 bytes, linear)
+[    0.169552] 29520 pages in range for non-PLT usage
+[    0.169556] 521040 pages in range for PLT usage
+[    0.175875] pinctrl core: initialized pinctrl subsystem
+[    0.186956] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.193265] DMA: preallocated 128 KiB GFP_KERNEL pool for atomic allocations
+[    0.200382] DMA: preallocated 128 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+[    0.208195] DMA: preallocated 128 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+[    0.216661] thermal_sys: Registered thermal governor 'fair_share'
+[    0.216668] thermal_sys: Registered thermal governor 'bang_bang'
+[    0.222783] thermal_sys: Registered thermal governor 'step_wise'
+[    0.228819] thermal_sys: Registered thermal governor 'user_space'
+[    0.234932] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
+[    0.247912] ASID allocator initialised with 65536 entries
+[    0.254328] pstore: Using crash dump compression: deflate
+[    0.259756] printk: legacy console [ramoops-1] enabled
+[    0.265212] pstore: Registered ramoops as persistent store backend
+[    0.271416] ramoops: using 0x10000@0x42ff0000, ecc: 0
+[    0.286084] /pcie@1a143000: Fixed dependency cycle(s) with /pcie@1a143000/interrupt-controller
+[    0.295137] /pcie@1a145000: Fixed dependency cycle(s) with /pcie@1a145000/interrupt-controller
+[    0.316557] cryptd: max_cpu_qlen set to 1000
+[    0.323120] SCSI subsystem initialized
+[    0.327270] libata version 3.00 loaded.
+[    0.332918] clocksource: Switched to clocksource arch_sys_counter
+[    0.341395] NET: Registered PF_INET protocol family
+[    0.346447] IP idents hash table entries: 8192 (order: 4, 65536 bytes, linear)
+[    0.354888] tcp_listen_portaddr_hash hash table entries: 256 (order: 0, 4096 bytes, linear)
+[    0.363303] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    0.371083] TCP established hash table entries: 4096 (order: 3, 32768 bytes, linear)
+[    0.378900] TCP bind hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[    0.386256] TCP: Hash tables configured (established 4096 bind 4096)
+[    0.392898] MPTCP token hash table entries: 512 (order: 2, 12288 bytes, linear)
+[    0.400368] UDP hash table entries: 256 (order: 1, 8192 bytes, linear)
+[    0.406942] UDP-Lite hash table entries: 256 (order: 1, 8192 bytes, linear)
+[    0.414161] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    0.419868] PCI: CLS 0 bytes, default 64
+[    0.425215] workingset: timestamp_bits=46 max_order=17 bucket_order=0
+[    0.436745] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[    0.442616] jffs2: version 2.2 (NAND) (SUMMARY) (LZMA) (RTIME) (CMODE_PRIORITY) (c) 2001-2006 Red Hat, Inc.
+[    0.490019] mt7622-pinctrl 10211000.pinctrl: invalid group "pwm_ch7_2" for function "pwm"
+[    0.511389] mt-pmic-pwrap 10001000.pwrap: unexpected interrupt int=0x1
+[    0.525114] Serial: 8250/16550 driver, 3 ports, IRQ sharing disabled
+[    0.533066] printk: legacy console [ttyS0] disabled
+[    0.558462] 11002000.serial: ttyS0 at MMIO 0x11002000 (irq = 118, base_baud = 1562500) is a ST16650V2
+[    0.567808] printk: legacy console [ttyS0] enabled
+[    0.577415] printk: legacy bootconsole [uart8250] disabled
+[    0.609810] 11004000.serial: ttyS1 at MMIO 0x11004000 (irq = 119, base_baud = 1562500) is a ST16650V2
+[    0.620419] mtk_rng 1020f000.rng: registered RNG driver
+[    0.620610] random: crng init done
+[    0.632902] loop: module loaded
+[    0.636899] mtk-ecc 1100e000.ecc: probed
+[    0.645146] spi-nand spi2.0: Winbond SPI NAND was found.
+[    0.650477] spi-nand spi2.0: 128 MiB, block size: 128 KiB, page size: 2048, OOB size: 64
+[    0.658718] mtk-snand 1100d000.spi: ECC strength: 4 bits per 512 bytes
+[    0.665518] 2 fixed-partitions partitions found on MTD device spi2.0
+[    0.672155] Creating 2 MTD partitions on "spi2.0":
+[    0.676972] 0x000000000000-0x000000080000 : "bl2"
+[    0.682649] 0x000000080000-0x000008000000 : "ubi"
+[    0.822958] ubi0: default fastmap pool size: 50
+[    0.827504] ubi0: default fastmap WL pool size: 25
+[    0.832290] ubi0: attaching mtd1
+[    1.154461] ubi0: scanning is finished
+[    1.162947] ubi0: attached mtd1 (name "ubi", size 127 MiB)
+[    1.168457] ubi0: PEB size: 131072 bytes (128 KiB), LEB size: 126976 bytes
+[    1.175337] ubi0: min./max. I/O unit sizes: 2048/2048, sub-page size 2048
+[    1.182120] ubi0: VID header offset: 2048 (aligned 2048), data offset: 4096
+[    1.189082] ubi0: good PEBs: 1020, bad PEBs: 0, corrupted PEBs: 0
+[    1.195175] ubi0: user volume: 8, internal volumes: 1, max. volumes count: 128
+[    1.202393] ubi0: max/mean erase counter: 14/8, WL threshold: 4096, image sequence number: 1325918423
+[    1.211612] ubi0: available PEBs: 0, total reserved PEBs: 1020, PEBs reserved for bad PEB handling: 20
+[    1.220944] ubi0: background thread "ubi_bgt0d" started, PID 247
+[    1.221845] block ubiblock0_5: created from ubi0:5(fit)
+[    1.402602] mtk_soc_eth 1b100000.ethernet: PPPQ QoS mode enabled
+[    1.409743] mtk_soc_eth 1b100000.ethernet eth0: mediatek frame engine at 0xffffffc081380000, irq 126
+[    1.419553] i2c_dev: i2c /dev entries driver
+[    1.425697] mtk-wdt 10212000.watchdog: Watchdog enabled (timeout=31 sec, nowayout=0)
+[    1.436313] ARM CCI_400_r1 PMU driver probed
+[    1.437050] hw perfevents: enabled with armv8_cortex_a53 PMU driver, 7 (0,8000003f) counters available
+[    1.451745] NET: Registered PF_INET6 protocol family
+[    1.457636] Segment Routing with IPv6
+[    1.461340] In-situ OAM (IOAM) with IPv6
+[    1.465398] NET: Registered PF_PACKET protocol family
+[    1.470720] 8021q: 802.1Q VLAN Support v1.8
+[    1.497189] mtk-pcie 1a143000.pcie: host bridge /pcie@1a143000 ranges:
+[    1.503830] mtk-pcie 1a143000.pcie: Parsing ranges property...
+[    1.509673] mtk-pcie 1a143000.pcie:      MEM 0x0020000000..0x0027ffffff -> 0x0020000000
+[    1.749625] mtk-pcie 1a143000.pcie: PCI host bridge to bus 0000:00
+[    1.755875] pci_bus 0000:00: root bus resource [bus 00-ff]
+[    1.761366] pci_bus 0000:00: root bus resource [mem 0x20000000-0x27ffffff]
+[    1.768252] pci_bus 0000:00: scanning bus
+[    1.772535] pci 0000:00:00.0: [14c3:3258] type 01 class 0x060400 PCIe Root Port
+[    1.779881] pci 0000:00:00.0: BAR 0 [mem 0x00000000-0x1ffffffff 64bit pref]
+[    1.786856] pci 0000:00:00.0: PCI bridge to [bus 00]
+[    1.791827] pci 0000:00:00.0:   bridge window [mem 0x00000000-0x000fffff]
+[    1.800243] pci_bus 0000:00: fixups for bus
+[    1.804470] pci 0000:00:00.0: scanning [bus 00-00] behind bridge, pass 0
+[    1.811169] pci 0000:00:00.0: bridge configuration invalid ([bus 00-00]), reconfiguring
+[    1.819190] pci 0000:00:00.0: scanning [bus 00-00] behind bridge, pass 1
+[    1.826051] pci_bus 0000:01: scanning bus
+[    1.830288] pci 0000:01:00.0: [14c3:7915] type 00 class 0x000280 PCIe Endpoint
+[    1.837701] pci 0000:01:00.0: BAR 0 [mem 0x00000000-0x000fffff 64bit pref]
+[    1.844691] pci 0000:01:00.0: BAR 2 [mem 0x00000000-0x00003fff 64bit pref]
+[    1.851670] pci 0000:01:00.0: BAR 4 [mem 0x00000000-0x00000fff 64bit pref]
+[    1.859354] pci 0000:01:00.0: supports D1 D2
+[    1.863631] pci 0000:01:00.0: PME# supported from D0 D1 D2 D3hot D3cold
+[    1.870266] pci 0000:01:00.0: PME# disabled
+[    1.874770] pci 0000:01:00.0: 2.000 Gb/s available PCIe bandwidth, limited by 2.5 GT/s PCIe x1 link at 0000:00:00.0 (capable of 4.000 Gb/s with 5.0 GT/s PCIe x1 link)
+[    1.903108] pci_bus 0000:01: fixups for bus
+[    1.907302] pci_bus 0000:01: bus scan returning with max=01
+[    1.912870] pci_bus 0000:01: busn_res: [bus 01-ff] end is updated to 01
+[    1.919514] pci_bus 0000:00: bus scan returning with max=01
+[    1.925120] pci 0000:00:00.0: BAR 0 [mem size 0x200000000 64bit pref]: can't assign; no space
+[    1.933661] pci 0000:00:00.0: BAR 0 [mem size 0x200000000 64bit pref]: failed to assign
+[    1.941669] pci 0000:00:00.0: bridge window [mem 0x20000000-0x201fffff]: assigned
+[    1.949157] pci 0000:01:00.0: BAR 0 [mem 0x20000000-0x200fffff 64bit pref]: assigned
+[    1.956988] pci 0000:01:00.0: BAR 2 [mem 0x20100000-0x20103fff 64bit pref]: assigned
+[    1.964822] pci 0000:01:00.0: BAR 4 [mem 0x20104000-0x20104fff 64bit pref]: assigned
+[    1.972647] pci 0000:00:00.0: PCI bridge to [bus 01]
+[    1.977625] pci 0000:00:00.0:   bridge window [mem 0x20000000-0x201fffff]
+[    1.984428] pci_bus 0000:00: Some PCI device resources are unassigned, try booting with pci=realloc
+[    1.993475] pci_bus 0000:00: resource 4 [mem 0x20000000-0x27ffffff]
+[    1.999738] pci_bus 0000:01: resource 1 [mem 0x20000000-0x201fffff]
+[    2.006030] pci 0000:00:00.0: save config 0x00: 0x325814c3
+[    2.011514] pci 0000:00:00.0: save config 0x04: 0x00100000
+[    2.017004] pci 0000:00:00.0: save config 0x08: 0x06040000
+[    2.022486] pci 0000:00:00.0: save config 0x0c: 0x00010000
+[    2.027978] pci 0000:00:00.0: save config 0x10: 0x0000000c
+[    2.033467] pci 0000:00:00.0: save config 0x14: 0x00000000
+[    2.038949] pci 0000:00:00.0: save config 0x18: 0x40010100
+[    2.044437] pci 0000:00:00.0: save config 0x1c: 0x04200000
+[    2.049919] pci 0000:00:00.0: save config 0x20: 0x20102000
+[    2.055407] pci 0000:00:00.0: save config 0x24: 0x00000000
+[    2.060889] pci 0000:00:00.0: save config 0x28: 0x00000000
+[    2.066376] pci 0000:00:00.0: save config 0x2c: 0x00000000
+[    2.071859] pci 0000:00:00.0: save config 0x30: 0x00000000
+[    2.077349] pci 0000:00:00.0: save config 0x34: 0x00000050
+[    2.082832] pci 0000:00:00.0: save config 0x38: 0x00000000
+[    2.088323] pci 0000:00:00.0: save config 0x3c: 0x00020100
+[    2.093994] pcieport 0000:00:00.0: assign IRQ: got 137
+[    2.099140] pcieport 0000:00:00.0: enabling device (0000 -> 0002)
+[    2.105261] pcieport 0000:00:00.0: enabling bus mastering
+[    2.110721] mtk-pcie 1a143000.pcie: msi#0 address_hi 0x0 address_lo 0x44f4d0c0
+[    2.118162] pcieport 0000:00:00.0: PME: Signaling with IRQ 137
+[    2.124111] pcieport 0000:00:00.0: save config 0x00: 0x325814c3
+[    2.130034] pcieport 0000:00:00.0: save config 0x04: 0x00100006
+[    2.135963] pcieport 0000:00:00.0: save config 0x08: 0x06040000
+[    2.141880] pcieport 0000:00:00.0: save config 0x0c: 0x00010000
+[    2.147810] pcieport 0000:00:00.0: save config 0x10: 0x0000000c
+[    2.153733] pcieport 0000:00:00.0: save config 0x14: 0x00000000
+[    2.159649] pcieport 0000:00:00.0: save config 0x18: 0x40010100
+[    2.165572] pcieport 0000:00:00.0: save config 0x1c: 0x04200000
+[    2.171489] pcieport 0000:00:00.0: save config 0x20: 0x20102000
+[    2.177410] pcieport 0000:00:00.0: save config 0x24: 0x00000000
+[    2.183337] pcieport 0000:00:00.0: save config 0x28: 0x00000000
+[    2.189253] pcieport 0000:00:00.0: save config 0x2c: 0x00000000
+[    2.195176] pcieport 0000:00:00.0: save config 0x30: 0x00000000
+[    2.201092] pcieport 0000:00:00.0: save config 0x34: 0x00000050
+[    2.207017] pcieport 0000:00:00.0: save config 0x38: 0x00000000
+[    2.212941] pcieport 0000:00:00.0: save config 0x3c: 0x00020189
+[    2.218975] OF: /pcie@1a143000/pcie@0,0: Missing device_type
+[    2.224980] pci 0000:01:00.0: save config 0x00: 0x791514c3
+[    2.230489] pci 0000:01:00.0: save config 0x04: 0x00100000
+[    2.235996] pci 0000:01:00.0: save config 0x08: 0x00028000
+[    2.241488] pci 0000:01:00.0: save config 0x0c: 0x00000000
+[    2.246987] pci 0000:01:00.0: save config 0x10: 0x2000000c
+[    2.252480] pci 0000:01:00.0: save config 0x14: 0x00000000
+[    2.257980] pci 0000:01:00.0: save config 0x18: 0x2010000c
+[    2.263482] pci 0000:01:00.0: save config 0x1c: 0x00000000
+[    2.268976] pci 0000:01:00.0: save config 0x20: 0x2010400c
+[    2.274474] pci 0000:01:00.0: save config 0x24: 0x00000000
+[    2.279966] pci 0000:01:00.0: save config 0x28: 0x00000000
+[    2.285464] pci 0000:01:00.0: save config 0x2c: 0x791514c3
+[    2.290957] pci 0000:01:00.0: save config 0x30: 0x00000000
+[    2.296459] pci 0000:01:00.0: save config 0x34: 0x00000080
+[    2.301951] pci 0000:01:00.0: save config 0x38: 0x00000000
+[    2.307449] pci 0000:01:00.0: save config 0x3c: 0x00000100
+[    2.313733] mtk-pcie 1a145000.pcie: host bridge /pcie@1a145000 ranges:
+[    2.320290] mtk-pcie 1a145000.pcie: Parsing ranges property...
+[    2.326148] mtk-pcie 1a145000.pcie:      MEM 0x0028000000..0x002fffffff -> 0x0028000000
+[    2.652991] mtk-pcie 1a145000.pcie: Port1 link down
+[    2.658125] mtk-pcie 1a145000.pcie: PCI host bridge to bus 0001:00
+[    2.664355] pci_bus 0001:00: root bus resource [bus 00-ff]
+[    2.669846] pci_bus 0001:00: root bus resource [mem 0x28000000-0x2fffffff]
+[    2.676738] pci_bus 0001:00: scanning bus
+[    2.682377] pci_bus 0001:00: fixups for bus
+[    2.686581] pci_bus 0001:00: bus scan returning with max=00
+[    2.692155] pci_bus 0001:00: resource 4 [mem 0x28000000-0x2fffffff]
+[    2.699182] mtk_hsdma 1b007000.dma-controller: MediaTek HSDMA driver registered
+[    2.707389] FIT: Detected U-Boot 2025.10-OpenWrt-r32933-4ccb782af7
+[    2.713622] FIT: Selected configuration: "config-1" (OpenWrt linksys_e8450-ubi)
+[    2.720944] FIT:           kernel sub-image 0x00001000..0x00570c9e "kernel-1" (ARM64 OpenWrt Linux-6.12.87) 
+[    2.730799] FIT:          flat_dt sub-image 0x00571000..0x00578c5e "fdt-1" (ARM64 OpenWrt linksys_e8450-ubi device tree blob) 
+[    2.742207] FIT:       filesystem sub-image 0x00579000..0x00ebbfff "rootfs-1" (ARM64 OpenWrt linksys_e8450-ubi rootfs) 
+[    2.753513] block ubiblock0_5: mapped 1 uImage.FIT filesystem sub-image as /dev/fit0
+[    2.819540] mt7530-mdio mdio-bus:1f: configuring for fixed/2500base-x link mode
+[    2.828737] mt7530-mdio mdio-bus:1f: Link is Up - 2.5Gbps/Full - flow control rx/tx
+[    2.838482] mt7530-mdio mdio-bus:1f lan1 (uninitialized): PHY [mt7530-0:00] driver [MediaTek MT7531 PHY] (irq=140)
+[    2.859934] mt7530-mdio mdio-bus:1f lan2 (uninitialized): PHY [mt7530-0:01] driver [MediaTek MT7531 PHY] (irq=141)
+[    2.881256] mt7530-mdio mdio-bus:1f lan3 (uninitialized): PHY [mt7530-0:02] driver [MediaTek MT7531 PHY] (irq=142)
+[    2.902515] mt7530-mdio mdio-bus:1f lan4 (uninitialized): PHY [mt7530-0:03] driver [MediaTek MT7531 PHY] (irq=143)
+[    2.924002] mt7530-mdio mdio-bus:1f wan (uninitialized): PHY [mt7530-0:04] driver [MediaTek MT7531 PHY] (irq=144)
+[    2.935391] mtk_soc_eth 1b100000.ethernet eth0: entered promiscuous mode
+[    2.942152] DSA: tree 0 setup
+[    2.945555] clk: Disabling unused clocks
+[    2.949796] PM: genpd: Disabling unused power domains
+[    2.958589] VFS: Mounted root (squashfs filesystem) readonly on device 259:0.
+[    2.966049] Freeing unused kernel memory: 512K
+[    2.970551] Run /sbin/init as init process
+[    2.974656]   with arguments:
+[    2.977618]     /sbin/init
+[    2.980320]   with environment:
+[    2.983464]     HOME=/
+[    2.985819]     TERM=linux
+[    3.155118] init: Console is alive
+[    3.158679] init: - watchdog -
+[    3.539060] kmodloader: loading kernel modules from /etc/modules-boot.d/*
+[    3.577245] usbcore: registered new interface driver usbfs
+[    3.582793] usbcore: registered new interface driver hub
+[    3.588181] usbcore: registered new device driver usb
+[    3.596985] gpio_button_hotplug: loading out-of-tree module taints kernel.
+[    3.610668] xhci-mtk 1a0c0000.usb: xHCI Host Controller
+[    3.615967] xhci-mtk 1a0c0000.usb: new USB bus registered, assigned bus number 1
+[    3.625060] xhci-mtk 1a0c0000.usb: hcc params 0x01403198 hci version 0x96 quirks 0x0000000000200010
+[    3.634165] xhci-mtk 1a0c0000.usb: irq 145, io mem 0x1a0c0000
+[    3.640039] xhci-mtk 1a0c0000.usb: xHCI Host Controller
+[    3.645322] xhci-mtk 1a0c0000.usb: new USB bus registered, assigned bus number 2
+[    3.652726] xhci-mtk 1a0c0000.usb: Host supports USB 3.0 SuperSpeed
+[    3.659553] hub 1-0:1.0: USB hub found
+[    3.663382] hub 1-0:1.0: 2 ports detected
+[    3.667830] usb usb2: We don't know the algorithms for LPM for this host, disabling LPM.
+[    3.676405] hub 2-0:1.0: USB hub found
+[    3.680201] hub 2-0:1.0: 1 port detected
+[    3.691117] usbcore: registered new interface driver usb-storage
+[    3.697647] kmodloader: done loading kernel modules from /etc/modules-boot.d/*
+[    3.707730] init: - preinit -
+[    3.973313] mtk_soc_eth 1b100000.ethernet eth0: configuring for fixed/2500base-x link mode
+[    3.981811] mtk_soc_eth 1b100000.ethernet eth0: Link is Up - 2.5Gbps/Full - flow control rx/tx
+[    4.166879] mt7530-mdio mdio-bus:1f lan1: configuring for phy/gmii link mode
+[    6.052305] mt7530-mdio mdio-bus:1f lan1: Link is Up - 1Gbps/Full - flow control rx
+[    8.413974] UBIFS (ubi0:7): Mounting in unauthenticated mode
+[    8.419772] UBIFS (ubi0:7): background thread "ubifs_bgt0_7" started, PID 768
+[    8.437655] UBIFS (ubi0:7): recovery needed
+[    8.489520] UBIFS (ubi0:7): recovery completed
+[    8.494115] UBIFS (ubi0:7): UBIFS: mounted UBI device 0, volume 7, name "rootfs_data"
+[    8.501953] UBIFS (ubi0:7): LEB size: 126976 bytes (124 KiB), min./max. I/O unit sizes: 2048 bytes/2048 bytes
+[    8.511900] UBIFS (ubi0:7): FS size: 91422720 bytes (87 MiB, 720 LEBs), max 731 LEBs, journal size 4571136 bytes (4 MiB, 36 LEBs)
+[    8.523571] UBIFS (ubi0:7): reserved for root: 4318121 bytes (4216 KiB)
+[    8.530188] UBIFS (ubi0:7): media format: w5/r0 (latest is w5/r0), UUID F9D1706F-7E86-411F-A82A-4D5B74672298, small LPT model
+[    8.543973] mount_root: switching to ubifs overlay
+[    8.551710] overlayfs: null uuid detected in lower fs '/', falling back to xino=off,index=off,nfs_export=off.
+[    8.566063] urandom-seed: Seeding with /etc/urandom.seed
+[    8.621093] mt7530-mdio mdio-bus:1f lan1: Link is Down
+[    8.630868] procd: - early -
+[    8.633951] procd: - watchdog -
+[    9.195757] procd: - watchdog -
+[    9.200591] procd: - ubus -
+[    9.360504] procd: - init -
+[    9.757161] kmodloader: loading kernel modules from /etc/modules.d/*
+[    9.802148] Loading modules backported from Linux version v6.18.26-0-g1fe060681
+[    9.809555] Backport generated by backports.git 6ecbb44
+[    9.913766] mt7622-wmac 18000000.wmac: registering led 'mt76-phy0'
+[    9.931118] urngd: v1.0.2 started.
+[    9.981090] ieee80211 phy0: Selected rate control algorithm 'minstrel_ht'
+[   10.007327] mt7915e 0000:01:00.0: assign IRQ: got 137
+[   10.012440] mt7915e 0000:01:00.0: enabling device (0000 -> 0002)
+[   10.018575] mt7915e 0000:01:00.0: enabling bus mastering
+[   10.063834] mt7622-wmac 18000000.wmac: HW/SW Version: 0x8a108a10, Build Time: 20190801210006a
+[   10.063834] 
+[   10.133188] mtk-pcie 1a143000.pcie: msi#0 address_hi 0x0 address_lo 0x44f4d0c0
+[   10.200036] mt7622-wmac 18000000.wmac: N9 Firmware Version: _reserved_, Build Time: 20220630094834
+[   10.210700] mt7915e 0000:01:00.0: HW/SW Version: 0x8a108a10, Build Time: 20240429200716a
+[   10.359394] mt7915e 0000:01:00.0: WM Firmware Version: ____000000, Build Time: 20240429200752
+[   10.408398] mt7915e 0000:01:00.0: WA Firmware Version: DEV_000000, Build Time: 20240429200812
+[   10.524782] mt7915e 0000:01:00.0: registering led 'mt76-phy1'
+[   10.624993] PPP generic driver version 2.4.2
+[   10.631067] NET: Registered PF_PPPOX protocol family
+[   10.641445] kmodloader: done loading kernel modules from /etc/modules.d/*
+[   14.016497] mtk_soc_eth 1b100000.ethernet eth0: Link is Down
+[   14.039743] mtk_soc_eth 1b100000.ethernet eth0: configuring for fixed/2500base-x link mode
+[   14.064303] mtk_soc_eth 1b100000.ethernet eth0: Link is Up - 2.5Gbps/Full - flow control rx/tx
+[   14.088912] mt7530-mdio mdio-bus:1f lan1: configuring for phy/gmii link mode
+[   14.101649] br-lan: port 1(lan1) entered blocking state
+[   14.107073] br-lan: port 1(lan1) entered disabled state
+[   14.112365] mt7530-mdio mdio-bus:1f lan1: entered allmulticast mode
+[   14.118735] mtk_soc_eth 1b100000.ethernet eth0: entered allmulticast mode
+[   14.129518] mt7530-mdio mdio-bus:1f lan1: entered promiscuous mode
+[   14.149542] mt7530-mdio mdio-bus:1f lan2: configuring for phy/gmii link mode
+[   14.160784] br-lan: port 2(lan2) entered blocking state
+[   14.166149] br-lan: port 2(lan2) entered disabled state
+[   14.171423] mt7530-mdio mdio-bus:1f lan2: entered allmulticast mode
+[   14.179563] mt7530-mdio mdio-bus:1f lan2: entered promiscuous mode
+[   14.194465] mt7530-mdio mdio-bus:1f lan3: configuring for phy/gmii link mode
+[   14.205688] br-lan: port 3(lan3) entered blocking state
+[   14.210943] br-lan: port 3(lan3) entered disabled state
+[   14.216273] mt7530-mdio mdio-bus:1f lan3: entered allmulticast mode
+[   14.224570] mt7530-mdio mdio-bus:1f lan3: entered promiscuous mode
+[   14.240655] mt7530-mdio mdio-bus:1f lan4: configuring for phy/gmii link mode
+[   14.251615] br-lan: port 4(lan4) entered blocking state
+[   14.256989] br-lan: port 4(lan4) entered disabled state
+[   14.262268] mt7530-mdio mdio-bus:1f lan4: entered allmulticast mode
+[   14.272617] mt7530-mdio mdio-bus:1f lan4: entered promiscuous mode
+[   14.321554] mt7530-mdio mdio-bus:1f wan: configuring for phy/gmii link mode
+[   15.165743] br-lan: port 5(wl0-ap0) entered blocking state
+[   15.171265] br-lan: port 5(wl0-ap0) entered disabled state
+[   15.176906] mt7622-wmac 18000000.wmac wl0-ap0: entered allmulticast mode
+[   15.183971] mt7622-wmac 18000000.wmac wl0-ap0: entered promiscuous mode
+[   15.255493] br-lan: port 5(wl0-ap0) entered blocking state
+[   15.261016] br-lan: port 5(wl0-ap0) entered forwarding state
+[   15.882701] br-lan: port 6(wl1-ap0) entered blocking state
+[   15.888324] br-lan: port 6(wl1-ap0) entered disabled state
+[   15.893986] mt7915e 0000:01:00.0 wl1-ap0: entered allmulticast mode
+[   15.900732] mt7915e 0000:01:00.0 wl1-ap0: entered promiscuous mode
+[   15.907114] br-lan: port 6(wl1-ap0) entered blocking state
+[   15.912624] br-lan: port 6(wl1-ap0) entered forwarding state
+[   15.918970] br-lan: port 6(wl1-ap0) entered disabled state
+[   16.493437] br-lan: port 6(wl1-ap0) entered blocking state
+[   16.498974] br-lan: port 6(wl1-ap0) entered forwarding state
+[   17.637505] mt7530-mdio mdio-bus:1f lan1: Link is Up - 1Gbps/Full - flow control rx
+[   17.637550] br-lan: port 1(lan1) entered blocking state
+[   17.650469] br-lan: port 1(lan1) entered forwarding state
+[   18.428712] mt7530-mdio mdio-bus:1f wan: Link is Up - 1Gbps/Full - flow control rx/tx
+[   51.010305] TESTLEG-C wed_enable=N Mon Jun 29 13:51:02 GMT 2026
