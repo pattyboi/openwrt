@@ -1,0 +1,18 @@
+#!/bin/sh
+
+. /lib/functions/system.sh
+
+case "$(board_name)" in
+linksys,e8450-ubi|\
+belkin,rt3200-ubi)
+	uci -q get firewall.@defaults[0].flow_offloading >/dev/null || {
+		uci -q set firewall.@defaults[0].flow_offloading='1'
+	}
+	uci -q get firewall.@defaults[0].flow_offloading_hw >/dev/null || {
+		uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+	}
+	uci -q commit firewall
+	;;
+esac
+
+exit 0

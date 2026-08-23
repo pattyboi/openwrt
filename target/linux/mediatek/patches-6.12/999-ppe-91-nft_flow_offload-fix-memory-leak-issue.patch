@@ -1,0 +1,34 @@
+From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Subject: [PATCH] netfilter: fix memory leak issue for the nft_flow_offload
+
+Without this patch, the kernel may encounter an OOM issue with the
+ip_dst during a high number of WiFi STA connections. Rebased.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/net/netfilter/nft_flow_offload.c
++++ b/net/netfilter/nft_flow_offload.c
+@@ -378,8 +378,11 @@ static int nft_flow_route_routing(const
+ 	if (route->tuple[dir].xmit_type	== FLOW_OFFLOAD_XMIT_NEIGH &&
+ 	    route->tuple[!dir].xmit_type == FLOW_OFFLOAD_XMIT_NEIGH) {
+ 		if (nft_dev_forward_path(pkt, route, ct, dir, ft) ||
+-		    nft_dev_forward_path(pkt, route, ct, !dir, ft))
+-		    return -ENOENT;
++		    nft_dev_forward_path(pkt, route, ct, !dir, ft)) {
++			dst_release(route->tuple[dir].dst);
++			dst_release(route->tuple[!dir].dst);
++			return -ENOENT;
++		}
+ 	}
+ 
+ 	return 0;
+@@ -597,6 +600,9 @@ static void nft_flow_offload_eval(const
+ 	if (ret < 0)
+ 		goto err_flow_add;
+ 
++	dst_release(route.tuple[dir].dst);
++	dst_release(route.tuple[!dir].dst);
++
+ 	return;
+ 
+ err_flow_add:

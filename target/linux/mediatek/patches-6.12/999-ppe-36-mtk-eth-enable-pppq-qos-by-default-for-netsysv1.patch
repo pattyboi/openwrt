@@ -1,0 +1,22 @@
+From: pat <pi3iman@gmail.com>
+Date: Sat, 27 Jun 2026 14:21:28 -0400
+Subject: [PATCH] mtk_eth: enable PPPQ QoS by default for NETSYSv1 (E8450)
+
+Adapted for mainline OpenWrt: re-anchored to stock probe PPE-init site
+(mtk_eth_offload_init loop) and dropped the SDK mtk_ppe_internal_debugfs_init()
+call (not present in mainline). Sets eth->qos_toggle = 2 so PPPQ is on at boot.
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -5083,6 +5083,11 @@
+ 			if (err)
+ 				goto err_deinit_ppe;
+ 		}
++
++		if (mtk_is_netsys_v1(eth))
++			eth->qos_toggle = 2;
++		if (eth->qos_toggle == 2)
++			dev_info(eth->dev, "PPPQ QoS mode enabled\n");
+ 	}
+ 
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {

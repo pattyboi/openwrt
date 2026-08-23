@@ -1,0 +1,26 @@
+From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Subject: [PATCH] net: ethernet: mtk_ppe: fix typo for enabling MIB cache
+
+Without this patch, the PPE performance might degrade when per-flow
+accounting is enabled: the MIB cache enable register write passes
+MTK_PPE_MIB_CFG_RD_CLR as its value mask instead of
+MTK_PPE_MIB_CACHE_CTL_EN, so the cache is never actually enabled.
+
+Present verbatim in vanilla 6.12 mtk_ppe.c (mtk_ppe_start accounting
+block) -- applies to stock OpenWrt, not SDK-specific.
+
+Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+---
+ drivers/net/ethernet/mediatek/mtk_ppe.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.c
+@@ -1109,6 +1109,6 @@ void mtk_ppe_start(struct mtk_ppe *ppe)
+ 		ppe_m32(ppe, MTK_PPE_MIB_CFG, MTK_PPE_MIB_CFG_RD_CLR,
+ 			MTK_PPE_MIB_CFG_RD_CLR);
+ 		ppe_m32(ppe, MTK_PPE_MIB_CACHE_CTL, MTK_PPE_MIB_CACHE_CTL_EN,
+-			MTK_PPE_MIB_CFG_RD_CLR);
++			MTK_PPE_MIB_CACHE_CTL_EN);
+ 	}
+ }

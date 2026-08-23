@@ -1,0 +1,37 @@
+From: pat <pi3iman@gmail.com>
+Date: Sat, 12 Jul 2026 00:00:00 +0000
+Subject: [PATCH] mac80211: fix uninitialized scan req use in
+ ieee80211_start_roc_work
+
+Patch 350 moved the ieee80211_can_leave_ch() check to the top of
+ieee80211_start_roc_work(), before the point where `req` is dereferenced
+from local->scan_req, so the check reads an uninitialized pointer. The
+pointer reaches ieee80211_is_radar_required(), which dereferences it
+whenever a link has radar_required set — undefined behavior on any ROC
+request while operating on a DFS channel. GCC compiles this silently;
+clang rejects it with -Werror,-Wuninitialized (how it was found, 2026-07-12
+system-clang build).
+
+Hoist the wiphy_dereference() above the check and drop the now-dead later
+assignment (nothing after it reads `req` since patch 350 removed the
+ieee80211_is_radar_required() call from the queue-or-immediate test).
+
+--- a/net/mac80211/offchannel.c
++++ b/net/mac80211/offchannel.c
+@@ -610,6 +610,7 @@ static int ieee80211_start_roc_work(stru
+ 	if (!local->emulate_chanctx && !local->ops->remain_on_channel)
+ 		return -EOPNOTSUPP;
+ 
++	req = wiphy_dereference(local->hw.wiphy, local->scan_req);
+ 	cfg80211_chandef_create(&chandef, channel, NL80211_CHAN_NO_HT);
+ 	radio_mask = ieee80211_chandef_radio_mask(local, &chandef);
+ 	if (!ieee80211_can_leave_ch(sdata, req, radio_mask) &&
+@@ -650,8 +651,6 @@ static int ieee80211_start_roc_work(stru
+ 		roc->mgmt_tx_cookie = *cookie;
+ 	}
+ 
+-	req = wiphy_dereference(local->hw.wiphy, local->scan_req);
+-
+ 	/* if there's no need to queue, handle it immediately */
+ 	if (list_empty(&local->roc_list) && !local->scanning) {
+ 		/* if not HW assist, just queue & schedule work */

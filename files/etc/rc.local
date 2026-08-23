@@ -1,0 +1,20 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# Look up IRQs by device name at boot; skip any that are absent so a
+# missing driver never steers writes at /proc/irq//smp_affinity.
+ETH_RX=$(grep "1b100000.ethernet" /proc/interrupts | \
+  head -1 | awk -F: '{print $1}' | tr -d ' ')
+ETH_TX=$(grep "1b100000.ethernet" /proc/interrupts | \
+  tail -1 | awk -F: '{print $1}' | tr -d ' ')
+MT7915=$(grep "mt7915e" /proc/interrupts | \
+  head -1 | awk -F: '{print $1}' | tr -d ' ')
+WMAC=$(grep "mt7615e" /proc/interrupts | \
+  head -1 | awk -F: '{print $1}' | tr -d ' ')
+
+[ -n "$ETH_RX" ] && echo 1 > "/proc/irq/$ETH_RX/smp_affinity"
+[ -n "$ETH_TX" ] && echo 2 > "/proc/irq/$ETH_TX/smp_affinity"
+[ -n "$MT7915" ] && echo 2 > "/proc/irq/$MT7915/smp_affinity"
+[ -n "$WMAC" ] && echo 2 > "/proc/irq/$WMAC/smp_affinity"
+
+exit 0
