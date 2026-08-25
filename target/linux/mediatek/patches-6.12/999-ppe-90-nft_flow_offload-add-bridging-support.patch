@@ -299,10 +299,7 @@
  static bool nft_flow_offload_skip(struct sk_buff *skb, int family)
  {
  	if (skb_sec_path(skb))
-@@ -364,8 +529,13 @@
- 		goto out;
- 
- 	dir = CTINFO2DIR(ctinfo);
+@@ -574,5 +739,10 @@
 -	if (nft_flow_route(pkt, ct, &route, dir, priv->flowtable) < 0)
 -		goto err_flow_route;
 +	if (nft_flow_offload_is_bridging(pkt->skb)) {

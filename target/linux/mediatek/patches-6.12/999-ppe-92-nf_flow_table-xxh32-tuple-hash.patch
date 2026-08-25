@@ -1,0 +1,39 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] netfilter: flowtable: use xxh32 for the tuple rhashtable
+
+The flow-offload rhashtable hashes ~52 bytes of tuple per lookup on the
+software flowtable path. Seeded xxh32 is a drop-in for seeded jhash at
+this key size and measurably faster on Cortex-A53, with the same
+non-cryptographic-but-seeded DoS posture. lib/xxhash is already builtin
+(CONFIG_XXHASH=y via zstd). Hardware-offloaded (PPE-bound) flows are
+unaffected; this only speeds the software fallback path.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/net/netfilter/nf_flow_table_core.c
++++ b/net/netfilter/nf_flow_table_core.c
+@@ -4,6 +4,7 @@
+ #include <linux/module.h>
+ #include <linux/netfilter.h>
+ #include <linux/rhashtable.h>
++#include <linux/xxhash.h>
+ #include <linux/netdevice.h>
+ #include <net/ip.h>
+ #include <net/ip6_route.h>
+@@ -223,14 +224,14 @@ static u32 flow_offload_hash(const void
+ {
+ 	const struct flow_offload_tuple *tuple = data;
+ 
+-	return jhash(tuple, offsetof(struct flow_offload_tuple, __hash), seed);
++	return xxh32(tuple, offsetof(struct flow_offload_tuple, __hash), seed);
+ }
+ 
+ static u32 flow_offload_hash_obj(const void *data, u32 len, u32 seed)
+ {
+ 	const struct flow_offload_tuple_rhash *tuplehash = data;
+ 
+-	return jhash(&tuplehash->tuple, offsetof(struct flow_offload_tuple, __hash), seed);
++	return xxh32(&tuplehash->tuple, offsetof(struct flow_offload_tuple, __hash), seed);
+ }
+ 
+ static int flow_offload_hash_cmp(struct rhashtable_compare_arg *arg,

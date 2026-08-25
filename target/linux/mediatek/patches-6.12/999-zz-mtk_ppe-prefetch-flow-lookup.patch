@@ -1,0 +1,46 @@
+From: pat <pi3iman@gmail.com>
+Subject: [PATCH] mediatek/ppe: prefetch next flow entry data in lookup hot path
+
+In __mtk_ppe_check_skb() the per-bucket hlist walk calls
+mtk_flow_entry_match() which reads entry->data (a mtk_foe_entry stored
+at a separate cache line from the hlist node the walk just dereferenced).
+Issue a prefetch of the next entry's ->data one iteration ahead to hide
+the cache miss on longer hash chains. mtk_flow_entry objects are cached
+slab memory (unlike the uncached coherent foe_table), so they are a
+valid prefetch target.
+
+Pure read hint: touches no iowrite32 sequence and no aging/GC logic.
+Context matches vanilla 6.12 mtk_ppe.c (4-arg mtk_flow_entry_match with
+entry_len), independent of the PPPQ patches above.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+ drivers/net/ethernet/mediatek/mtk_ppe.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.c
+@@ -8,6 +8,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/if_ether.h>
+ #include <linux/if_vlan.h>
++#include <linux/prefetch.h>
+ 
+ #include <net/dst_metadata.h>
+ #include <net/dsa.h>
+@@ -814,6 +815,15 @@
+ 	memcpy(&foe, hwe, entry_len);
+ 
+ 	hlist_for_each_entry_safe(entry, n, head, list) {
++		/* mtk_flow_entry_match() below reads entry->data (a separate
++		 * cache line from the list node just followed). Prefetch the
++		 * next entry's flow data while comparing the current one, to
++		 * hide the miss on longer hash chains.
++		 */
++		if (n)
++			prefetch(&hlist_entry(n, struct mtk_flow_entry,
++					      list)->data);
++
+ 		if (found ||
+ 		    !mtk_flow_entry_match(ppe->eth, entry, &foe, entry_len)) {
+ 			if (entry->hash != 0xffff)
