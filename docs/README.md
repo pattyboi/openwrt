@@ -18,13 +18,19 @@ vendor changelog without independent verification.
   The vendor's WDMA-during-SER gating patch used the NETSYSv2+ port formula
   unmodified; on MT7622 it silently poked the wrong register and never
   actually gated anything.
-- **Controlled SER recovery: open, and confirmed not fixable from this
-  host's driver source.** A recovered prior investigation (see
+- **Controlled SER recovery: root-caused as unfixable from this host's
+  driver source; auto-reboot watchdog deployed as mitigation.** A
+  recovered prior investigation (see
   [`WED-breadcrumb-harness-design.md`](WED-breadcrumb-harness-design.md))
   already hardware-tested three independent ring/reset fixes together and
   hit the identical failure; this fork's own testing (post ring-desync fix)
   reproduced it again. Root cause: the MT7915 MCU firmware never replies to
-  a specific command during full-reset recovery. Not a host-side bug — see
+  a specific command during full-reset recovery. Not a host-side bug.
+  `mt7915-ser-watchdog` (procd service, self-enabling on every future
+  flash) detects the driver's own terminal failure message and self-reboots,
+  bounding a previously-indefinite outage to ~65 s — live-verified twice,
+  including catching and fixing a BusyBox `grep -m1`-on-an-infinite-stream
+  bug in the first implementation. See
   [`e8450-ppe-validation.md`](e8450-ppe-validation.md) for the full writeup.
 - **AQM (bufferbloat control)**: NETSYSv1 has no hardware AQM (confirmed via
   exhaustive vendor-SDK source mining, both firmware generations). Built a
@@ -77,6 +83,7 @@ flowchart LR
         CAKE[CAKE SQM]
         AQM["qos-06/12/13 AQM<br/>evicts PPE binding on congestion"]
         AUTORATE["sqm-autorate-rust<br/>tunes CAKE rate to real capacity"]
+        SERWD["mt7915-ser-watchdog<br/>auto-reboots on unrecoverable SER"]
     end
 
     ISP <--> GDMA
@@ -102,7 +109,7 @@ and no patch can add that without new silicon.
 
 | Doc | Covers |
 |---|---|
-| [`e8450-ppe-validation.md`](e8450-ppe-validation.md) | PPE/WED hardware validation: the ring-desync fix, the PSE port-mapping fix, the controlled-SER investigation (open), the mt76 upstream pin bump. |
+| [`e8450-ppe-validation.md`](e8450-ppe-validation.md) | PPE/WED hardware validation: the ring-desync fix, the PSE port-mapping fix, the controlled-SER investigation and its auto-reboot mitigation, the mt76 upstream pin bump. |
 | [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md) | The full QoS/AQM/HQoS investigation: what NETSYSv1's QDMA block can and cannot do in hardware, the `qos-01`..`qos-13` patch series, and the production HQoS+AQM profile. |
 | [`e8450-upstream-backport-roadmap.md`](e8450-upstream-backport-roadmap.md) | Tracking sheet for which local patches are hand-backports of commits later merged upstream, and candidates for future pin bumps. |
 | [`wed-v1-opportunities.md`](wed-v1-opportunities.md) | Survey of WED-v1-specific opportunities and their disposition. |
@@ -111,6 +118,11 @@ and no patch can add that without new silicon.
 ## Repo-specific notes for anyone building this
 
 - `configs/e8450-ubi.config` is the seed defconfig for this board.
+- `files/usr/sbin/mt7915-ser-watchdog` + `files/etc/init.d/mt7915-ser-watchdog`
+  auto-reboot on the MT7915 controlled-SER MCU-death failure (see
+  `e8450-ppe-validation.md`'s controlled-SER section) — no fix exists at the
+  driver level, so this bounds the outage instead. Self-enabling via
+  `files/etc/rc.d/S99mt7915-ser-watchdog`.
 - `files/usr/sbin/sqm-autorate-rust` is a hand-built binary sidecar, not an
   opkg-managed package — `CONFIG_PACKAGE_sqm-autorate-rust` is deliberately
   left unset since a normal `make` of it still hits the full from-source

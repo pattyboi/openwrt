@@ -1,0 +1,35 @@
+#!/bin/sh
+# Auto-recovery loop for the WED-v1 MT7915 full-reset MCU-death failure.
+#
+# A WED-attached System Error Recovery that escalates to a full chip reset
+# never gets a WM firmware response on any of its 10 retries and leaves
+# wl1-ap0 (5 GHz) permanently beaconless; `wifi up` and `service network
+# restart` do not clear it, only a reboot does. Root-caused as a firmware
+# response-path failure with no available host-side fix (three independent
+# WED/WDMA ring-state backports tried and failed; undiagnosable further
+# without UART/firmware source). See the controlled-SER section of
+# docs/e8450-ppe-validation.md and docs/WED-breadcrumb-harness-design.md
+# for the full investigation.
+#
+# This polls (not streams: BusyBox `grep -m1` reading a `logread -f` pipe
+# never actually terminates the pipeline on match - the process just sits
+# there having matched but not exited, so a "logread -f | grep -m1 ... &&
+# reboot" idiom silently never fires; verified live on this exact image)
+# for the driver's own definitive give-up message and reboots, converting
+# an indefinite outage (until someone notices and power-cycles) into a
+# bounded one. 2.4 GHz (wl0-ap0, separate silicon, no WED) is unaffected
+# and stays up regardless.
+
+SIGNATURE="chip full reset failed"
+POLL_INTERVAL=3
+
+while true; do
+	if [ -n "$(logread -e "$SIGNATURE" -l 1)" ]; then
+		logger -t mt7915-ser-watchdog \
+			"detected '$SIGNATURE' - WED-attached MT7915 SER recovery is unrecoverable without a reboot (see docs/e8450-ppe-validation.md); rebooting"
+		sleep 2
+		reboot
+		exit 0
+	fi
+	sleep "$POLL_INTERVAL"
+done

@@ -13,7 +13,7 @@ first, then jump to the dated section that matches what you need.
 |---|---|---|
 | WED-v1 `WED_WDMA_RXn` ring desync after a busy-path DMA reset | **Fixed** (`999-wed-14`) | Reproduced stuck `QCNT` before; confirmed clean `QCNT=0` with advancing CIDX/DIDX after, same repro, same hardware. |
 | NETSYSv1 PSE port mis-mapped in the WDMA-during-SER gating patch (`999-wed-13`) | **Fixed** | Traced the exact wrong register/bit via source (`mtk_ppe_offload.c`'s real v1 port-3 mapping vs. the vendor patch's v2+ formula); corrected and reverified register writes land on the right offset. |
-| Controlled SER (`sys_recovery`) full recovery under active traffic | **Open — confirmed not fixable here** | MT7915 MCU firmware never acks a specific command during full-reset recovery. A recovered prior investigation independently hardware-tested three ring/reset fixes together and hit the identical failure; this fork's own testing (with the ring-desync fix already applied) reproduced it again. Needs UART/firmware access this project doesn't have. |
+| Controlled SER (`sys_recovery`) full recovery under active traffic | **Open — confirmed not fixable here; auto-reboot watchdog deployed as mitigation** | MT7915 MCU firmware never acks a specific command during full-reset recovery. A recovered prior investigation independently hardware-tested three ring/reset fixes together and hit the identical failure; this fork's own testing (with the ring-desync fix already applied) reproduced it again. Needs UART/firmware access this project doesn't have. `mt7915-ser-watchdog` (2026-09-01) detects the driver's own terminal failure message and self-reboots, bounding the outage to ~65 s instead of indefinite. |
 | mt76 upstream pin | **Bumped** two months forward | Ten hand-backported local patches deleted (confirmed already upstream); three new, narrower compat patches added after actually attempting the build, not guessed upfront. |
 
 ```mermaid
@@ -24,7 +24,7 @@ flowchart TD
     B -- "yes (999-wed-14)" --> E["index reset now runs<br/>unconditionally too<br/>ring stays healthy"]
     E --> F{MCU replies to<br/>fw_log_2_host?}
     F -- "yes" --> G["full reset completes<br/>AP recovers"]
-    F -- "no (open)" --> H["10 retries exhausted<br/>chip full reset failed<br/>AP beaconless until reboot"]
+    F -- "no (open)" --> H["10 retries exhausted<br/>chip full reset failed<br/>mt7915-ser-watchdog detects it<br/>and self-reboots (~65s outage)"]
 ```
 
 See `docs/README.md` for the repo-wide index and architecture diagram.
@@ -1278,3 +1278,85 @@ regression test (this project's most sensitive existing probe of this
 exact code path) passed clean on the new base.
 
 
+## Controlled-SER mitigation: auto-reboot watchdog (2026-09-01)
+
+No host-side fix exists for the MCU chip-reset failure documented above
+(confirmed again by direct code reading this session - see below). Deployed
+the accepted mitigation from the recovered investigation's own
+recommendation instead: bound the outage rather than eliminate it.
+
+### Ruled out one more theory, with code (not guesswork)
+
+Re-checked whether `mt7915_dma_start()`'s WED-reset branch calling
+`mt7915_mcu_wed_enable_rx_stats()` - sent from inside `mt7915_dma_reset()`,
+*before* `mt7915_mcu_init_firmware()` reinitializes WM - could be corrupting
+the MCU response channel ahead of the real `0x13ed` command. Traced it into
+`mtk_wed_device_update_msg()` -> `mtk_wed_mcu_msg_update()`, gated by
+`mtk_wed_get_rx_capa()`, which hardcodes `dev->version != 1`. On this WED-v1
+board that call is a guaranteed no-op (`return 0`, zero MMIO/WO traffic) -
+ruled out, not the cause.
+
+Also checked whether "detach WED for the reset window, reattach after" (the
+condition the archived Leg C test proved recovers cleanly) is implementable
+at runtime. It is not: `mtk_wed_device_attach()` is called exactly once, at
+PCI probe (`mt7915_mmio_wed_init`); `mtk_wed_device_detach()` is a one-way
+teardown used only in module-remove/probe-failure paths that frees IRQ
+vectors and WED HW resources. Re-running attach mid-session would mean
+replicating most of PCI probe - more invasive and fragile than the reboot
+it would replace.
+
+The one remaining lead - forcing `MT_RXQ_MCU_WA` (the ring the archived
+investigation's live trace caught frozen solid) off the WED path entirely -
+is not a safe small patch either: `mtk_wed.c`'s own comment at the ring
+setup site says this ring is genuinely shared between WED's own TX-free
+buffer-reclaim notifications and the WLAN driver's MCU/WA event delivery.
+Diverting it risks breaking WED's live-traffic TX-buffer reclaim, not just
+the stuck MCU response. Flagged as an unvalidated, real-hardware-required
+research lead only - not implemented.
+
+### Deployed: `mt7915-ser-watchdog`
+
+`files/usr/sbin/mt7915-ser-watchdog` + `files/etc/init.d/mt7915-ser-watchdog`
+(procd service, `files/etc/rc.d/S99mt7915-ser-watchdog` enables it by
+default on every future flash from this tree). Polls for the driver's own
+definitive give-up message (`dev_err(dev->mt76.dev, "chip full reset
+failed\n")`, `mt7915/mac.c`) every 3 s via `logread -e "chip full reset
+failed" -l 1` and reboots on match. Converts the indefinite outage (today:
+5 GHz dead until someone notices and power-cycles) into a bounded one; 2.4
+GHz (`wl0-ap0`, separate silicon, no WED) is unaffected either way.
+
+**BusyBox `grep -m1` gotcha, found and worked around, not guessed:** the
+first implementation used the obvious `logread -f | grep -m1 -F "$SIGNATURE"
+&& reboot` idiom. Live-tested repeatedly on this exact image: `grep -m1`
+correctly reads and outputs the matching line, but never actually
+terminates the process while its upstream (`logread -f`, an infinite
+follow stream) stays open - so the `&&` chain after it silently never
+fires, forever, with both processes sitting alive. Isolated by bisecting
+four live variants (streamed to a file with no chaining: works; same
+pattern with a chained `&&` marker: `grep` writes its match but the chain
+never runs). Replaced with the polling `logread -e`/`-l 1` idiom above,
+which queries the ring buffer as a single-shot command with normal exit
+semantics - no infinite-stream involved, no ambiguity. Also found and
+corrected in the same round: the default `log_size='128'` (KB) ring buffer
+rotates fast enough under bursty log activity that a 10 s poll interval
+left a real gap versus a signature that had already aged out by the next
+poll; reduced to a 3 s interval for safety margin.
+
+**Verified live end-to-end**, twice (first attempt caught the `grep -m1`
+bug via this exact test): injected the real signature text via `logger -t
+mt7915e '0000:01:00.0: chip full reset failed'`, watched the watchdog log
+its detection, reboot, and come back healthy - `mt7915-ser-watchdog`
+re-armed automatically (procd + rc.d), `sqm-autorate-rust` still running,
+`flow_offloading`/`_hw` retained at `1`/`1`, `wl1-ap0` back on channel 52
+with 1 station reassociated, `wl0-ap0` at 7 stations, zero dmesg
+error/warn/bug lines, fresh (empty) ring buffer confirming a clean boot.
+Total observed outage from injected trigger to SSH reachable again: ~65 s.
+
+Also fixed a pre-existing latent gap while here: `sqm-autorate-rust` had
+been enabled only live on the running router (`/etc/init.d/... enable`,
+prior session), with no `files/etc/rc.d/` symlink checked in - meaning a
+fresh flash from this exact tree would not have auto-started it.
+Added `files/etc/rc.d/S97sqm-autorate-rust` alongside the watchdog's own
+symlink so both are now self-enabling on any future build/flash, matching
+the algorithm in `base-files`'s own `rc.common:enable()`
+(`ln -sf ../init.d/$name /etc/rc.d/S${START}$name`) exactly.
