@@ -2645,30 +2645,81 @@ real household traffic - both costlier than the uncertain payoff justifies
 against a live connection tonight. Restored `grace_ms=3000` after every
 trial; confirmed healthy (0% ping loss, both radios up) throughout.
 
-### 31.4 sqm-autorate-rust: still not built
+### 31.4 sqm-autorate-rust: shipped, without the multi-hour toolchain cost
 
-Configured (`/etc/config/sqm-autorate` present, correctly pointing at
-`ifb4wan`/`wan`) but not installed - `CONFIG_PACKAGE_sqm-autorate-rust` is
-unset and `/usr/sbin/sqm-autorate-rust` does not exist. It's a Rust/Cargo
-package with no host `rustc`/`cargo` built anywhere in this tree yet (only
-source-extracted) - a full Rust toolchain bootstrap is a multi-hour
-first-time cost on this hardware, deliberately deferred rather than
-started tonight. This is very likely why it was excluded from the
-deployed image in the first place (matches
-`e8450-upstream-backport-roadmap.md`'s "Rust autorate is excluded" note).
-Would directly address SS31.1's calibration problem by discovering real
-capacity dynamically instead of a static guess - worth a dedicated session
-once the toolchain cost is acceptable.
+Prompted by "maybe a prebuilt sqm-autorate?" - the upstream project
+(`Lochnair/sqm-autorate-rust`) publishes no prebuilt release binaries (only
+source archives), so "prebuilt" wasn't available as-is. But OpenWrt's own
+`rust/host` package build (`feeds/packages/lang/rust/Makefile`:
+`PKG_SOURCE:=rustc-$(PKG_VERSION)-src.tar.xz`, `llvm.download-ci-llvm=false`)
+is a genuine from-source LLVM+rustc bootstrap - that's the real multi-hour
+cost, not something specific to this package.
+
+Sidestepped it entirely: `rustup` (a completely different, prebuilt-binary
+distribution channel for the same compiler) installs a working host
+`rustc`/`cargo` in minutes, and `rustup target add aarch64-unknown-linux-musl`
+pulls a prebuilt musl `core`/`std` too - musl is a Tier 2 target with
+official prebuilt releases. This gave a working cross-compiler without
+building anything from source, in under 10 minutes total (most of it
+waiting on this connection's ~1-8 Mbit/s download throughput per SS31.1,
+not compute).
+
+Cross-compiled the actual crate by hand against this tree's *real* OpenWrt
+toolchain and libraries (not a generic musl target) - `UCI_DIR` pointing at
+the already-built `libuci.so`/`libubox.so`/headers in
+`staging_dir/target-.../usr`, `CARGO_TARGET_..._LINKER` pointing at the
+already-built `aarch64-openwrt-linux-musl-gcc`, `LIBCLANG_PATH`/
+`BINDGEN_EXTRA_CLANG_ARGS` for the `uci` feature's bindgen step against the
+system's clang-19. Both already existed from this session's earlier kernel
+builds - no new build-dependency cost either. One real snag: the resulting
+binary initially linked against glibc's dynamic linker
+(`/lib/ld-linux-aarch64.so.1`) despite every linker/target flag pointing at
+the musl toolchain - rustc's own musl-target default linking picked it up
+from somewhere in the self-contained CRT chain regardless of `-C linker=`.
+Fixed by forcing it explicitly: `RUSTFLAGS="-C link-args=-L<uci lib> -C
+link-args=-Wl,--dynamic-linker=/lib/ld-musl-aarch64.so.1"`. Confirmed
+correct after (`file`: `interpreter /lib/ld-musl-aarch64.so.1`; `readelf
+-d`: only `NEEDED libuci.so.20250120`, everything else statically linked).
+
+**Verified live, immediately, on the real router**: copied the binary over,
+ran it standalone first (`Starting sqm-autorate version 0.4.1`), watched
+`tc -s qdisc show` change in real time as it worked - upload CAKE bandwidth
+moved `8300 -> 8868 -> 4980 Kbit`, download `10000 -> 6000 Kbit` - actively
+discovering real capacity, exactly SS31.1's static-guess problem being
+corrected dynamically. Stopped the ad-hoc test, installed to
+`/usr/sbin/sqm-autorate-rust`, started through the real procd-supervised
+`/etc/init.d/sqm-autorate-rust` (respawn on crash, proper service, not a
+bare background process). 0% ping loss, 13 ms avg RTT, no dmesg errors
+after.
+
+**Persistence**: this binary did not go through OpenWrt's package/opkg
+system at all - it's not `opkg`-tracked and a real `make` of
+`CONFIG_PACKAGE_sqm-autorate-rust` would still hit the from-source
+LLVM+rustc bootstrap (this hand build is a one-off shortcut, not a fix to
+the package's Makefile). To survive future image rebuilds, the binary
+itself is committed straight into the `/etc` overlay equivalent -
+`files/usr/sbin/sqm-autorate-rust` - matching how the rest of this tree's
+runtime state is baked into images. Deliberately did **not** enable
+`CONFIG_PACKAGE_sqm-autorate-rust` in `configs/e8450-ubi.config`: doing so
+would misleadingly imply a normal `make` builds this package the standard
+way, when in fact it's delivered as a pre-built binary sidecar. A real fix
+to the package's build path (e.g. teaching `rust-package.mk` to prefer an
+existing host rustup toolchain when present) is future work, not done here.
 
 ### 31.5 Net conclusion
 
-One clear, applied fix (SQM download recalibration - real miscalibration,
-high confidence). One well-diagnosed but unresolved architectural gap
-(hardware-queue latency blind spot during the AQM grace window - real,
-directly evidenced, but no parameter tweak tested tonight cleanly improved
-it against live household traffic noise). Both are consistent with, not
-contradictions of, this document's own established findings (SS22, SS28) -
-NETSYSv1 has no hardware AQM, full stop; this session's own software AQM
-is a periodic mitigation, not a continuous one, and its periodicity has a
-real, now-directly-observed cost.
+One clear, applied fix (SQM download recalibration, later superseded by
+SS31.4's dynamic autorate - real miscalibration, high confidence either
+way). One well-diagnosed but unresolved architectural gap (hardware-queue
+latency blind spot during the AQM grace window - real, directly evidenced,
+but no parameter tweak tested tonight cleanly improved it against live
+household traffic noise). One originally-deferred item (sqm-autorate-rust)
+that turned out to have a real shortcut and is now live, actively
+correcting the SS31.1 calibration problem in real time rather than needing
+a static guess at all. All three are consistent with, not contradictions
+of, this document's own established findings (SS22, SS28) - NETSYSv1 has
+no hardware AQM, full stop; this session's own software AQM is a periodic
+mitigation, not a continuous one, and its periodicity has a real, now-
+directly-observed cost that autorate's accurate rate baseline reduces the
+*frequency* of encountering, without changing the underlying mechanism.
 
