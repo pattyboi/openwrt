@@ -43,6 +43,18 @@ vendor changelog without independent verification.
   patches deleted because they landed upstream in the meantime, replaced by
   three newly-discovered, narrower compat fixes found by actually attempting
   the build. See [`e8450-ppe-validation.md`](e8450-ppe-validation.md).
+- **Live bufferbloat review**: SQM's download rate was configured at 64
+  Mbit, never once approached in dozens of real tests (0.3-8 Mbit/s
+  observed) — a ceiling that's never the real bottleneck gives zero
+  bufferbloat protection. High-resolution tracing also directly caught
+  upload bufferbloat's real mechanism: a flow sitting in the QDMA hardware
+  leaky-bucket queue (no depth control) for up to the AQM's `grace_ms`
+  window before eviction. Fixed the calibration two ways: a measured static
+  correction, then shipped `sqm-autorate-rust` (built via `rustup` instead
+  of OpenWrt's multi-hour from-source LLVM+rustc bootstrap — no prebuilt
+  release existed, so this was the actual shortcut) so the rate now tracks
+  real capacity continuously instead of a static guess. See
+  [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md).
 
 ## Architecture
 
@@ -64,6 +76,7 @@ flowchart LR
     subgraph Soft["Software fallback path"]
         CAKE[CAKE SQM]
         AQM["qos-06/12/13 AQM<br/>evicts PPE binding on congestion"]
+        AUTORATE["sqm-autorate-rust<br/>tunes CAKE rate to real capacity"]
     end
 
     ISP <--> GDMA
@@ -74,6 +87,7 @@ flowchart LR
     DSA <--> MT7615
     PPE -. "AQM eviction on trigger" .-> AQM
     AQM --> CAKE
+    AUTORATE -. "tunes rate" .-> CAKE
     CAKE -. "re-offload eligible" .-> PPE
 ```
 
@@ -97,6 +111,11 @@ and no patch can add that without new silicon.
 ## Repo-specific notes for anyone building this
 
 - `configs/e8450-ubi.config` is the seed defconfig for this board.
+- `files/usr/sbin/sqm-autorate-rust` is a hand-built binary sidecar, not an
+  opkg-managed package — `CONFIG_PACKAGE_sqm-autorate-rust` is deliberately
+  left unset since a normal `make` of it still hits the full from-source
+  Rust bootstrap. See `netsys-qos-port-investigation.md` §31.4 for the
+  actual (fast) build method if it ever needs rebuilding.
 - `files/` is the `/etc` overlay baked into the image. `files/etc/shadow`
   and `files/etc/config/wireless`'s real key are intentionally excluded via
   `.gitignore` — set your own root password and Wi-Fi key before flashing.
