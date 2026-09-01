@@ -1,0 +1,121 @@
+From 96f73e8c2a51555f7c663d2a255f7b2fe75f3846 Mon Sep 17 00:00:00 2001
+From: OpenWrt E8450 backport
+Subject: [PATCH] net: ethernet: mtk_wed: always reset WDMA RX ring index on
+ reset_dma
+
+mtk_wed_reset_dma() has two paths for step 2 (WDMA RX reset): if the RX
+DMA is still busy after disabling it, it issues WDMA_INT_AGENT/WDMA_RX_DRV
+block resets and takes an early exit; only the non-busy path runs the
+manual MTK_WED_WDMA_RESET_IDX/prefetch-index reset sequence that clears
+the WED-side WDMA RX ring's CIDX/DIDX shadow registers (MTK_WED_WDMA_RING_RX).
+The block resets clear the DMA engine's internal FSM but were observed
+leaving the ring's CIDX/DIDX registers unchanged.
+
+Reproduced live: triggering a Wi-Fi L1 SER (`echo 1 >
+.../wl1/mt76/sys_recovery`) with an active 5 GHz station left
+WED_WDMA_RX0 stuck at a nonzero QCNT indefinitely - unchanged across
+repeated `wifi up` and `service network restart` cycles, requiring a full
+reboot to clear - while hostapd looped "Failed to set beacon parameters".
+Root cause: the busy path was taken during that reset and skipped the
+index-reset sequence entirely.
+
+Run the WDMA RX index-reset sequence unconditionally after the busy-path
+block resets (previously it ran only in the non-busy else branch), so a
+busy-path SER/L2 recovery on this NETSYSv1 WED core cannot leave the ring
+permanently desynchronized.
+
+---
+ drivers/net/ethernet/mediatek/mtk_wed.c | 91 +++++++++++++++--------
+ 1 file changed, 54 insertions(+), 37 deletions(-)
+
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -1802,47 +1802,54 @@
+ 	if (busy) {
+ 		mtk_wed_reset(dev, MTK_WED_RESET_WDMA_INT_AGENT);
+ 		mtk_wed_reset(dev, MTK_WED_RESET_WDMA_RX_DRV);
+-	} else {
+-		if (mtk_wed_is_v3_or_greater(dev->hw)) {
+-			/* 1.a. disable prefetch HW */
+-			wed_clr(dev, MTK_WED_WDMA_RX_PREF_CFG,
+-				MTK_WED_WDMA_RX_PREF_EN);
+-			mtk_wed_poll_busy(dev, MTK_WED_WDMA_RX_PREF_CFG,
+-					  MTK_WED_WDMA_RX_PREF_BUSY);
+-			wed_clr(dev, MTK_WED_WDMA_RX_PREF_CFG,
+-				MTK_WED_WDMA_RX_PREF_DDONE2_EN);
++	}
+ 
+-			/* 2. Reset dma index */
+-			wed_w32(dev, MTK_WED_WDMA_RESET_IDX,
+-				MTK_WED_WDMA_RESET_IDX_RX_ALL);
+-		} else if (mtk_wed_is_v1(dev->hw)) {
+-			/* Reset prefetch index */
+-			wed_set(dev, MTK_WED_WDMA_RX_PREF_CFG,
+-				MTK_WED_WDMA_RX_PREF_RX0_SIDX_CLR |
+-				MTK_WED_WDMA_RX_PREF_RX1_SIDX_CLR);
+-
+-			wed_clr(dev, MTK_WED_WDMA_RX_PREF_CFG,
+-				MTK_WED_WDMA_RX_PREF_RX0_SIDX_CLR |
+-				MTK_WED_WDMA_RX_PREF_RX1_SIDX_CLR);
+-
+-			/* Reset prefetch FIFO */
+-			wed_w32(dev, MTK_WED_WDMA_RX_PREF_FIFO_CFG,
+-				MTK_WED_WDMA_RX_PREF_FIFO_RX0_CLR |
+-				MTK_WED_WDMA_RX_PREF_FIFO_RX1_CLR);
+-			wed_w32(dev, MTK_WED_WDMA_RX_PREF_FIFO_CFG, 0);
+-		}
++	/*
++	 * The WDMA_INT_AGENT/WDMA_RX_DRV block resets above only reset the
++	 * DMA engine's internal FSM; they do not clear the WED-side WDMA RX
++	 * ring's CIDX/DIDX shadow registers. Always run the manual index
++	 * reset sequence below so a busy-path reset (e.g. during Wi-Fi L1
++	 * SER recovery) cannot leave WED_WDMA_RXn desynchronized forever.
++	 */
++	if (mtk_wed_is_v3_or_greater(dev->hw)) {
++		/* 1.a. disable prefetch HW */
++		wed_clr(dev, MTK_WED_WDMA_RX_PREF_CFG,
++			MTK_WED_WDMA_RX_PREF_EN);
++		mtk_wed_poll_busy(dev, MTK_WED_WDMA_RX_PREF_CFG,
++				  MTK_WED_WDMA_RX_PREF_BUSY);
++		wed_clr(dev, MTK_WED_WDMA_RX_PREF_CFG,
++			MTK_WED_WDMA_RX_PREF_DDONE2_EN);
+ 
++		/* 2. Reset dma index */
+ 		wed_w32(dev, MTK_WED_WDMA_RESET_IDX,
+-			MTK_WED_WDMA_RESET_IDX_RX | MTK_WED_WDMA_RESET_IDX_DRV);
+-		wed_w32(dev, MTK_WED_WDMA_RESET_IDX, 0);
++			MTK_WED_WDMA_RESET_IDX_RX_ALL);
++	} else if (mtk_wed_is_v1(dev->hw)) {
++		/* Reset prefetch index */
++		wed_set(dev, MTK_WED_WDMA_RX_PREF_CFG,
++			MTK_WED_WDMA_RX_PREF_RX0_SIDX_CLR |
++			MTK_WED_WDMA_RX_PREF_RX1_SIDX_CLR);
+ 
+-		wed_set(dev, MTK_WED_WDMA_GLO_CFG,
+-			MTK_WED_WDMA_GLO_CFG_RST_INIT_COMPLETE);
++		wed_clr(dev, MTK_WED_WDMA_RX_PREF_CFG,
++			MTK_WED_WDMA_RX_PREF_RX0_SIDX_CLR |
++			MTK_WED_WDMA_RX_PREF_RX1_SIDX_CLR);
+ 
+-		wed_clr(dev, MTK_WED_WDMA_GLO_CFG,
+-			MTK_WED_WDMA_GLO_CFG_RST_INIT_COMPLETE);
++		/* Reset prefetch FIFO */
++		wed_w32(dev, MTK_WED_WDMA_RX_PREF_FIFO_CFG,
++			MTK_WED_WDMA_RX_PREF_FIFO_RX0_CLR |
++			MTK_WED_WDMA_RX_PREF_FIFO_RX1_CLR);
++		wed_w32(dev, MTK_WED_WDMA_RX_PREF_FIFO_CFG, 0);
+ 	}
+ 
++	wed_w32(dev, MTK_WED_WDMA_RESET_IDX,
++		MTK_WED_WDMA_RESET_IDX_RX | MTK_WED_WDMA_RESET_IDX_DRV);
++	wed_w32(dev, MTK_WED_WDMA_RESET_IDX, 0);
++
++	wed_set(dev, MTK_WED_WDMA_GLO_CFG,
++		MTK_WED_WDMA_GLO_CFG_RST_INIT_COMPLETE);
++
++	wed_clr(dev, MTK_WED_WDMA_GLO_CFG,
++		MTK_WED_WDMA_GLO_CFG_RST_INIT_COMPLETE);
++
+ 	/* 3. reset WED WPDMA tx */
+ 	wed_clr(dev, MTK_WED_CTRL, MTK_WED_CTRL_WED_TX_FREE_AGENT_EN);
+ 

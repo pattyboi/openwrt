@@ -1,0 +1,19 @@
+From 96f73e8c2a51555f7c663d2a255f7b2fe75f3846 Mon Sep 17 00:00:00 2001
+From: OpenWrt E8450 backport
+Subject: [PATCH] net: ethernet: mtk_wed: register WED-v1 queue state
+
+Expose the reduced WED-v1 queue-state view through debugfs.
+
+---
+ drivers/net/ethernet/mediatek/mtk_wed_debugfs.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+--- a/drivers/net/ethernet/mediatek/mtk_wed_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed_debugfs.c
+@@ -678,2 +678,5 @@
+ 	debugfs_create_file_unsafe("txinfo", 0400, dir, hw, &wed_txinfo_fops);
+-	if (!mtk_wed_is_v1(hw)) {
++	if (mtk_wed_is_v1(hw))
++		debugfs_create_file_unsafe("v1_queue", 0400, dir, hw,
++					   &wed_v1_queue_fops);
++	if (!mtk_wed_is_v1(hw)) {

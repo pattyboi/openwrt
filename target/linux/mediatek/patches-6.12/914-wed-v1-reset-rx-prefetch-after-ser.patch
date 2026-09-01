@@ -1,0 +1,35 @@
+From 56cce216f7daed56f129c3a01a22e6b1c4edfb54 Mon Sep 17 00:00:00 2001
+From: Rex Lu <rex.lu@mediatek.com>
+Date: Fri, 27 Sep 2024 16:58:22 +0800
+Subject: [PATCH] net: ethernet: mtk_wed: reset WED-v1 RX prefetch after SER
+
+Rebased from MediaTek mtk-openwrt-feeds WED-03. The current kernel already
+has the WED-v3 prefetch reset sequence; add the equivalent WED-v1 reset to
+clear stale RX prefetch indices and FIFO state after system error recovery.
+
+Signed-off-by: Rex Lu <rex.lu@mediatek.com>
+---
+ drivers/net/ethernet/mediatek/mtk_wed.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -1796,2 +1796,17 @@
+ 				MTK_WED_WDMA_RESET_IDX_RX_ALL);
+-		}
++		} else if (mtk_wed_is_v1(dev->hw)) {
++			/* Reset prefetch index */
++			wed_set(dev, MTK_WED_WDMA_RX_PREF_CFG,
++				MTK_WED_WDMA_RX_PREF_RX0_SIDX_CLR |
++				MTK_WED_WDMA_RX_PREF_RX1_SIDX_CLR);
++
++			wed_clr(dev, MTK_WED_WDMA_RX_PREF_CFG,
++				MTK_WED_WDMA_RX_PREF_RX0_SIDX_CLR |
++				MTK_WED_WDMA_RX_PREF_RX1_SIDX_CLR);
++
++			/* Reset prefetch FIFO */
++			wed_w32(dev, MTK_WED_WDMA_RX_PREF_FIFO_CFG,
++				MTK_WED_WDMA_RX_PREF_FIFO_RX0_CLR |
++				MTK_WED_WDMA_RX_PREF_FIFO_RX1_CLR);
++			wed_w32(dev, MTK_WED_WDMA_RX_PREF_FIFO_CFG, 0);
++		}

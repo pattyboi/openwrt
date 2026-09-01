@@ -1,14 +1,23 @@
 --- a/arch/arm64/boot/dts/mediatek/mt7622.dtsi
 +++ b/arch/arm64/boot/dts/mediatek/mt7622.dtsi
-@@ -135,6 +135,13 @@
+@@ -135,6 +135,22 @@
  		#size-cells = <2>;
  		ranges;
  
-+		/* 64 KiB reserved for ramoops/pstore */
++		/* 64 KiB reserved for ramoops/pstore. Only 0x1000 is the
++		 * oops/panic record zone; the rest carries a continuous
++		 * console mirror plus pmsg/ftrace zones so a headless,
++		 * no-UART board (e.g. Linksys E8450) still leaves a trace
++		 * in /sys/fs/pstore/console-ramoops-0 when a bus hang or
++		 * other fault freezes the CPU without an oops/panic.
++		 */
 +		ramoops@42ff0000 {
 +			compatible = "ramoops";
 +			reg = <0 0x42ff0000 0 0x10000>;
 +			record-size = <0x1000>;
++			console-size = <0x8000>;
++			pmsg-size = <0x1000>;
++			ftrace-size = <0x1000>;
 +		};
 +
  		/* 192 KiB reserved for ARM Trusted Firmware (BL31) */

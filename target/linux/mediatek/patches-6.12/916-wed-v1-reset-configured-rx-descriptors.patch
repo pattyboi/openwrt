@@ -1,0 +1,19 @@
+From 56cce216f7daed56f129c3a01a22e6b1c4edfb54 Mon Sep 17 00:00:00 2001
+From: Rex Lu <rex.lu@mediatek.com>
+Date: Fri, 27 Sep 2024 16:58:22 +0800
+Subject: [PATCH] net: ethernet: mtk_wed: reset configured WED-v1 RX descriptors
+
+Rebased from MediaTek mtk-openwrt-feeds WED-03. Reset the CPU index for
+configured WDMA RX rings during WED RX reset; the previous condition
+skipped configured rings and reset only unconfigured entries.
+
+Signed-off-by: Rex Lu <rex.lu@mediatek.com>
+---
+ drivers/net/ethernet/mediatek/mtk_wed.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -261,1 +261,1 @@
+-		if (dev->rx_wdma[i].desc)
++		if (!dev->rx_wdma[i].desc)

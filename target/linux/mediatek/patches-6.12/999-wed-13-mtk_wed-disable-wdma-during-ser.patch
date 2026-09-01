@@ -1,0 +1,90 @@
+From 9fef95a165ffdf921eeb5b5e58600cd912746f6b Mon Sep 17 00:00:00 2001
+From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Date: Tue, 29 Apr 2025 22:15:57 +0800
+Subject: [PATCH] net: ethernet: mtk_wed: add WDMA disable flow to WiFi L1 SER
+
+Without this patch, the WED driver cannot prevent packets from entering
+WDMA during WiFi L1 SER, causing incomplete packets to get stuck in the
+PSE. Then results in the PSE buffer management transitioning to a chaotic
+state.
+
+Vendor source: MediaTek mtk-openwrt-feeds 25.12 patch 999-wed-13.
+Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+
+NETSYSv1 fix (local, 2026-08-31): the vendor patch's PSE_WDMA_PORT()/
+MTK_PSE_WDMA_GLO_CFG() dispatch is the NETSYSv2+ port map only
+(PSE_WDMA0/1/2_PORT = 8/9/13, second FE_GLO_CFG instance at offset
+0x24). On this board's MT7622 (NETSYSv1), mtk_flow_set_output_device()
+routes WDMA through plain PSE port 3, single FE_GLO_CFG instance at
+offset 0x00, link-down bit BIT(11) - applying the v2+ formula there
+computes port 8 -> offset 0x24 bit 0, an unrelated register. The patch
+therefore compiled and ran but never actually gated WDMA ingress on
+this hardware. mtk_pse_wdma_enable() now branches on
+mtk_is_netsys_v2_or_greater() (the same predicate
+mtk_flow_set_output_device() uses for this exact port decision) and
+uses the plain port-3/offset-0x00/BIT(11) path for v1. v2/v3 behavior
+is unchanged. Both call sites are untouched.
+
+Also switched the header insertion from a zero-context absolute-line
+hunk to a normal context-anchored hunk: the zero-context form proved
+fragile against this tree's deep mtk_eth_soc.h patch stack (qos-01..10
+etc. also insert content nearby) and was silently no-op'd or
+mis-spliced by GNU patch depending on apply order/state, corrupting
+the header. Context-anchored hunks let patch relocate correctly.
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1646,6 +1646,35 @@
+ int mtk_flow_offload_cmd(struct mtk_eth *eth, struct flow_cls_offload *cls,
+ 			 int ppe_index);
+ void mtk_flow_offload_cleanup(struct mtk_eth *eth, struct list_head *list);
++#define PSE_WDMA_PORT(x)	(((x) == 0) ? PSE_WDMA0_PORT : \
++				 ((x) == 1) ? PSE_WDMA1_PORT : PSE_WDMA2_PORT)
++#define MTK_PSE_WDMA_GLO_CFG(x)	(((x) >= 8) ? 0x24 : 0x00)
++
++static inline void mtk_pse_wdma_enable(struct mtk_eth *eth, int id, bool enable)
++{
++	u32 val;
++
++	/* NETSYSv1 (e.g. MT7622) has no second FE_GLO_CFG instance and
++	 * mtk_flow_set_output_device() always routes WDMA through plain
++	 * PSE port 3, not the v2+ PSE_WDMA0/1/2_PORT (8/9/13) map below.
++	 */
++	if (!mtk_is_netsys_v2_or_greater(eth)) {
++		val = mtk_r32(eth, MTK_FE_GLO_CFG(3));
++		if (enable)
++			val &= ~MTK_FE_LINK_DOWN_P(3);
++		else
++			val |= MTK_FE_LINK_DOWN_P(3);
++		mtk_w32(eth, val, MTK_FE_GLO_CFG(3));
++		return;
++	}
++
++	val = mtk_r32(eth, MTK_PSE_WDMA_GLO_CFG(PSE_WDMA_PORT(id)));
++	if (enable)
++		val &= ~MTK_FE_LINK_DOWN_P(PSE_WDMA_PORT(id));
++	else
++		val |= MTK_FE_LINK_DOWN_P(PSE_WDMA_PORT(id));
++	mtk_w32(eth, val, MTK_PSE_WDMA_GLO_CFG(PSE_WDMA_PORT(id)));
++}
+ void mtk_eth_set_dma_device(struct mtk_eth *eth, struct device *dma_dev);
+ 
+ 
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -1758,6 +1758,8 @@
+ 	u32 val;
+ 	int i;
+ 
++	mtk_pse_wdma_enable(dev->hw->eth, dev->wdma_idx, false);
++
+ 	for (i = 0; i < ARRAY_SIZE(dev->tx_ring); i++) {
+ 		if (!dev->tx_ring[i].desc)
+ 			continue;
+@@ -2426,6 +2428,7 @@
+ 	mtk_wed_amsdu_init(dev);
+ 
+ 	mtk_wed_dma_enable(dev);
++	mtk_pse_wdma_enable(dev->hw->eth, dev->wdma_idx, true);
+ 	dev->running = true;
+ }
+ 

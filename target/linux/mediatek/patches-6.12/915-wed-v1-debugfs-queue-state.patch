@@ -1,0 +1,71 @@
+From 96f73e8c2a51555f7c663d2a255f7b2fe75f3846 Mon Sep 17 00:00:00 2001
+From: OpenWrt E8450 backport
+Subject: [PATCH] net: ethernet: mtk_wed: add reduced WED-v1 queue state
+
+Add a small WED-v1-only queue-state helper. It reports raw CNT/CIDX/DIDX
+values and calculated queue counts without changing the datapath.
+
+---
+ drivers/net/ethernet/mediatek/mtk_wed_debugfs.c | 56 +++++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+
+--- a/drivers/net/ethernet/mediatek/mtk_wed_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed_debugfs.c
+@@ -153,1 +153,56 @@
+  DEFINE_SHOW_ATTRIBUTE(wed_txinfo);
++static void
++wed_v1_dump_queue(struct seq_file *s, struct mtk_wed_device *dev,
++			  const char *name, u32 base, bool rx, bool wdma, bool packed)
++{
++	u32 cnt, cidx, didx, qcnt;
++
++	if (wdma) {
++		cnt = wdma_r32(dev, base + 0x4);
++		cidx = wdma_r32(dev, base + 0x8);
++		didx = wdma_r32(dev, base + 0xc);
++	} else {
++		cnt = wed_r32(dev, base + 0x4);
++		cidx = wed_r32(dev, base + 0x8);
++		didx = wed_r32(dev, base + 0xc);
++	}
++
++	if (packed) {
++		cidx &= 0xffff;
++		didx &= 0xffff;
++	}
++
++	if (!cnt)
++		qcnt = 0;
++	else if (rx)
++		qcnt = didx > cidx ? didx - cidx - 1 : didx + cnt - cidx - 1;
++	else
++		qcnt = cidx >= didx ? cidx - didx : cidx - didx + cnt;
++
++	seq_printf(s, "%-16s CNT=%08x CIDX=%08x DIDX=%08x QCNT=%u\n",
++		   name, cnt, cidx, didx, qcnt);
++}
++
++static int
++wed_v1_queue_show(struct seq_file *s, void *data)
++{
++	struct mtk_wed_hw *hw = s->private;
++	struct mtk_wed_device *dev = hw->wed_dev;
++
++	if (!dev || !mtk_wed_is_v1(hw))
++		return 0;
++
++	seq_puts(s, "WED-v1 queue state (QCNT is pending TX or occupied RX entries)\n");
++	wed_v1_dump_queue(s, dev, "WED_TX0", MTK_WED_RING_TX(0), false, false, false);
++	wed_v1_dump_queue(s, dev, "WED_TX1", MTK_WED_RING_TX(1), false, false, false);
++	wed_v1_dump_queue(s, dev, "WPDMA_TX0", MTK_WED_WPDMA_RING_TX(0), false, false, true);
++	wed_v1_dump_queue(s, dev, "WPDMA_TX1", MTK_WED_WPDMA_RING_TX(1), false, false, true);
++	wed_v1_dump_queue(s, dev, "WED_WDMA_RX0", MTK_WED_WDMA_RING_RX(0), true, false, true);
++	wed_v1_dump_queue(s, dev, "WED_WDMA_RX1", MTK_WED_WDMA_RING_RX(1), true, false, true);
++	wed_v1_dump_queue(s, dev, "WDMA_RX0", MTK_WDMA_RING_RX(0), true, true, false);
++	wed_v1_dump_queue(s, dev, "WDMA_RX1", MTK_WDMA_RING_RX(1), true, true, false);
++	wed_v1_dump_queue(s, dev, "WED_TXFREE1", MTK_WED_RING_RX(1), true, false, false);
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(wed_v1_queue);
++
