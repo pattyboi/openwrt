@@ -1,0 +1,41 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: re-prime AQM baseline after QDMA SER reset
+
+After a QDMA hardware error recovery (SER via mtk_pending_work), the
+QTX_MIB_IF packet counters reset to zero.  The qos-06 AQM delayed_work
+keeps running through the reset; on the first post-SER poll it computes:
+
+  delta_count = 0 - prev_count  (uint32 underflow => large positive)
+
+which fires a spurious trigger and evicts flows unnecessarily.
+
+Fix: set qdma_aqm.primed = false in mtk_pending_work() immediately after
+mtk_hw_init(eth, true).  The next AQM poll will re-read the zeroed MIB
+counters as a new baseline and suppress the trigger.
+
+Note: per-queue rate overrides (qdma_override_kbps[]) are restored
+automatically: mtk_pending_work -> mtk_open -> mtk_tx_alloc already
+calls mtk_qdma_v1_apply_all() (qos-03).  No additional save/restore
+is needed for the rate caps.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -5455,5 +5455,16 @@
+ 	mtk_hw_init(eth, true);
+ 
++	/* QTX_MIB_IF counters reset to zero on QDMA SER.  Re-prime the AQM
++	 * baseline so the first post-SER poll does not compute a spurious
++	 * uint32-underflow delta and fire a false flow-unbind trigger.
++	 * Per-queue rate caps are restored by mtk_tx_alloc->mtk_qdma_v1_apply_all().
++	 */
++	if (mtk_qdma_v1_override_supported(eth)) {
++		spin_lock_bh(&eth->qdma_sch_lock);
++		eth->qdma_aqm.primed = false;
++		spin_unlock_bh(&eth->qdma_sch_lock);
++	}
++
+ 	/* restart DMA and enable IRQs */
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+ 		if (!eth->netdev[i] || !test_bit(i, &restart))

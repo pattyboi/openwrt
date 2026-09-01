@@ -1,0 +1,124 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+
+BIN=/usr/sbin/qdma-shaper
+
+apply_one() {
+	local cfg="$1" enabled interface rate
+	config_get_bool enabled "$cfg" enabled 0
+	config_get interface "$cfg" interface
+	config_get rate "$cfg" rate_kbps
+	[ "$enabled" = "1" ] || return 0
+	[ -n "$interface" ] || return 0
+	"$BIN" apply "$interface" "$rate"
+}
+
+clear_one() {
+	local cfg="$1" interface
+	config_get interface "$cfg" interface
+	[ -n "$interface" ] || return 0
+	"$BIN" clear "$interface" 2>/dev/null
+}
+
+# Write the AQM enable command to the per-queue debugfs node.
+# The debugfs dir is located by the same glob that qdma-shaper.sh uses.
+_aqm_node() {
+	local d
+	for d in /sys/kernel/debug/*.ethernet; do
+		[ -f "$d/qdma_aqm" ] && { echo "$d/qdma_aqm"; return 0; }
+	done
+	return 1
+}
+
+_qdma_node() {
+	local d
+	for d in /sys/kernel/debug/*.ethernet; do
+		[ -w "$d/qdma_sch" ] && [ -w "$d/qdma_txq" ] &&
+			[ -w "$d/qos_toggle" ] && { echo "$d"; return 0; }
+	done
+	return 1
+}
+
+apply_hqos() {
+	local cfg="$1" enabled toggle scheduler mode sched_rate
+	local bulk_queue bulk_weight bulk_rate priority_queue priority_weight node
+	config_get_bool enabled "$cfg" enabled 0
+	[ "$enabled" = "1" ] || return 0
+	config_get toggle "$cfg" toggle 1
+	config_get scheduler "$cfg" scheduler 0
+	config_get mode "$cfg" scheduler_mode wrr
+	config_get sched_rate "$cfg" scheduler_rate_kbps 0
+	config_get bulk_queue "$cfg" bulk_queue 7
+	config_get bulk_weight "$cfg" bulk_weight 4
+	config_get bulk_rate "$cfg" bulk_rate_kbps 8300
+	config_get priority_queue "$cfg" priority_queue 8
+	config_get priority_weight "$cfg" priority_weight 12
+	node="$(_qdma_node)" || {
+		logger -t qdma-shaper "HQoS controls not found; leaving qos_toggle unchanged"
+		return 0
+	}
+	printf '%s %s %s\n' "$scheduler" "$mode" "$sched_rate" > "$node/qdma_sch"
+	printf '%s 0 1 10000 1 %s %s\n' \
+		"$bulk_queue" "$bulk_rate" "$bulk_weight" > "$node/qdma_txq"
+	printf '%s 0 1 10000 0 0 %s\n' \
+		"$priority_queue" "$priority_weight" > "$node/qdma_txq"
+	printf '%s\n' "$toggle" > "$node/qos_toggle"
+	logger -t qdma-shaper "HQoS enabled toggle=$toggle bulk=q$bulk_queue/${bulk_rate}kbps priority=q$priority_queue"
+}
+
+clear_hqos() {
+	local node
+	node="$(_qdma_node)" || return 0
+	printf '2\n' > "$node/qos_toggle"
+	printf '0 wrr 0\n' > "$node/qdma_sch"
+	printf '8 0\n' > "$node/qdma_rate"
+}
+
+apply_aqm() {
+	local cfg="$1" enabled queue poll_ms byte_thresh batch grace_ms node
+	config_get_bool enabled "$cfg" enabled 0
+	config_get queue      "$cfg" queue       7
+	config_get poll_ms    "$cfg" poll_ms     100
+	config_get byte_thresh "$cfg" byte_thresh 0
+	config_get batch      "$cfg" batch       4
+	config_get grace_ms   "$cfg" grace_ms    3000
+	[ "$enabled" = "1" ] || return 0
+	node="$(_aqm_node)" || {
+		logger -t qdma-shaper "qdma_aqm not found; skipping AQM enable"
+		return 0
+	}
+	echo "enable $queue $poll_ms $byte_thresh $batch $grace_ms" > "$node"
+	logger -t qdma-shaper "AQM enabled queue=$queue poll_ms=${poll_ms} grace_ms=${grace_ms}"
+}
+
+clear_aqm() {
+	local node
+	node="$(_aqm_node)" || return 0
+	echo disable > "$node"
+	logger -t qdma-shaper "AQM disabled"
+}
+
+start() {
+	config_load qdma-shaper
+	config_foreach apply_one shaper
+	config_foreach apply_aqm aqm
+	config_foreach apply_hqos hqos
+}
+
+stop() {
+	config_load qdma-shaper
+	config_foreach clear_hqos hqos
+	config_foreach clear_aqm aqm
+	config_foreach clear_one shaper
+}
+
+reload() {
+	stop
+	start
+}
+
+restart() {
+	reload
+}

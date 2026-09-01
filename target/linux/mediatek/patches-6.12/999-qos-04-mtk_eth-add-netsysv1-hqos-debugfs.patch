@@ -1,0 +1,209 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add experimental NETSYSv1 HQoS debugfs
+
+Add three NETSYSv1-only diagnostic debugfs controls on top of qos-03 to
+evaluate hardware HQoS (flow isolation) against software CAKE:
+
+  qos_toggle  (rw) - select PPE queue-assignment mode: 0 off, 1 HQoS
+                     (per-flow queue from conntrack mark), 2 PPPQ (default).
+  qdma_sch    (w)  - program a QDMA scheduler aggregate rate and WFQ/SP
+                     mode: "<sch> <wrr|wfq|sp> <kbps>", writing the
+                     tx_sch_rate register (two schedulers on NETSYSv1).
+  qdma_txq    (w)  - program a full per-queue QTX_SCH word:
+                     "<queue> <sch> <min_en> <min_kbps> <max_en>
+                     <max_kbps> <weight>" (scheduler-select, min/max
+                     leaky-bucket rate, 4-bit WRR weight).
+
+These are direct diagnostic register writes, gated to non-MT7621 NETSYSv1,
+and are not tracked by the qos-03 persistence arrays (a DSA link event will
+reassert qos-03 state). They do not change default behaviour: qos_toggle
+stays 2 (PPPQ) until written. No effect on NETSYSv2/v3 or MT7621.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1036,6 +1036,166 @@
+ 	.write	= mtk_qdma_rate_write,
+ };
+ 
++/* qos-04: experimental HQoS controls (NETSYSv1 only).
++ * qos_toggle selects PPE queue-assignment mode; qdma_sch programs the two
++ * QDMA schedulers (aggregate rate + WFQ/SP) via the tx_sch_rate register;
++ * qdma_txq programs a full per-queue QTX_SCH word (scheduler-select, min/max
++ * rate, WRR weight). These are direct diagnostic writes and are not tracked by
++ * the qos-03 persistence arrays; a DSA link event will reassert qos-03 state.
++ */
++static int mtk_qos_toggle_show(struct seq_file *s, void *unused)
++{
++	struct mtk_eth *eth = s->private;
++
++	seq_printf(s, "%u\n", eth->qos_toggle);
++	return 0;
++}
++
++static int mtk_qos_toggle_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, mtk_qos_toggle_show, inode->i_private);
++}
++
++static ssize_t mtk_qos_toggle_write(struct file *file, const char __user *ubuf,
++				    size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct mtk_eth *eth = s->private;
++	unsigned int val;
++	char buf[8], extra;
++
++	if (!mtk_qdma_v1_override_supported(eth))
++		return -EOPNOTSUPP;
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%u %c", &val, &extra) != 1 || val > 2)
++		return -EINVAL;
++
++	eth->qos_toggle = val;
++
++	return count;
++}
++
++static const struct file_operations mtk_qos_toggle_fops = {
++	.owner	 = THIS_MODULE,
++	.open	 = mtk_qos_toggle_open,
++	.read	 = seq_read,
++	.llseek	 = seq_lseek,
++	.release = single_release,
++	.write	 = mtk_qos_toggle_write,
++};
++
++static ssize_t mtk_qdma_sch_write(struct file *file, const char __user *ubuf,
++				  size_t count, loff_t *ppos)
++{
++	struct mtk_eth *eth = file->private_data;
++	const struct mtk_reg_map *map = eth->soc->reg_map;
++	unsigned long long parsed_sch, parsed_kbps;
++	u32 sch, kbps, man, exp, val, reg, shift;
++	char buf[48], mode[8], extra;
++
++	if (!mtk_qdma_v1_override_supported(eth))
++		return -EOPNOTSUPP;
++	if (*ppos || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%llu %7s %llu %c", &parsed_sch, mode, &parsed_kbps,
++		   &extra) != 3 || parsed_sch > 1 || parsed_kbps > U32_MAX)
++		return -EINVAL;
++	sch = parsed_sch;
++	kbps = parsed_kbps;
++
++	val = 0;
++	if (!strcmp(mode, "wrr") || !strcmp(mode, "wfq"))
++		val |= MTK_QDMA_TX_SCH_MAX_WFQ;
++	else if (strcmp(mode, "sp"))
++		return -EINVAL;
++	if (kbps) {
++		mtk_qdma_rate_to_man_exp(kbps, &man, &exp);
++		val |= MTK_QTX_SCH_MAX_RATE_EN |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, man) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, exp);
++	}
++
++	shift = sch ? 16 : 0;
++	spin_lock_bh(&eth->qdma_sch_lock);
++	reg = mtk_r32(eth, map->qdma.tx_sch_rate);
++	reg &= ~(0xffffU << shift);
++	reg |= (val & 0xffff) << shift;
++	mtk_w32(eth, reg, map->qdma.tx_sch_rate);
++	spin_unlock_bh(&eth->qdma_sch_lock);
++
++	return count;
++}
++
++static const struct file_operations mtk_qdma_sch_fops = {
++	.owner	= THIS_MODULE,
++	.open	= simple_open,
++	.write	= mtk_qdma_sch_write,
++};
++
++static ssize_t mtk_qdma_txq_write(struct file *file, const char __user *ubuf,
++				  size_t count, loff_t *ppos)
++{
++	struct mtk_eth *eth = file->private_data;
++	const struct mtk_reg_map *map = eth->soc->reg_map;
++	unsigned long long q, sch, min_en, min_kbps, max_en, max_kbps, weight;
++	u32 val, man, exp;
++	char buf[80], extra;
++
++	if (!mtk_qdma_v1_override_supported(eth))
++		return -EOPNOTSUPP;
++	if (*ppos || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%llu %llu %llu %llu %llu %llu %llu %c",
++		   &q, &sch, &min_en, &min_kbps, &max_en, &max_kbps, &weight,
++		   &extra) != 7 ||
++	    q >= MTK_QDMA_NUM_QUEUES || sch > 1 || weight > 15 ||
++	    min_kbps > U32_MAX || max_kbps > U32_MAX)
++		return -EINVAL;
++
++	val = MTK_QTX_SCH_LEAKY_BUCKET_EN | MTK_QTX_SCH_LEAKY_BUCKET_SIZE;
++	if (sch)
++		val |= MTK_QTX_SCH_TX_SEL;
++	if (min_en) {
++		mtk_qdma_rate_to_man_exp((u32)min_kbps, &man, &exp);
++		val |= MTK_QTX_SCH_MIN_RATE_EN |
++		       FIELD_PREP(MTK_QTX_SCH_MIN_RATE_MAN, man) |
++		       FIELD_PREP(MTK_QTX_SCH_MIN_RATE_EXP, exp);
++	}
++	val |= FIELD_PREP(MTK_QTX_SCH_MAX_RATE_WEIGHT, (u32)weight);
++	if (max_en) {
++		mtk_qdma_rate_to_man_exp((u32)max_kbps, &man, &exp);
++		val |= MTK_QTX_SCH_MAX_RATE_EN |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, man) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, exp);
++	}
++
++	spin_lock_bh(&eth->qdma_sch_lock);
++	eth->qdma_override_kbps[q] = 0;
++	mtk_w32(eth, val, map->qdma.qtx_sch + q * MTK_QTX_OFFSET);
++	spin_unlock_bh(&eth->qdma_sch_lock);
++
++	return count;
++}
++
++static const struct file_operations mtk_qdma_txq_fops = {
++	.owner	= THIS_MODULE,
++	.open	= simple_open,
++	.write	= mtk_qdma_txq_write,
++};
++
+ static void mtk_qdma_debugfs_init(struct mtk_eth *eth)
+ {
+ 	struct dentry *root;
+@@ -1050,8 +1210,14 @@
+ 		goto error;
+ 
+ 	if (mtk_qdma_v1_override_supported(eth) &&
+-	    IS_ERR_OR_NULL(debugfs_create_file("qdma_rate", 0200, root, eth,
+-					       &mtk_qdma_rate_fops)))
++	    (IS_ERR_OR_NULL(debugfs_create_file("qdma_rate", 0200, root, eth,
++						&mtk_qdma_rate_fops)) ||
++	     IS_ERR_OR_NULL(debugfs_create_file("qos_toggle", 0644, root, eth,
++						&mtk_qos_toggle_fops)) ||
++	     IS_ERR_OR_NULL(debugfs_create_file("qdma_sch", 0200, root, eth,
++						&mtk_qdma_sch_fops)) ||
++	     IS_ERR_OR_NULL(debugfs_create_file("qdma_txq", 0200, root, eth,
++						&mtk_qdma_txq_fops))))
+ 		goto error;
+ 
+ 	return;

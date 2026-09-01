@@ -1,0 +1,107 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add disposable QDMA rate-write debugfs
+
+Add a write-only debugfs file, qdma_rate, that programs a single QDMA queue's
+QTX_SCH max-rate leaky bucket on NETSYSv1 (MT7622). Write format:
+
+	echo "<queue> <kbps>" > /sys/kernel/debug/<dev>/qdma_rate
+
+A nonzero <kbps> sets a per-queue max-rate cap encoded as MAN * 10^EXP kbps
+(7-bit mantissa, 4-bit exponent), reusing the exact QTX_SCH bit layout the
+driver already programs in mtk_set_queue_speed(). A zero <kbps> removes the
+manual cap (MAX_RATE_EN cleared). The current QTX_SCH value is observable via
+the read-only qdma_regs file added by 999-qos-01.
+
+This is a DISPOSABLE diagnostic interface for the queue-7 (WAN DSA port 4)
+rate-limit experiment only. mtk_set_queue_speed() reasserts the link-rate value
+on any DSA link event, so a manual cap is volatile. Do not enable this on a
+production image and only flash it with an independent recovery path.
+
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -838,6 +838,74 @@
+ }
+ DEFINE_SHOW_ATTRIBUTE(mtk_qdma_debugfs);
+ 
++static void mtk_qdma_rate_to_man_exp(u32 kbps, u32 *man, u32 *exp)
++{
++	u32 e = 0, m = kbps;
++
++	while (m > FIELD_MAX(MTK_QTX_SCH_MAX_RATE_MAN) && e < 15) {
++		m /= 10;
++		e++;
++	}
++	if (m > FIELD_MAX(MTK_QTX_SCH_MAX_RATE_MAN))
++		m = FIELD_MAX(MTK_QTX_SCH_MAX_RATE_MAN);
++	if (!m)
++		m = 1;
++	*man = m;
++	*exp = e;
++}
++
++/*
++ * DISPOSABLE diagnostic write interface. Programs a single QDMA queue's
++ * QTX_SCH max-rate leaky bucket. Intended only for a throwaway MT7622 test
++ * image with an independent recovery path. mtk_set_queue_speed() reasserts the
++ * link-rate value on any DSA link event, so a manual cap is volatile.
++ */
++static ssize_t mtk_qdma_rate_write(struct file *file, const char __user *ubuf,
++				   size_t count, loff_t *ppos)
++{
++	struct mtk_eth *eth = file->private_data;
++	const struct mtk_reg_map *map = eth->soc->reg_map;
++	u32 queue, kbps, man, exp, val;
++	char buf[32];
++
++	if (!MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA))
++		return -EOPNOTSUPP;
++	if (*ppos || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%u %u", &queue, &kbps) != 2 ||
++	    queue >= MTK_QDMA_NUM_QUEUES)
++		return -EINVAL;
++
++	/* keep the driver's v1 low-rate/leaky-bucket base */
++	val = MTK_QTX_SCH_MIN_RATE_EN | MTK_QTX_SCH_LEAKY_BUCKET_SIZE |
++	      FIELD_PREP(MTK_QTX_SCH_MIN_RATE_MAN, 1) |
++	      FIELD_PREP(MTK_QTX_SCH_MIN_RATE_EXP, 4);
++	if (mtk_is_netsys_v1(eth))
++		val |= MTK_QTX_SCH_LEAKY_BUCKET_EN;
++
++	if (kbps) {
++		mtk_qdma_rate_to_man_exp(kbps, &man, &exp);
++		val |= MTK_QTX_SCH_MAX_RATE_EN |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, man) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, exp) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_WEIGHT, 1);
++	}
++
++	mtk_w32(eth, val, map->qdma.qtx_sch + queue * MTK_QTX_OFFSET);
++
++	return count;
++}
++
++static const struct file_operations mtk_qdma_rate_fops = {
++	.owner	= THIS_MODULE,
++	.open	= simple_open,
++	.write	= mtk_qdma_rate_write,
++};
++
+ static void mtk_qdma_debugfs_init(struct mtk_eth *eth)
+ {
+ 	struct dentry *root;
+@@ -851,7 +919,9 @@
+ 					       &mtk_qdma_debugfs_fops))) {
+ 		debugfs_remove_recursive(root);
+ 		eth->qdma_debugfs_dir = NULL;
++		return;
+ 	}
++	debugfs_create_file("qdma_rate", 0200, root, eth, &mtk_qdma_rate_fops);
+ }
+ 
+ static void mtk_set_queue_speed(struct mtk_eth *eth, unsigned int idx,

@@ -1,0 +1,397 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: persist NETSYSv1 QDMA rate overrides
+
+Turn the disposable NETSYSv1 QDMA rate-write probe into a stateful queue
+shaper for lifecycle and Gate-E testing on MT7622. Store link speed,
+requested override, and effective encoded rate for each of the 16 queues.
+Serialize state and QTX_SCH writes, reapply state after DMA queue
+initialization, and make DSA link notifications preserve active overrides.
+
+A zero rate now disables the override and restores the latest driver
+link-rate word instead of leaving the queue uncapped. Restrict the writable
+interface to non-MT7621 NETSYSv1 layouts, reject trailing or overflowing
+input, expose decoded state alongside raw register readback, and defer MMIO
+writes while the frame-engine reset flag is set. Existing NETSYSv2/v3 and
+MT7621 paths are unchanged.
+
+This remains an experimental root-only debugfs control. It does not alter
+PPE queue selection, WED, firewall offload, SQM, or per-packet processing.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -809,41 +809,27 @@
+ 	}
+ }
+ 
+-static int mtk_qdma_debugfs_show(struct seq_file *s, void *unused)
+-{
+-	struct mtk_eth *eth = s->private;
+-	const struct mtk_reg_map *map = eth->soc->reg_map;
+-	u32 qtx_cfg, qtx_sch;
+-	unsigned int i;
+-
+-	if (!MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA))
+-		return -EOPNOTSUPP;
+-
+-	seq_printf(s, "qtx_cfg_base=0x%04x qtx_sch_base=0x%04x\n",
+-		   map->qdma.qtx_cfg, map->qdma.qtx_sch);
+-	seq_printf(s, "page=0x%04x tx_sch_rate=0x%04x\n",
+-		   map->qdma.page, map->qdma.tx_sch_rate);
+-
+-	for (i = 0; i < MTK_QDMA_NUM_QUEUES; i++) {
+-		qtx_cfg = mtk_r32(eth, map->qdma.qtx_cfg + i * MTK_QTX_OFFSET);
+-		qtx_sch = mtk_r32(eth, map->qdma.qtx_sch + i * MTK_QTX_OFFSET);
+-		seq_printf(s, "queue=%u qtx_cfg=0x%08x qtx_sch=0x%08x\n",
+-			   i, qtx_cfg, qtx_sch);
+-	}
+-
+-	seq_printf(s, "tx_sch_rate_value=0x%08x\n",
+-		   mtk_r32(eth, map->qdma.tx_sch_rate));
+-
+-	return 0;
+-}
+-DEFINE_SHOW_ATTRIBUTE(mtk_qdma_debugfs);
+-
+-static void mtk_qdma_rate_to_man_exp(u32 kbps, u32 *man, u32 *exp)
+-{
+-	u32 e = 0, m = kbps;
++static bool mtk_qdma_v1_override_supported(struct mtk_eth *eth)
++{
++	return mtk_is_netsys_v1(eth) && !IS_ENABLED(CONFIG_SOC_MT7621);
++}
++
++static u32 mtk_qdma_v1_base_word(void)
++{
++	return MTK_QTX_SCH_MIN_RATE_EN |
++	       MTK_QTX_SCH_LEAKY_BUCKET_SIZE |
++	       MTK_QTX_SCH_LEAKY_BUCKET_EN |
++	       FIELD_PREP(MTK_QTX_SCH_MIN_RATE_MAN, 1) |
++	       FIELD_PREP(MTK_QTX_SCH_MIN_RATE_EXP, 4);
++}
++
++static u32 mtk_qdma_rate_to_man_exp(u32 kbps, u32 *man, u32 *exp)
++{
++	u32 e = 0, m = kbps, scale = 1;
+ 
+ 	while (m > FIELD_MAX(MTK_QTX_SCH_MAX_RATE_MAN) && e < 15) {
+ 		m /= 10;
++		scale *= 10;
+ 		e++;
+ 	}
+ 	if (m > FIELD_MAX(MTK_QTX_SCH_MAX_RATE_MAN))
+@@ -852,23 +838,172 @@
+ 		m = 1;
+ 	*man = m;
+ 	*exp = e;
+-}
+-
+-/*
+- * DISPOSABLE diagnostic write interface. Programs a single QDMA queue's
+- * QTX_SCH max-rate leaky bucket. Intended only for a throwaway MT7622 test
+- * image with an independent recovery path. mtk_set_queue_speed() reasserts the
+- * link-rate value on any DSA link event, so a manual cap is volatile.
+- */
++
++	return m * scale;
++}
++
++static u32 mtk_qdma_v1_rate_word(u32 kbps, u32 *effective_kbps)
++{
++	u32 man, exp;
++
++	*effective_kbps = mtk_qdma_rate_to_man_exp(kbps, &man, &exp);
++
++	return mtk_qdma_v1_base_word() |
++	       MTK_QTX_SCH_MAX_RATE_EN |
++	       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, man) |
++	       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, exp) |
++	       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_WEIGHT, 1);
++}
++
++static u32 mtk_qdma_v1_link_word(u32 speed_mbps, u32 *effective_kbps)
++{
++	u32 val = mtk_qdma_v1_base_word();
++
++	*effective_kbps = 0;
++	switch (speed_mbps) {
++	case SPEED_10:
++		val |= MTK_QTX_SCH_MAX_RATE_EN |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, 1) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, 4) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_WEIGHT, 1);
++		*effective_kbps = 10000;
++		break;
++	case SPEED_100:
++		val |= MTK_QTX_SCH_MAX_RATE_EN |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, 1) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, 5) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_WEIGHT, 1);
++		*effective_kbps = 100000;
++		break;
++	case SPEED_1000:
++		val |= MTK_QTX_SCH_MAX_RATE_EN |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, 1) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, 6) |
++		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_WEIGHT, 10);
++		*effective_kbps = 1000000;
++		break;
++	default:
++		break;
++	}
++
++	return val;
++}
++
++/* qdma_sch_lock must be held. */
++static u32 mtk_qdma_v1_queue_word(struct mtk_eth *eth, unsigned int queue)
++{
++	u32 override = eth->qdma_override_kbps[queue];
++
++	if (override)
++		return mtk_qdma_v1_rate_word(override,
++					    &eth->qdma_effective_kbps[queue]);
++
++	return mtk_qdma_v1_link_word(eth->qdma_link_speed_mbps[queue],
++				     &eth->qdma_effective_kbps[queue]);
++}
++
++/* qdma_sch_lock must be held. */
++static void mtk_qdma_v1_apply_queue(struct mtk_eth *eth, unsigned int queue)
++{
++	u32 val = mtk_qdma_v1_queue_word(eth, queue);
++
++	mtk_w32(eth, val, eth->soc->reg_map->qdma.qtx_sch +
++		queue * MTK_QTX_OFFSET);
++}
++
++/* qdma_sch_lock must be held. */
++static void mtk_qdma_v1_apply_all(struct mtk_eth *eth)
++{
++	unsigned int queue;
++
++	for (queue = 0; queue < MTK_QDMA_NUM_QUEUES; queue++)
++		mtk_qdma_v1_apply_queue(eth, queue);
++}
++
++static u64 mtk_qdma_decode_rate(u32 man, u32 exp)
++{
++	u64 rate = man;
++
++	while (exp--)
++		rate *= 10;
++
++	return rate;
++}
++
++static int mtk_qdma_debugfs_show(struct seq_file *s, void *unused)
++{
++	struct mtk_eth *eth = s->private;
++	const struct mtk_reg_map *map = eth->soc->reg_map;
++	u32 qtx_cfg, qtx_sch, link_mbps, override_kbps, effective_kbps;
++	u32 min_man, min_exp, max_man, max_exp;
++	u64 min_kbps, max_kbps;
++	unsigned int i;
++
++	if (!MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA))
++		return -EOPNOTSUPP;
++
++	seq_printf(s, "qtx_cfg_base=0x%04x qtx_sch_base=0x%04x\n",
++		   map->qdma.qtx_cfg, map->qdma.qtx_sch);
++	seq_printf(s, "page=0x%04x tx_sch_rate=0x%04x\n",
++		   map->qdma.page, map->qdma.tx_sch_rate);
++
++	for (i = 0; i < MTK_QDMA_NUM_QUEUES; i++) {
++		if (!mtk_qdma_v1_override_supported(eth)) {
++			qtx_cfg = mtk_r32(eth, map->qdma.qtx_cfg +
++					 i * MTK_QTX_OFFSET);
++			qtx_sch = mtk_r32(eth, map->qdma.qtx_sch +
++					 i * MTK_QTX_OFFSET);
++			seq_printf(s,
++				   "queue=%u qtx_cfg=0x%08x qtx_sch=0x%08x\n",
++				   i, qtx_cfg, qtx_sch);
++			continue;
++		}
++
++		spin_lock_bh(&eth->qdma_sch_lock);
++		qtx_cfg = mtk_r32(eth, map->qdma.qtx_cfg +
++				 i * MTK_QTX_OFFSET);
++		qtx_sch = mtk_r32(eth, map->qdma.qtx_sch +
++				 i * MTK_QTX_OFFSET);
++		link_mbps = eth->qdma_link_speed_mbps[i];
++		override_kbps = eth->qdma_override_kbps[i];
++		effective_kbps = eth->qdma_effective_kbps[i];
++		spin_unlock_bh(&eth->qdma_sch_lock);
++
++		min_man = FIELD_GET(MTK_QTX_SCH_MIN_RATE_MAN, qtx_sch);
++		min_exp = FIELD_GET(MTK_QTX_SCH_MIN_RATE_EXP, qtx_sch);
++		max_man = FIELD_GET(MTK_QTX_SCH_MAX_RATE_MAN, qtx_sch);
++		max_exp = FIELD_GET(MTK_QTX_SCH_MAX_RATE_EXP, qtx_sch);
++		min_kbps = mtk_qdma_decode_rate(min_man, min_exp);
++		max_kbps = mtk_qdma_decode_rate(max_man, max_exp);
++		seq_printf(s,
++			   "queue=%u qtx_cfg=0x%08x qtx_sch=0x%08x link_mbps=%u override_kbps=%u effective_kbps=%u scheduler=%u min_en=%u min_kbps=%llu max_en=%u max_kbps=%llu weight=%u hw_resv=%u sw_resv=%u\n",
++			   i, qtx_cfg, qtx_sch, link_mbps, override_kbps,
++			   effective_kbps, !!(qtx_sch & MTK_QTX_SCH_TX_SEL),
++			   !!(qtx_sch & MTK_QTX_SCH_MIN_RATE_EN),
++			   (unsigned long long)min_kbps,
++			   !!(qtx_sch & MTK_QTX_SCH_MAX_RATE_EN),
++			   (unsigned long long)max_kbps,
++			   (unsigned int)FIELD_GET(MTK_QTX_SCH_MAX_RATE_WEIGHT,
++						    qtx_sch),
++			   (qtx_cfg >> 8) & 0xff, qtx_cfg & 0xff);
++	}
++
++	seq_printf(s, "tx_sch_rate_value=0x%08x\n",
++		   mtk_r32(eth, map->qdma.tx_sch_rate));
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(mtk_qdma_debugfs);
++
+ static ssize_t mtk_qdma_rate_write(struct file *file, const char __user *ubuf,
+ 				   size_t count, loff_t *ppos)
+ {
+ 	struct mtk_eth *eth = file->private_data;
+-	const struct mtk_reg_map *map = eth->soc->reg_map;
+-	u32 queue, kbps, man, exp, val;
+-	char buf[32];
+-
+-	if (!MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA))
++	unsigned long long parsed_queue, parsed_kbps;
++	u32 queue, kbps;
++	char buf[32], extra;
++
++	if (!mtk_qdma_v1_override_supported(eth))
+ 		return -EOPNOTSUPP;
+ 	if (*ppos || count >= sizeof(buf))
+ 		return -EINVAL;
+@@ -876,26 +1011,21 @@
+ 		return -EFAULT;
+ 	buf[count] = '\0';
+ 
+-	if (sscanf(buf, "%u %u", &queue, &kbps) != 2 ||
+-	    queue >= MTK_QDMA_NUM_QUEUES)
++	if (sscanf(buf, "%llu %llu %c", &parsed_queue, &parsed_kbps,
++		   &extra) != 2 ||
++	    parsed_queue >= MTK_QDMA_NUM_QUEUES || parsed_kbps > U32_MAX)
+ 		return -EINVAL;
+ 
+-	/* keep the driver's v1 low-rate/leaky-bucket base */
+-	val = MTK_QTX_SCH_MIN_RATE_EN | MTK_QTX_SCH_LEAKY_BUCKET_SIZE |
+-	      FIELD_PREP(MTK_QTX_SCH_MIN_RATE_MAN, 1) |
+-	      FIELD_PREP(MTK_QTX_SCH_MIN_RATE_EXP, 4);
+-	if (mtk_is_netsys_v1(eth))
+-		val |= MTK_QTX_SCH_LEAKY_BUCKET_EN;
+-
+-	if (kbps) {
+-		mtk_qdma_rate_to_man_exp(kbps, &man, &exp);
+-		val |= MTK_QTX_SCH_MAX_RATE_EN |
+-		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, man) |
+-		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, exp) |
+-		       FIELD_PREP(MTK_QTX_SCH_MAX_RATE_WEIGHT, 1);
+-	}
+-
+-	mtk_w32(eth, val, map->qdma.qtx_sch + queue * MTK_QTX_OFFSET);
++	queue = parsed_queue;
++	kbps = parsed_kbps;
++
++	spin_lock_bh(&eth->qdma_sch_lock);
++	eth->qdma_override_kbps[queue] = kbps;
++	if (test_bit(MTK_RESETTING, &eth->state))
++		mtk_qdma_v1_queue_word(eth, queue);
++	else
++		mtk_qdma_v1_apply_queue(eth, queue);
++	spin_unlock_bh(&eth->qdma_sch_lock);
+ 
+ 	return count;
+ }
+@@ -916,12 +1046,19 @@
+ 
+ 	eth->qdma_debugfs_dir = root;
+ 	if (IS_ERR_OR_NULL(debugfs_create_file("qdma_regs", 0444, root, eth,
+-					       &mtk_qdma_debugfs_fops))) {
+-		debugfs_remove_recursive(root);
+-		eth->qdma_debugfs_dir = NULL;
+-		return;
+-	}
+-	debugfs_create_file("qdma_rate", 0200, root, eth, &mtk_qdma_rate_fops);
++					       &mtk_qdma_debugfs_fops)))
++		goto error;
++
++	if (mtk_qdma_v1_override_supported(eth) &&
++	    IS_ERR_OR_NULL(debugfs_create_file("qdma_rate", 0200, root, eth,
++					       &mtk_qdma_rate_fops)))
++		goto error;
++
++	return;
++
++error:
++	debugfs_remove_recursive(root);
++	eth->qdma_debugfs_dir = NULL;
+ }
+ 
+ static void mtk_set_queue_speed(struct mtk_eth *eth, unsigned int idx,
+@@ -932,6 +1069,17 @@
+ 
+ 	if (!MTK_HAS_CAPS(soc->caps, MTK_QDMA))
+ 		return;
++
++	if (mtk_qdma_v1_override_supported(eth)) {
++		if (idx >= MTK_QDMA_NUM_QUEUES)
++			return;
++
++		spin_lock_bh(&eth->qdma_sch_lock);
++		eth->qdma_link_speed_mbps[idx] = speed > 0 ? speed : 0;
++		mtk_qdma_v1_apply_queue(eth, idx);
++		spin_unlock_bh(&eth->qdma_sch_lock);
++		return;
++	}
+ 
+ 	val = MTK_QTX_SCH_MIN_RATE_EN |
+ 	      MTK_QTX_SCH_LEAKY_BUCKET_SIZE;
+@@ -3070,6 +3218,12 @@
+ 			mtk_w32(eth, val, soc->reg_map->qdma.qtx_sch + ofs);
+ 			ofs += MTK_QTX_OFFSET;
+ 		}
++
++		if (mtk_qdma_v1_override_supported(eth)) {
++			spin_lock_bh(&eth->qdma_sch_lock);
++			mtk_qdma_v1_apply_all(eth);
++			spin_unlock_bh(&eth->qdma_sch_lock);
++		}
+ 		val = MTK_QDMA_TX_SCH_MAX_WFQ | (MTK_QDMA_TX_SCH_MAX_WFQ << 16);
+ 		mtk_w32(eth, val, soc->reg_map->qdma.tx_sch_rate);
+ 		if (mtk_is_netsys_v2_or_greater(eth))
+@@ -3872,7 +4026,7 @@
+ 		return NOTIFY_DONE;
+ 
+ 	dp = dsa_port_from_netdev(dev);
+-	if (dp->index >= MTK_QDMA_NUM_QUEUES)
++	if (dp->index + 3 >= MTK_QDMA_NUM_QUEUES)
+ 		return NOTIFY_DONE;
+ 
+ 	if (mac->speed > 0 && mac->speed <= s.base.speed)
+@@ -5592,6 +5746,7 @@
+ 	spin_lock_init(&eth->tx_irq_lock);
+ 	spin_lock_init(&eth->rx_irq_lock);
+ 	spin_lock_init(&eth->dim_lock);
++	spin_lock_init(&eth->qdma_sch_lock);
+ 
+ 	eth->rx_dim.mode = DIM_CQ_PERIOD_MODE_START_FROM_EQE;
+ 	INIT_WORK(&eth->rx_dim.work, mtk_dim_rx);
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1415,6 +1415,11 @@
+ 
+ 	u8				qos_toggle;
+ 	struct dentry			*qdma_debugfs_dir;
++	/* Protects NETSYSv1 QDMA scheduler state and register writes. */
++	spinlock_t			qdma_sch_lock;
++	u32				qdma_link_speed_mbps[MTK_QDMA_NUM_QUEUES];
++	u32				qdma_override_kbps[MTK_QDMA_NUM_QUEUES];
++	u32				qdma_effective_kbps[MTK_QDMA_NUM_QUEUES];
+ 	struct mtk_ppe			*ppe[3];
+ 	struct rhashtable		flow_table;
+ 

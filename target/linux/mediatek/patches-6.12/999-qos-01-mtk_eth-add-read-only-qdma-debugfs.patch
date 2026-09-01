@@ -1,0 +1,96 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add read-only QDMA debugfs
+
+Expose the MTK QDMA scheduler registers for hardware-shaper investigation.
+The file is read-only and performs no register writes, queue changes, or WED
+operations. It is intended for a disposable diagnostic image and can be
+removed after the register comparison is complete.
+
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -9,6 +9,8 @@
+ #include <linux/of.h>
+ #include <linux/of_mdio.h>
+ #include <linux/of_net.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ #include <linux/of_address.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/platform_device.h>
+@@ -808,5 +808,50 @@ static void mtk_mac_link_down(struct phylink_config *config, unsigned int mode,
+ }
+ 
++static int mtk_qdma_debugfs_show(struct seq_file *s, void *unused)
++{
++	struct mtk_eth *eth = s->private;
++	const struct mtk_reg_map *map = eth->soc->reg_map;
++	u32 qtx_cfg, qtx_sch;
++	unsigned int i;
++
++	if (!MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA))
++		return -EOPNOTSUPP;
++
++	seq_printf(s, "qtx_cfg_base=0x%04x qtx_sch_base=0x%04x\n",
++		   map->qdma.qtx_cfg, map->qdma.qtx_sch);
++	seq_printf(s, "page=0x%04x tx_sch_rate=0x%04x\n",
++		   map->qdma.page, map->qdma.tx_sch_rate);
++
++	for (i = 0; i < MTK_QDMA_NUM_QUEUES; i++) {
++		qtx_cfg = mtk_r32(eth, map->qdma.qtx_cfg + i * MTK_QTX_OFFSET);
++		qtx_sch = mtk_r32(eth, map->qdma.qtx_sch + i * MTK_QTX_OFFSET);
++		seq_printf(s, "queue=%u qtx_cfg=0x%08x qtx_sch=0x%08x\n",
++			   i, qtx_cfg, qtx_sch);
++	}
++
++	seq_printf(s, "tx_sch_rate_value=0x%08x\n",
++		   mtk_r32(eth, map->qdma.tx_sch_rate));
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(mtk_qdma_debugfs);
++
++static void mtk_qdma_debugfs_init(struct mtk_eth *eth)
++{
++	struct dentry *root;
++
++	root = debugfs_create_dir(dev_name(eth->dev), NULL);
++	if (IS_ERR_OR_NULL(root))
++		return;
++
++	eth->qdma_debugfs_dir = root;
++	if (IS_ERR_OR_NULL(debugfs_create_file("qdma_regs", 0444, root, eth,
++					       &mtk_qdma_debugfs_fops))) {
++		debugfs_remove_recursive(root);
++		eth->qdma_debugfs_dir = NULL;
++	}
++}
++
+ static void mtk_set_queue_speed(struct mtk_eth *eth, unsigned int idx,
+ 				int speed)
+ {
+@@ -5720,5 +5765,7 @@ static int mtk_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	platform_set_drvdata(pdev, eth);
++	if (MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA))
++		mtk_qdma_debugfs_init(eth);
+ 	schedule_delayed_work(&eth->reset.monitor_work,
+ 			      MTK_DMA_MONITOR_TIMEOUT);
+@@ -5812,3 +5859,5 @@ static void mtk_remove(struct platform_device *pdev)
+ 	}
+ 
++	debugfs_remove_recursive(eth->qdma_debugfs_dir);
++	eth->qdma_debugfs_dir = NULL;
+ 	mtk_wed_exit();
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1360,1 +1360,3 @@
++struct dentry;
++
+ struct mtk_eth {
+@@ -1414,3 +1414,4 @@
+ 	u8				qos_toggle;
++	struct dentry			*qdma_debugfs_dir;
+ 	struct mtk_ppe			*ppe[3];
+ 	struct rhashtable		flow_table;

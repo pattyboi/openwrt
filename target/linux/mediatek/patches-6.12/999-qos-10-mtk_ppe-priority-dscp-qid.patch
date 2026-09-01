@@ -1,0 +1,25 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: mediatek: steer learned priority DSCP flows to fast QDMA queue
+
+qos-07 steers marked software-path packets to q4, but PPE-offloaded
+packets bypass the FORWARD hook after their FOE entry is committed.
+Use the DSCP value learned by qos-12/qos-17 when selecting the PPPQ
+queue, so WMM-derived and explicitly marked priority flows keep q4 after
+offload. EF, AF41, CS4 and CS5 are supported; ECN bits are ignored.
+Ordinary DSCP and TCP-ACK prioritization are unchanged.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
+@@ -345,2 +345,10 @@
+ 	if (eth->qos_toggle == 2 && mtk_ppe_check_pppq_path(mac, idev, dsa_port)) {
++		/* Keep learned priority DSCP flows off the capped bulk queue.
++		 * dscp is the raw IP TOS/traffic-class byte; ignore ECN bits.
++		 */
++		if ((dscp & 0xfc) == 0xb8 || /* EF */
++		    (dscp & 0xfc) == 0x88 || /* AF41 */
++		    (dscp & 0xfc) == 0x80 || /* CS4 */
++		    (dscp & 0xfc) == 0xa0)   /* CS5 */
++			queue = 4;
+ 		if (dsa_port >= 0 && ct && nf_ct_protonum(ct) == IPPROTO_TCP) {

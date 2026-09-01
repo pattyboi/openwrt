@@ -1,0 +1,176 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: AQM flow-aware eviction
+
+qos-06's AQM unbind picked whichever flows bound to the triggered
+queue happened to come first in rhashtable_walk order - effectively
+arbitrary. A trigger caused by one bulk/elephant flow could evict
+several small, latency-sensitive flows while leaving the actual
+elephant bound.
+
+Confirmed live on this hardware that a real per-flow, hardware-
+accounted byte counter already exists and is already read elsewhere
+in this driver: mtk_foe_entry_get_stats() (existing, used by
+mtk_ppe_offload.c's flow_offload ->stats() callback for conntrack
+sync) returns both a flow's cumulative byte count and an idle-tick
+count from the PPE's own bind-timestamp field - read-only, no new
+register access, safe to call again from AQM's context (same
+ppe_lock, already how mtk_foe_entry_clear() is called from this same
+walk).
+
+Rank eviction candidates the way CAKE's own bulk/sparse flow
+classification does conceptually (net/sched/sch_cake.c): prefer
+currently-active flows (idle == 0) over ones that have gone quiet,
+then prefer higher cumulative bytes - i.e. target the flow actually
+contributing to the present congestion, not just any flow sharing the
+queue. Implemented as two bounded passes over the flow table (only on
+an actual trigger, gated by the existing grace_ms cooldown, so this
+doesn't add cost to the common non-triggering poll cycle): pass 1
+scores every candidate and keeps a small top-`batch` set (bounded
+array, batch capped at the write parser's existing 64-entry limit, no
+allocation); pass 2 evicts entries meeting pass 1's cutoff, capped at
+`batch` same as before. Approximate under score ties across the two
+passes (a differently-tied candidate may be picked between the two
+walks) - acceptable for a congestion heuristic, not a hard guarantee.
+
+Trigger detection (qos-12's byte-accurate threshold) and the
+batch/grace_ms cooldown are unchanged; only which flows within the
+triggered queue get evicted when it fires.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1352,21 +1352,119 @@
+ 	return FIELD_GET(MTK_FOE_IB2_QID, ib2);
+ }
+ 
++#define MTK_QDMA_AQM_MAX_BATCH	64
++
++struct mtk_qdma_aqm_cand {
++	bool	active;	/* idle == 0 at the time it was scored */
++	u64	bytes;
++};
++
++/* True if @a should be kept over @b when only one of the two can stay in
++ * the top-max set: prefer currently-active flows over idle ones, then
++ * prefer more cumulative bytes.
++ */
++static bool mtk_qdma_aqm_cand_better(const struct mtk_qdma_aqm_cand *a,
++				     const struct mtk_qdma_aqm_cand *b)
++{
++	if (a->active != b->active)
++		return a->active;
++	return a->bytes > b->bytes;
++}
++
++/* Pass 1: score every flow currently bound to @queue (recency via the PPE's
++ * own idle-tick from mtk_foe_entry_get_stats(), the same call the existing
++ * flow_offload stats path already makes elsewhere - no new register access)
++ * and keep the @max best candidates by mtk_qdma_aqm_cand_better(). Returns
++ * the worst-kept candidate as the pass-2 cutoff, and the number actually
++ * found (may be less than @max).
++ */
+ static unsigned int
++mtk_qdma_aqm_score_queue(struct mtk_eth *eth, unsigned int queue,
++			 unsigned int max, struct mtk_qdma_aqm_cand *cutoff)
++{
++	struct mtk_qdma_aqm_cand top[MTK_QDMA_AQM_MAX_BATCH];
++	struct rhashtable_iter iter;
++	struct mtk_flow_entry *entry;
++	unsigned int n_top = 0;
++	unsigned int worst, i;
++	int idle;
++
++	rhashtable_walk_enter(&eth->flow_table, &iter);
++	rhashtable_walk_start(&iter);
++
++	while ((entry = rhashtable_walk_next(&iter))) {
++		struct mtk_qdma_aqm_cand cand;
++
++		if (IS_ERR(entry))
++			continue;
++		if (entry->hash == 0xffff)
++			continue;
++		if (mtk_aqm_get_foe_qid(eth, entry) != queue)
++			continue;
++
++		/* mtk_foe_entry_get_stats() takes ppe_lock (BH spinlock);
++		 * safe under the RCU read lock rhashtable_walk holds, same
++		 * as the mtk_foe_entry_clear() call this replaces below.
++		 */
++		mtk_foe_entry_get_stats(eth->ppe[entry->ppe_index], entry,
++					&idle);
++		cand.active = !idle;
++		cand.bytes  = entry->bytes;
++
++		if (n_top < max) {
++			top[n_top++] = cand;
++			continue;
++		}
++
++		worst = 0;
++		for (i = 1; i < n_top; i++)
++			if (mtk_qdma_aqm_cand_better(&top[worst], &top[i]))
++				worst = i;
++		if (mtk_qdma_aqm_cand_better(&cand, &top[worst]))
++			top[worst] = cand;
++	}
++
++	rhashtable_walk_stop(&iter);
++	rhashtable_walk_exit(&iter);
++
++	worst = 0;
++	for (i = 1; i < n_top; i++)
++		if (mtk_qdma_aqm_cand_better(&top[worst], &top[i]))
++			worst = i;
++	if (n_top)
++		*cutoff = top[worst];
++	return n_top;
++}
++
++/* Pass 2: evict up to @max flows bound to @queue whose score meets pass 1's
++ * cutoff (currently-active flows first, ranked by cumulative bytes), instead
++ * of qos-06's original arbitrary rhashtable-walk-order eviction.
++ */
++static unsigned int
+ mtk_qdma_aqm_unbind_queue(struct mtk_eth *eth, unsigned int queue,
+ 			  unsigned int max)
+ {
++	struct mtk_qdma_aqm_cand cutoff = { };
+ 	struct rhashtable_iter iter;
+ 	struct mtk_flow_entry *entry;
+ 	unsigned int cleared = 0;
++	unsigned int n_top;
+ 
+ 	if (!eth->ppe[0] || !max)
+ 		return 0;
+ 
++	max = min_t(unsigned int, max, MTK_QDMA_AQM_MAX_BATCH);
++	n_top = mtk_qdma_aqm_score_queue(eth, queue, max, &cutoff);
++	if (!n_top)
++		return 0;
++
+ 	rhashtable_walk_enter(&eth->flow_table, &iter);
+ 	rhashtable_walk_start(&iter);
+ 
+ 	while (cleared < max) {
++		struct mtk_qdma_aqm_cand cand;
++		int idle;
++
+ 		entry = rhashtable_walk_next(&iter);
+ 		if (!entry)
+ 			break;
+@@ -1377,6 +1475,13 @@
+ 		if (mtk_aqm_get_foe_qid(eth, entry) != queue)
+ 			continue;
+ 
++		mtk_foe_entry_get_stats(eth->ppe[entry->ppe_index], entry,
++					&idle);
++		cand.active = !idle;
++		cand.bytes  = entry->bytes;
++		if (mtk_qdma_aqm_cand_better(&cutoff, &cand))
++			continue;
++
+ 		/* mtk_foe_entry_clear() takes ppe_lock (BH spinlock).
+ 		 * Calling under the RCU read lock from rhashtable_walk is valid;
+ 		 * ppe_lock and RCU do not conflict.  The entry is RCU-protected

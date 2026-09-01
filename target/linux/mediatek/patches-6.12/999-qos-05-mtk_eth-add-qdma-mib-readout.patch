@@ -1,0 +1,197 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add QDMA MIB readout and fc_th control
+
+Phase A of the AQM spike (see docs/netsys-qos-port-investigation.md section
+22): expose the NETSYSv1 QDMA per-queue MIB counters and the global
+flow-control/RED threshold register so queue occupancy and hardware drops
+can be measured and the drop threshold can be tuned.
+
+Per-queue MIB readout follows the vendor debug sequence: with QTX_MIB_IF
+debug mode set (MIB_ON_QTX_CFG | VQTX_MIB_EN), reads of QTX_CFG/QTX_SCH
+return the queue packet count (occupancy) and cumulative packet-drop
+counter. The vendor page-dance pattern (QDMA_PAGE per 16-queue page) is
+used. qdma_regs now reports mib_count/mib_drop per queue and the live
+fc_th value.
+
+qdma_fc (write-only) programs the QDMA flow-control register (fc_th,
+0x1a10). The driver init value is FC_THRES_DROP_MODE | FC_THRES_DROP_EN |
+FC_THRES_MIN (0x4444). Diagnostic only: lowering the threshold may enable
+hardware tail-drop that bounds queue latency, at the cost of drops.
+
+All controls are NETSYSv1-gated, serialized under qdma_sch_lock, and
+change nothing unless written. NETSYSv2/v3 and MT7621 are untouched.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -82,6 +82,7 @@
+ 		.delay_irq	= 0x1a0c,
+ 		.fc_th		= 0x1a10,
+ 		.tx_sch_rate	= 0x1a14,
++		.mib_if		= 0x1abc,
+ 		.int_grp	= 0x1a20,
+ 		.hred		= 0x1a44,
+ 		.ctx_ptr	= 0x1b00,
+@@ -930,12 +931,16 @@
+ 	return rate;
+ }
+ 
++static void mtk_qdma_v1_mib_read(struct mtk_eth *eth, unsigned int queue,
++				 u32 *count, u32 *drops);
++
+ static int mtk_qdma_debugfs_show(struct seq_file *s, void *unused)
+ {
+ 	struct mtk_eth *eth = s->private;
+ 	const struct mtk_reg_map *map = eth->soc->reg_map;
+ 	u32 qtx_cfg, qtx_sch, link_mbps, override_kbps, effective_kbps;
+ 	u32 min_man, min_exp, max_man, max_exp;
++	u32 mib_count = 0, mib_drop = 0;
+ 	u64 min_kbps, max_kbps;
+ 	unsigned int i;
+ 
+@@ -967,6 +972,7 @@
+ 		link_mbps = eth->qdma_link_speed_mbps[i];
+ 		override_kbps = eth->qdma_override_kbps[i];
+ 		effective_kbps = eth->qdma_effective_kbps[i];
++		mtk_qdma_v1_mib_read(eth, i, &mib_count, &mib_drop);
+ 		spin_unlock_bh(&eth->qdma_sch_lock);
+ 
+ 		min_man = FIELD_GET(MTK_QTX_SCH_MIN_RATE_MAN, qtx_sch);
+@@ -976,7 +982,7 @@
+ 		min_kbps = mtk_qdma_decode_rate(min_man, min_exp);
+ 		max_kbps = mtk_qdma_decode_rate(max_man, max_exp);
+ 		seq_printf(s,
+-			   "queue=%u qtx_cfg=0x%08x qtx_sch=0x%08x link_mbps=%u override_kbps=%u effective_kbps=%u scheduler=%u min_en=%u min_kbps=%llu max_en=%u max_kbps=%llu weight=%u hw_resv=%u sw_resv=%u\n",
++			   "queue=%u qtx_cfg=0x%08x qtx_sch=0x%08x link_mbps=%u override_kbps=%u effective_kbps=%u scheduler=%u min_en=%u min_kbps=%llu max_en=%u max_kbps=%llu weight=%u hw_resv=%u sw_resv=%u mib_count=%u mib_drop=%u\n",
+ 			   i, qtx_cfg, qtx_sch, link_mbps, override_kbps,
+ 			   effective_kbps, !!(qtx_sch & MTK_QTX_SCH_TX_SEL),
+ 			   !!(qtx_sch & MTK_QTX_SCH_MIN_RATE_EN),
+@@ -985,11 +991,14 @@
+ 			   (unsigned long long)max_kbps,
+ 			   (unsigned int)FIELD_GET(MTK_QTX_SCH_MAX_RATE_WEIGHT,
+ 						    qtx_sch),
+-			   (qtx_cfg >> 8) & 0xff, qtx_cfg & 0xff);
++			   (qtx_cfg >> 8) & 0xff, qtx_cfg & 0xff,
++			   mib_count, mib_drop);
+ 	}
+ 
+ 	seq_printf(s, "tx_sch_rate_value=0x%08x\n",
+ 		   mtk_r32(eth, map->qdma.tx_sch_rate));
++	seq_printf(s, "fc_th_value=0x%08x\n",
++		   mtk_r32(eth, map->qdma.fc_th));
+ 
+ 	return 0;
+ }
+@@ -1196,6 +1205,69 @@
+ 	.write	= mtk_qdma_txq_write,
+ };
+ 
++/* qos-05: per-queue MIB readout. With the QTX_MIB_IF debug mode set, reads of
++ * QTX_CFG/QTX_SCH return the queue's live packet count (occupancy) and
++ * cumulative packet-drop counter. Follows the vendor page-dance pattern
++ * (QDMA_PAGE selects the 16-queue page). qdma_sch_lock must be held.
++ */
++static void mtk_qdma_v1_mib_read(struct mtk_eth *eth, unsigned int queue,
++				 u32 *count, u32 *drops)
++{
++	const struct mtk_reg_map *map = eth->soc->reg_map;
++
++	*count = 0;
++	*drops = 0;
++	if (!map->qdma.mib_if)
++		return;
++
++	mtk_w32(eth, queue / MTK_QTX_PER_PAGE, map->qdma.page);
++	mtk_w32(eth, QTX_MIB_IF_ON | QTX_MIB_IF_VQTX, map->qdma.mib_if);
++	*count = mtk_r32(eth, map->qdma.qtx_cfg +
++			 (queue % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
++	*drops = mtk_r32(eth, map->qdma.qtx_sch +
++			 (queue % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
++	mtk_w32(eth, 0, map->qdma.mib_if);
++	mtk_w32(eth, 0, map->qdma.page);
++}
++
++/* qos-05: write the global QDMA flow-control/RED threshold register
++ * (fc_th, 0x1a10). Diagnostic only: the driver init value is
++ * FC_THRES_DROP_MODE | FC_THRES_DROP_EN | FC_THRES_MIN (0x4444); lowering
++ * the threshold may cause hardware tail-drop that bounds queue latency.
++ */
++static ssize_t mtk_qdma_fc_write(struct file *file, const char __user *ubuf,
++				 size_t count, loff_t *ppos)
++{
++	struct mtk_eth *eth = file->private_data;
++	const struct mtk_reg_map *map = eth->soc->reg_map;
++	unsigned long long parsed;
++	char buf[16], extra;
++
++	if (!mtk_qdma_v1_override_supported(eth))
++		return -EOPNOTSUPP;
++	if (*ppos || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%llx %c", &parsed, &extra) != 1 ||
++	    parsed > 0xffffffffULL)
++		return -EINVAL;
++
++	spin_lock_bh(&eth->qdma_sch_lock);
++	mtk_w32(eth, (u32)parsed, map->qdma.fc_th);
++	spin_unlock_bh(&eth->qdma_sch_lock);
++
++	return count;
++}
++
++static const struct file_operations mtk_qdma_fc_fops = {
++	.owner	= THIS_MODULE,
++	.open	= simple_open,
++	.write	= mtk_qdma_fc_write,
++};
++
+ static void mtk_qdma_debugfs_init(struct mtk_eth *eth)
+ {
+ 	struct dentry *root;
+@@ -1217,7 +1289,9 @@
+ 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_sch", 0200, root, eth,
+ 						&mtk_qdma_sch_fops)) ||
+ 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_txq", 0200, root, eth,
+-						&mtk_qdma_txq_fops))))
++						&mtk_qdma_txq_fops)) ||
++	     IS_ERR_OR_NULL(debugfs_create_file("qdma_fc", 0200, root, eth,
++						&mtk_qdma_fc_fops))))
+ 		goto error;
+ 
+ 	return;
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -28,6 +28,7 @@
+ 
+ #define MTK_QDMA_NUM_QUEUES	16
+ #define MTK_QDMA_QUEUE_MASK	((1ULL << MTK_QDMA_NUM_QUEUES) - 1)
++#define MTK_QTX_PER_PAGE	16
+ #define MTK_QDMA_PAGE_SIZE	2048
+ #define MTK_MAX_RX_LENGTH	1536
+ #define MTK_MAX_RX_LENGTH_2K	2048
+@@ -298,6 +299,12 @@
+ #define FC_THRES_DROP_MODE	BIT(20)
+ #define FC_THRES_DROP_EN	(7 << 16)
+ #define FC_THRES_MIN		0x4444
++
++/* QDMA MIB interface register (debug mode: QTX_CFG/QTX_SCH reads return
++ * per-queue packet count / packet drop counters)
++ */
++#define QTX_MIB_IF_ON		BIT(31)
++#define QTX_MIB_IF_VQTX		BIT(28)
+ 
+ /* QDMA Interrupt Status Register */
+ #define MTK_RX_DONE_DLY		BIT(30)
+@@ -1236,6 +1243,7 @@
+ 		u32	fc_th;		/* flow control */
+ 		u32	int_grp;
+ 		u32	hred;		/* interrupt mask */
++		u32	mib_if;		/* MIB interface (debug counters) */
+ 		u32	ctx_ptr;	/* tx acquire cpu pointer */
+ 		u32	dtx_ptr;	/* tx acquire dma pointer */
+ 		u32	crx_ptr;	/* tx release cpu pointer */

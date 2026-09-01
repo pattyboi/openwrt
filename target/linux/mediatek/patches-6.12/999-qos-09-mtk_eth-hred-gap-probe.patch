@@ -1,0 +1,61 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: probe undocumented QDMA AQM gap
+
+Extend qdma_regs to dump the 18-register undocumented gap between
+tx_sch_rate (0x1a14) and ctx_ptr (0x1b00) on NETSYSv1.  This covers
+the region containing 'hred' (0x1a44, driver-zeroed, layout unknown)
+and 12 surrounding unnamed registers that may contain HRED/AQM controls.
+
+Non-zero values under upload load would indicate live hardware AQM logic.
+Zero across the board confirms the registers are inert on this silicon.
+
+Read-only probe; no hardware state is changed.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1000,5 +1000,43 @@
+ 	seq_printf(s, "fc_th_value=0x%08x\n",
+ 		   mtk_r32(eth, map->qdma.fc_th));
+ 
++	/* Probe undocumented QDMA register gap: 0x1a18..0x1a68.
++	 * Maps the space between tx_sch_rate and ctx_ptr to find any
++	 * active AQM/HRED control registers. Non-zero values under load
++	 * indicate live hardware logic.
++	 */
++	if (mtk_qdma_v1_override_supported(eth)) {
++		const struct {
++			u32         off;
++			const char *name;
++		} gap[] = {
++			{ 0x1a18, "tx_sch_rate+4" },
++			{ 0x1a1c, "(0x1a1c)" },
++			{ 0x1a24, "(0x1a24)" },
++			{ 0x1a28, "(0x1a28)" },
++			{ 0x1a2c, "(0x1a2c)" },
++			{ 0x1a30, "(0x1a30)" },
++			{ 0x1a34, "(0x1a34)" },
++			{ 0x1a38, "(0x1a38)" },
++			{ 0x1a3c, "(0x1a3c)" },
++			{ 0x1a40, "(0x1a40)" },
++			{ 0x1a44, "hred" },
++			{ 0x1a48, "hred+4" },
++			{ 0x1a4c, "hred+8" },
++			{ 0x1a50, "hred+12" },
++			{ 0x1a54, "hred+16" },
++			{ 0x1a58, "hred+20" },
++			{ 0x1a5c, "hred+24" },
++			{ 0x1a60, "hred+28" },
++		};
++		unsigned int _i;
++
++		seq_puts(s, "--- qdma gap probe ---\n");
++		for (_i = 0; _i < ARRAY_SIZE(gap); _i++)
++			seq_printf(s, "gap 0x%04x %-14s = 0x%08x\n",
++				   gap[_i].off, gap[_i].name,
++				   mtk_r32(eth, gap[_i].off));
++	}
++
+ 	return 0;
+ }

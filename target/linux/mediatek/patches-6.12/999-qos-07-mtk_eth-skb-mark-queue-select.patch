@@ -1,0 +1,39 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: steer non-offloaded flows via skb->mark
+
+Port of MediaTek vendor patch eth-27 (mtk-openwrt-feeds).
+
+For PPE-offloaded flows the QDMA queue is written directly into the FOE
+entry IB2.QID by the PPE; mtk_select_queue() is not involved.  For
+non-offloaded flows (ICMP, router-originated, pre-offload packets),
+mtk_select_queue() picks the TX ring.
+
+Add a check: if skb->mark is in [1, num_tx_queues-1], return it as the
+QDMA queue index.  Lets nftables steer ICMP and other latency-sensitive
+non-offloaded flows to uncapped queues, bypassing the PPPQ upload queue.
+
+Example (nftables.d/30-queue-mark.nft, inside table inet fw4):
+  chain queue_mark_forward {
+    type filter hook forward priority mangle; policy accept;
+    oifname "wan" ip  protocol icmp   meta mark set 4
+    oifname "wan" ip6 nexthdr  icmpv6 meta mark set 4
+  }
+
+Marks 1-15 are safe; SQM/DSCP marks are >= 0x10.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -5827,3 +5827,11 @@
+ 	unsigned int queue = 0;
+ 
++	/* fwmark in [1, num_tx_queues-1] maps directly to a QDMA queue.
++	 * Allows nftables/iptables to steer non-PPE-offloaded flows
++	 * (ICMP, router-originated) to queues without caps.
++	 * Marks 1-15 are safe; common SQM/DSCP marks are >= 0x10.
++	 */
++	if (skb->mark && skb->mark < dev->num_tx_queues)
++		return skb->mark;
++
+ 	if (netdev_uses_dsa(dev))

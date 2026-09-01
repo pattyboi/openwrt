@@ -1,0 +1,116 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add QDMA per-queue byte counter
+
+qos-05's QTX_MIB_IF readout exposed per-queue packet count and drop
+count. The vendor's own 6.12 MIB readback additionally reads
+QTX_CFG+0x8/+0xc as a 64-bit per-queue byte counter while the same
+debug mode is active (docs/netsys-qos-port-investigation.md SS22.10,
+item 3). Add that read: qdma_regs now also reports mib_bytes=<n> per
+queue, and the qos-06 AQM work function reads it (unused for now;
+prerequisite for a future byte-accurate rate_thresh instead of the
+current 1400-byte-assumed packet-count estimate).
+
+No behavior change: NETSYSv1-gated, same MIB debug-mode window as
+qos-05, no new register writes beyond the existing page/mib_if dance.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -932,7 +932,7 @@
+ }
+ 
+ static void mtk_qdma_v1_mib_read(struct mtk_eth *eth, unsigned int queue,
+-				 u32 *count, u32 *drops);
++				 u32 *count, u32 *drops, u64 *bytes);
+ 
+ static int mtk_qdma_debugfs_show(struct seq_file *s, void *unused)
+ {
+@@ -941,6 +941,7 @@
+ 	u32 qtx_cfg, qtx_sch, link_mbps, override_kbps, effective_kbps;
+ 	u32 min_man, min_exp, max_man, max_exp;
+ 	u32 mib_count = 0, mib_drop = 0;
++	u64 mib_bytes = 0;
+ 	u64 min_kbps, max_kbps;
+ 	unsigned int i;
+ 
+@@ -972,7 +973,7 @@
+ 		link_mbps = eth->qdma_link_speed_mbps[i];
+ 		override_kbps = eth->qdma_override_kbps[i];
+ 		effective_kbps = eth->qdma_effective_kbps[i];
+-		mtk_qdma_v1_mib_read(eth, i, &mib_count, &mib_drop);
++		mtk_qdma_v1_mib_read(eth, i, &mib_count, &mib_drop, &mib_bytes);
+ 		spin_unlock_bh(&eth->qdma_sch_lock);
+ 
+ 		min_man = FIELD_GET(MTK_QTX_SCH_MIN_RATE_MAN, qtx_sch);
+@@ -982,7 +983,7 @@
+ 		min_kbps = mtk_qdma_decode_rate(min_man, min_exp);
+ 		max_kbps = mtk_qdma_decode_rate(max_man, max_exp);
+ 		seq_printf(s,
+-			   "queue=%u qtx_cfg=0x%08x qtx_sch=0x%08x link_mbps=%u override_kbps=%u effective_kbps=%u scheduler=%u min_en=%u min_kbps=%llu max_en=%u max_kbps=%llu weight=%u hw_resv=%u sw_resv=%u mib_count=%u mib_drop=%u\n",
++			   "queue=%u qtx_cfg=0x%08x qtx_sch=0x%08x link_mbps=%u override_kbps=%u effective_kbps=%u scheduler=%u min_en=%u min_kbps=%llu max_en=%u max_kbps=%llu weight=%u hw_resv=%u sw_resv=%u mib_count=%u mib_drop=%u mib_bytes=%llu\n",
+ 			   i, qtx_cfg, qtx_sch, link_mbps, override_kbps,
+ 			   effective_kbps, !!(qtx_sch & MTK_QTX_SCH_TX_SEL),
+ 			   !!(qtx_sch & MTK_QTX_SCH_MIN_RATE_EN),
+@@ -992,7 +993,8 @@
+ 			   (unsigned int)FIELD_GET(MTK_QTX_SCH_MAX_RATE_WEIGHT,
+ 						    qtx_sch),
+ 			   (qtx_cfg >> 8) & 0xff, qtx_cfg & 0xff,
+-			   mib_count, mib_drop);
++			   mib_count, mib_drop,
++			   (unsigned long long)mib_bytes);
+ 	}
+ 
+ 	seq_printf(s, "tx_sch_rate_value=0x%08x\n",
+@@ -1249,21 +1251,31 @@
+  * (QDMA_PAGE selects the 16-queue page). qdma_sch_lock must be held.
+  */
+ static void mtk_qdma_v1_mib_read(struct mtk_eth *eth, unsigned int queue,
+-				 u32 *count, u32 *drops)
++				 u32 *count, u32 *drops, u64 *bytes)
+ {
+ 	const struct mtk_reg_map *map = eth->soc->reg_map;
++	u32 base, bytes_lo, bytes_hi;
+ 
+ 	*count = 0;
+ 	*drops = 0;
++	*bytes = 0;
+ 	if (!map->qdma.mib_if)
+ 		return;
+ 
++	base = map->qdma.qtx_cfg + (queue % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET;
++
+ 	mtk_w32(eth, queue / MTK_QTX_PER_PAGE, map->qdma.page);
+ 	mtk_w32(eth, QTX_MIB_IF_ON | QTX_MIB_IF_VQTX, map->qdma.mib_if);
+-	*count = mtk_r32(eth, map->qdma.qtx_cfg +
+-			 (queue % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
++	*count = mtk_r32(eth, base);
+ 	*drops = mtk_r32(eth, map->qdma.qtx_sch +
+ 			 (queue % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
++	/* qos-11: vendor 6.12 MIB readback also exposes a 64-bit per-queue
++	 * byte counter at QTX_CFG+0x8/+0xc while the same debug mode is
++	 * active.
++	 */
++	bytes_lo = mtk_r32(eth, base + 0x8);
++	bytes_hi = mtk_r32(eth, base + 0xc);
++	*bytes = ((u64)bytes_hi << 32) | bytes_lo;
+ 	mtk_w32(eth, 0, map->qdma.mib_if);
+ 	mtk_w32(eth, 0, map->qdma.page);
+ }
+@@ -1384,6 +1396,7 @@
+ 	struct mtk_eth *eth =
+ 		container_of(work, struct mtk_eth, aqm_work.work);
+ 	u32 cur_count, cur_drop, delta_count, delta_drop;
++	u64 cur_bytes;
+ 	unsigned int q, poll_ms, batch, grace_ms, rate_thresh;
+ 	unsigned long last;
+ 	unsigned int cleared;
+@@ -1401,7 +1414,7 @@
+ 	batch	= eth->qdma_aqm.batch;
+ 	grace_ms = eth->qdma_aqm.grace_ms;
+ 
+-	mtk_qdma_v1_mib_read(eth, q, &cur_count, &cur_drop);
++	mtk_qdma_v1_mib_read(eth, q, &cur_count, &cur_drop, &cur_bytes);
+ 
+ 	if (!eth->qdma_aqm.primed) {
+ 		/* Baseline read: prime counters, no trigger on first cycle. */

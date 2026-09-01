@@ -1,0 +1,340 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add occupancy-driven FOE-unbind AQM
+
+Phase B of the AQM spike (§22): add a software AQM for the NETSYSv1
+software AQM for the NETSYSv1 QDMA offload path that uses qos-05 MIB counters
+to detect queue saturation and forces flows to the software path (CAKE/SQM).
+
+The AQM runs as a periodic delayed_work. On each poll it reads per-queue
+packet-count and drop-count deltas from QTX_MIB_IF. Two triggers:
+
+  (a) drop trigger  -- mib_drop increments: ring full (tail-drop). Fail-safe.
+  (b) rate trigger  -- delta_count >= rate_thresh: standing backlog at cap.
+                       rate_thresh=0 (default) auto-computes as 50% of
+                       qdma_effective_kbps assuming 1400-byte average packet.
+
+When triggered and the grace period has elapsed, the AQM walks eth->flow_table
+under RCU and calls mtk_foe_entry_clear() on up to `batch` entries bound to
+the target queue. This invalidates the hardware FOE entry and removes the
+software entry from the PPE foe_flow lookup chain, forcing traffic through the
+software path (CAKE) until nf_flow_table recycles and re-offloads the flow.
+
+Locking: mtk_foe_entry_clear() takes ppe_lock (BH spinlock) which is
+compatible with the RCU read lock held by rhashtable_walk_start/stop.
+qdma_sch_lock is always released before the rhashtable walk to avoid nesting.
+
+qdma_aqm debugfs file (0644):
+  read:  "enabled=N queue=N poll_ms=N rate_thresh=N batch=N grace_ms=N
+           trigger_count=N unbind_total=N"
+  write: "enable <queue> [<poll_ms> [<rate_thresh> [<batch> [<grace_ms>]]]]"
+       | "disable"
+Defaults: poll_ms=100, rate_thresh=0 (auto), batch=4, grace_ms=3000.
+
+Gated to non-MT7621 NETSYSv1. No effect when disabled (default on boot).
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1428,6 +1428,22 @@
+ 	u32				qdma_link_speed_mbps[MTK_QDMA_NUM_QUEUES];
+ 	u32				qdma_override_kbps[MTK_QDMA_NUM_QUEUES];
+ 	u32				qdma_effective_kbps[MTK_QDMA_NUM_QUEUES];
++	/* qos-06: AQM state; guarded by qdma_sch_lock. */
++	struct {
++		bool		enabled;
++		bool		primed;	   /* false = next poll is baseline, skip trigger */
++		u8		queue;
++		u32		poll_ms;
++		u32		rate_thresh; /* pkts/poll threshold (0 = auto) */
++		u32		batch;	   /* max FOE unbinds per trigger */
++		u32		grace_ms;  /* min ms between unbind cycles */
++		u32		prev_count;
++		u32		prev_drop;
++		unsigned long	last_unbind_jiffies;
++		u64		trigger_count;
++		u64		unbind_total;
++	} qdma_aqm;
++	struct delayed_work		aqm_work;
+ 	struct mtk_ppe			*ppe[3];
+ 	struct rhashtable		flow_table;
+ 
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1268,6 +1268,252 @@
+ 	.write	= mtk_qdma_fc_write,
+ };
+ 
++/* qos-06: occupancy-driven AQM for NETSYSv1.
++ *
++ * Walk eth->flow_table under RCU and clear up to @max FOE entries bound to
++ * @queue.  Clearing an entry: (1) writes MTK_FOE_STATE_INVALID to the hardware
++ * slot, (2) sets entry->hash = 0xffff, (3) removes the entry from the
++ * ppe->foe_flow hlist so __mtk_ppe_check_skb() cannot immediately re-commit
++ * it.  Affected flows fall to the software path (CAKE/SQM) until nf_flow_table
++ * GC recycles and re-offloads them.
++ *
++ * Called without qdma_sch_lock held; takes ppe_lock internally per entry.
++ * mtk_foe_entry_clear() is idempotent: the entry->hash == 0xffff guard makes
++ * double-clear safe.
++ */
++
++/* Mirror of mtk_foe_entry_ib2() from mtk_ppe.c (static, inaccessible here).
++ * Returns the QID stored in the software copy of the FOE entry's ib2 field.
++ */
++static unsigned int
++mtk_aqm_get_foe_qid(struct mtk_eth *eth, struct mtk_flow_entry *entry)
++{
++	struct mtk_foe_entry *foe = &entry->data;
++	int type = mtk_get_ib1_pkt_type(eth, foe->ib1);
++	u32 ib2;
++
++	if (type == MTK_PPE_PKT_TYPE_BRIDGE)
++		ib2 = foe->bridge.ib2;
++	else if (type >= MTK_PPE_PKT_TYPE_IPV4_DSLITE)
++		ib2 = foe->ipv6.ib2;
++	else
++		ib2 = foe->ipv4.ib2;
++
++	return FIELD_GET(MTK_FOE_IB2_QID, ib2);
++}
++
++static unsigned int
++mtk_qdma_aqm_unbind_queue(struct mtk_eth *eth, unsigned int queue,
++			  unsigned int max)
++{
++	struct rhashtable_iter iter;
++	struct mtk_flow_entry *entry;
++	unsigned int cleared = 0;
++
++	if (!eth->ppe[0] || !max)
++		return 0;
++
++	rhashtable_walk_enter(&eth->flow_table, &iter);
++	rhashtable_walk_start(&iter);
++
++	while (cleared < max) {
++		entry = rhashtable_walk_next(&iter);
++		if (!entry)
++			break;
++		if (IS_ERR(entry))
++			continue;
++		if (entry->hash == 0xffff)
++			continue;
++		if (mtk_aqm_get_foe_qid(eth, entry) != queue)
++			continue;
++
++		/* mtk_foe_entry_clear() takes ppe_lock (BH spinlock).
++		 * Calling under the RCU read lock from rhashtable_walk is valid;
++		 * ppe_lock and RCU do not conflict.  The entry is RCU-protected
++		 * and will not be freed until after rhashtable_walk_stop().
++		 */
++		mtk_foe_entry_clear(eth->ppe[entry->ppe_index], entry);
++		cleared++;
++	}
++
++	rhashtable_walk_stop(&iter);
++	rhashtable_walk_exit(&iter);
++	return cleared;
++}
++
++static void mtk_qdma_aqm_work(struct work_struct *work)
++{
++	struct mtk_eth *eth =
++		container_of(work, struct mtk_eth, aqm_work.work);
++	u32 cur_count, cur_drop, delta_count, delta_drop;
++	unsigned int q, poll_ms, batch, grace_ms, rate_thresh;
++	unsigned long last;
++	unsigned int cleared;
++	bool trigger;
++
++	spin_lock_bh(&eth->qdma_sch_lock);
++
++	if (!eth->qdma_aqm.enabled) {
++		spin_unlock_bh(&eth->qdma_sch_lock);
++		return;
++	}
++
++	q	= eth->qdma_aqm.queue;
++	poll_ms	= eth->qdma_aqm.poll_ms;
++	batch	= eth->qdma_aqm.batch;
++	grace_ms = eth->qdma_aqm.grace_ms;
++
++	mtk_qdma_v1_mib_read(eth, q, &cur_count, &cur_drop);
++
++	if (!eth->qdma_aqm.primed) {
++		/* Baseline read: prime counters, no trigger on first cycle. */
++		eth->qdma_aqm.prev_count = cur_count;
++		eth->qdma_aqm.prev_drop  = cur_drop;
++		eth->qdma_aqm.primed     = true;
++		spin_unlock_bh(&eth->qdma_sch_lock);
++		schedule_delayed_work(&eth->aqm_work, msecs_to_jiffies(poll_ms));
++		return;
++	}
++
++	delta_count = cur_count - eth->qdma_aqm.prev_count;
++	delta_drop  = cur_drop  - eth->qdma_aqm.prev_drop;
++	eth->qdma_aqm.prev_count = cur_count;
++	eth->qdma_aqm.prev_drop  = cur_drop;
++	last	    = eth->qdma_aqm.last_unbind_jiffies;
++	rate_thresh = eth->qdma_aqm.rate_thresh;
++
++	/* Auto-threshold: 50 % of queue cap at 1400-byte average packet.
++	 * effective_kbps * poll_ms / (1400 * 8) / 2 = kbps * ms / 22400
++	 */
++	if (!rate_thresh) {
++		u32 eff = eth->qdma_effective_kbps[q];
++
++		rate_thresh = max(1u, eff * poll_ms / 22400u);
++	}
++
++	/* Trigger (a): hardware tail-drop.
++	 * Trigger (b): packet rate at or above saturation level.
++	 */
++	trigger = delta_drop || delta_count >= rate_thresh;
++
++	spin_unlock_bh(&eth->qdma_sch_lock);
++
++	cleared = 0;
++	if (trigger && time_after(jiffies, last + msecs_to_jiffies(grace_ms)))
++		cleared = mtk_qdma_aqm_unbind_queue(eth, q, batch);
++
++	if (cleared) {
++		spin_lock_bh(&eth->qdma_sch_lock);
++		eth->qdma_aqm.last_unbind_jiffies = jiffies;
++		eth->qdma_aqm.trigger_count++;
++		eth->qdma_aqm.unbind_total += cleared;
++		spin_unlock_bh(&eth->qdma_sch_lock);
++	}
++
++	schedule_delayed_work(&eth->aqm_work, msecs_to_jiffies(poll_ms));
++}
++
++static int mtk_qdma_aqm_show(struct seq_file *s, void *unused)
++{
++	struct mtk_eth *eth = s->private;
++	bool enabled;
++	u8 queue;
++	u32 poll_ms, rate_thresh, batch, grace_ms;
++	u64 trigger_count, unbind_total;
++
++	spin_lock_bh(&eth->qdma_sch_lock);
++	enabled		= eth->qdma_aqm.enabled;
++	queue		= eth->qdma_aqm.queue;
++	poll_ms		= eth->qdma_aqm.poll_ms;
++	rate_thresh	= eth->qdma_aqm.rate_thresh;
++	batch		= eth->qdma_aqm.batch;
++	grace_ms	= eth->qdma_aqm.grace_ms;
++	trigger_count	= eth->qdma_aqm.trigger_count;
++	unbind_total	= eth->qdma_aqm.unbind_total;
++	spin_unlock_bh(&eth->qdma_sch_lock);
++
++	seq_printf(s,
++		   "enabled=%u queue=%u poll_ms=%u rate_thresh=%u batch=%u grace_ms=%u trigger_count=%llu unbind_total=%llu\n",
++		   enabled, queue, poll_ms, rate_thresh, batch, grace_ms,
++		   (unsigned long long)trigger_count,
++		   (unsigned long long)unbind_total);
++	return 0;
++}
++
++static int mtk_qdma_aqm_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, mtk_qdma_aqm_show, inode->i_private);
++}
++
++static ssize_t mtk_qdma_aqm_write(struct file *file, const char __user *ubuf,
++				  size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct mtk_eth *eth = s->private;
++	unsigned long long q, poll_ms = 100, thresh = 0, batch = 4,
++			   grace_ms = 3000;
++	char buf[80], cmd[10], extra;
++	int nargs;
++
++	if (!mtk_qdma_v1_override_supported(eth))
++		return -EOPNOTSUPP;
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%9s", cmd) != 1)
++		return -EINVAL;
++
++	if (!strcmp(cmd, "disable")) {
++		spin_lock_bh(&eth->qdma_sch_lock);
++		eth->qdma_aqm.enabled = false;
++		spin_unlock_bh(&eth->qdma_sch_lock);
++		return count;
++	}
++
++	if (strcmp(cmd, "enable"))
++		return -EINVAL;
++
++	nargs = sscanf(buf, "%9s %llu %llu %llu %llu %llu %c",
++		       cmd, &q, &poll_ms, &thresh, &batch, &grace_ms, &extra);
++	if (nargs < 2 || q >= MTK_QDMA_NUM_QUEUES ||
++	    poll_ms < 10 || poll_ms > 10000 ||
++	    batch < 1 || batch > 64 ||
++	    grace_ms < 100 || grace_ms > 60000)
++		return -EINVAL;
++
++	spin_lock_bh(&eth->qdma_sch_lock);
++	eth->qdma_aqm.queue		= (u8)q;
++	eth->qdma_aqm.poll_ms		= (u32)poll_ms;
++	eth->qdma_aqm.rate_thresh	= (u32)thresh;
++	eth->qdma_aqm.batch		= (u32)batch;
++	eth->qdma_aqm.grace_ms		= (u32)grace_ms;
++	eth->qdma_aqm.primed		= false;
++	eth->qdma_aqm.trigger_count	= 0;
++	eth->qdma_aqm.unbind_total	= 0;
++	if (!eth->qdma_aqm.enabled) {
++		eth->qdma_aqm.enabled = true;
++		spin_unlock_bh(&eth->qdma_sch_lock);
++		schedule_delayed_work(&eth->aqm_work,
++				      msecs_to_jiffies(poll_ms));
++	} else {
++		/* Already running; worker picks up new params on next cycle. */
++		spin_unlock_bh(&eth->qdma_sch_lock);
++	}
++	return count;
++}
++
++static const struct file_operations mtk_qdma_aqm_fops = {
++	.owner	 = THIS_MODULE,
++	.open	 = mtk_qdma_aqm_open,
++	.read	 = seq_read,
++	.llseek	 = seq_lseek,
++	.release = single_release,
++	.write	 = mtk_qdma_aqm_write,
++};
++
+ static void mtk_qdma_debugfs_init(struct mtk_eth *eth)
+ {
+ 	struct dentry *root;
+@@ -1291,7 +1291,9 @@
+ 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_txq", 0200, root, eth,
+ 						&mtk_qdma_txq_fops)) ||
+-	     IS_ERR_OR_NULL(debugfs_create_file("qdma_fc", 0200, root, eth,
+-						&mtk_qdma_fc_fops))))
++	     IS_ERR_OR_NULL(debugfs_create_file("qdma_fc", 0200, root, eth,
++						&mtk_qdma_fc_fops)) ||
++	     IS_ERR_OR_NULL(debugfs_create_file("qdma_aqm", 0644, root, eth,
++						&mtk_qdma_aqm_fops))))
+ 		goto error;
+ 
+ 	return;
+@@ -5297,4 +5297,5 @@
+ 	cancel_work_sync(&eth->pending_work);
+ 	cancel_delayed_work_sync(&eth->reset.monitor_work);
++	cancel_delayed_work_sync(&eth->aqm_work);
+ 
+ 	return 0;
+@@ -5992,4 +5992,5 @@
+ 	INIT_WORK(&eth->rx_dim.work, mtk_dim_rx);
+ 	INIT_DELAYED_WORK(&eth->reset.monitor_work, mtk_hw_reset_monitor_work);
++	INIT_DELAYED_WORK(&eth->aqm_work, mtk_qdma_aqm_work);
+ 
+ 	eth->tx_dim.mode = DIM_CQ_PERIOD_MODE_START_FROM_EQE;

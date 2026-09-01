@@ -1,0 +1,140 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: byte-accurate AQM auto-threshold
+
+qos-06's rate trigger compared a delta *packet* count against an
+auto-threshold derived by assuming a fixed 1400-byte average packet
+size (effective_kbps * poll_ms / 22400). Real traffic mixes packet
+sizes (small ACKs/DNS/ICMP alongside full-MTU bulk payloads), so a
+fixed-size assumption over- or under-triggers depending on the actual
+mix at the time.
+
+qos-11 added a real per-queue byte counter (mib_bytes) to the same MIB
+readout this AQM already polls every cycle, previously left unused.
+Switch the rate trigger to compare byte deltas against a byte
+threshold instead: effective_kbps * poll_ms / 8 is 100% of queue
+capacity in bytes over the poll window; halve for the 50% trigger
+point (/16). Renamed rate_thresh -> byte_thresh throughout (struct
+field, debugfs show/write, local variables) since the unit changed;
+the write command's positional argument order is unchanged, only what
+the third field measures. Added qdma_aqm.prev_bytes alongside the
+existing prev_count/prev_drop baseline state, primed identically on
+enable/re-prime (including the qos-08 SER-reprime path, which only
+touches `primed` and is unaffected).
+
+Live production config uses byte_thresh=0 (auto) exclusively - no
+manual override in use - so this only changes the auto-computed
+trigger sensitivity, not the mechanism.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1434,11 +1434,12 @@
+ 		bool		primed;	   /* false = next poll is baseline, skip trigger */
+ 		u8		queue;
+ 		u32		poll_ms;
+-		u32		rate_thresh; /* pkts/poll threshold (0 = auto) */
++		u32		byte_thresh; /* bytes/poll threshold (0 = auto) */
+ 		u32		batch;	   /* max FOE unbinds per trigger */
+ 		u32		grace_ms;  /* min ms between unbind cycles */
+ 		u32		prev_count;
+ 		u32		prev_drop;
++		u64		prev_bytes;
+ 		unsigned long	last_unbind_jiffies;
+ 		u64		trigger_count;
+ 		u64		unbind_total;
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1396,8 +1396,8 @@
+ 	struct mtk_eth *eth =
+ 		container_of(work, struct mtk_eth, aqm_work.work);
+ 	u32 cur_count, cur_drop, delta_count, delta_drop;
+-	u64 cur_bytes;
+-	unsigned int q, poll_ms, batch, grace_ms, rate_thresh;
++	u64 cur_bytes, delta_bytes;
++	unsigned int q, poll_ms, batch, grace_ms, byte_thresh;
+ 	unsigned long last;
+ 	unsigned int cleared;
+ 	bool trigger;
+@@ -1420,6 +1420,7 @@
+ 		/* Baseline read: prime counters, no trigger on first cycle. */
+ 		eth->qdma_aqm.prev_count = cur_count;
+ 		eth->qdma_aqm.prev_drop  = cur_drop;
++		eth->qdma_aqm.prev_bytes = cur_bytes;
+ 		eth->qdma_aqm.primed     = true;
+ 		spin_unlock_bh(&eth->qdma_sch_lock);
+ 		schedule_delayed_work(&eth->aqm_work, msecs_to_jiffies(poll_ms));
+@@ -1428,24 +1429,29 @@
+ 
+ 	delta_count = cur_count - eth->qdma_aqm.prev_count;
+ 	delta_drop  = cur_drop  - eth->qdma_aqm.prev_drop;
++	delta_bytes = cur_bytes - eth->qdma_aqm.prev_bytes;
+ 	eth->qdma_aqm.prev_count = cur_count;
+ 	eth->qdma_aqm.prev_drop  = cur_drop;
++	eth->qdma_aqm.prev_bytes = cur_bytes;
+ 	last	    = eth->qdma_aqm.last_unbind_jiffies;
+-	rate_thresh = eth->qdma_aqm.rate_thresh;
++	byte_thresh = eth->qdma_aqm.byte_thresh;
+ 
+-	/* Auto-threshold: 50 % of queue cap at 1400-byte average packet.
+-	 * effective_kbps * poll_ms / (1400 * 8) / 2 = kbps * ms / 22400
++	/* qos-12: byte-accurate auto-threshold (50 % of queue cap), replacing
++	 * qos-06's 1400-byte-assumed packet-count estimate now that qos-11
++	 * exposes a real per-queue byte counter.
++	 * effective_kbps * poll_ms / 8 = bytes/poll at 100 % of cap;
++	 * halve for the 50 % trigger point -> / 16.
+ 	 */
+-	if (!rate_thresh) {
++	if (!byte_thresh) {
+ 		u32 eff = eth->qdma_effective_kbps[q];
+ 
+-		rate_thresh = max(1u, eff * poll_ms / 22400u);
++		byte_thresh = max(1u, eff * poll_ms / 16u);
+ 	}
+ 
+ 	/* Trigger (a): hardware tail-drop.
+-	 * Trigger (b): packet rate at or above saturation level.
++	 * Trigger (b): byte rate at or above saturation level.
+ 	 */
+-	trigger = delta_drop || delta_count >= rate_thresh;
++	trigger = delta_drop || delta_bytes >= byte_thresh;
+ 
+ 	spin_unlock_bh(&eth->qdma_sch_lock);
+ 
+@@ -1469,14 +1475,14 @@
+ 	struct mtk_eth *eth = s->private;
+ 	bool enabled;
+ 	u8 queue;
+-	u32 poll_ms, rate_thresh, batch, grace_ms;
++	u32 poll_ms, byte_thresh, batch, grace_ms;
+ 	u64 trigger_count, unbind_total;
+ 
+ 	spin_lock_bh(&eth->qdma_sch_lock);
+ 	enabled		= eth->qdma_aqm.enabled;
+ 	queue		= eth->qdma_aqm.queue;
+ 	poll_ms		= eth->qdma_aqm.poll_ms;
+-	rate_thresh	= eth->qdma_aqm.rate_thresh;
++	byte_thresh	= eth->qdma_aqm.byte_thresh;
+ 	batch		= eth->qdma_aqm.batch;
+ 	grace_ms	= eth->qdma_aqm.grace_ms;
+ 	trigger_count	= eth->qdma_aqm.trigger_count;
+@@ -1484,8 +1490,8 @@
+ 	spin_unlock_bh(&eth->qdma_sch_lock);
+ 
+ 	seq_printf(s,
+-		   "enabled=%u queue=%u poll_ms=%u rate_thresh=%u batch=%u grace_ms=%u trigger_count=%llu unbind_total=%llu\n",
+-		   enabled, queue, poll_ms, rate_thresh, batch, grace_ms,
++		   "enabled=%u queue=%u poll_ms=%u byte_thresh=%u batch=%u grace_ms=%u trigger_count=%llu unbind_total=%llu\n",
++		   enabled, queue, poll_ms, byte_thresh, batch, grace_ms,
+ 		   (unsigned long long)trigger_count,
+ 		   (unsigned long long)unbind_total);
+ 	return 0;
+@@ -1538,7 +1544,7 @@
+ 	spin_lock_bh(&eth->qdma_sch_lock);
+ 	eth->qdma_aqm.queue		= (u8)q;
+ 	eth->qdma_aqm.poll_ms		= (u32)poll_ms;
+-	eth->qdma_aqm.rate_thresh	= (u32)thresh;
++	eth->qdma_aqm.byte_thresh	= (u32)thresh;
+ 	eth->qdma_aqm.batch		= (u32)batch;
+ 	eth->qdma_aqm.grace_ms		= (u32)grace_ms;
+ 	eth->qdma_aqm.primed		= false;

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Re-apply the QDMA shaper when a configured interface comes up. The kernel
+# reapplies an active override after link/DMA events on its own; this covers
+# the case where the service first ran before the interface/debugfs was ready.
+
+[ "$ACTION" = "ifup" ] || exit 0
+[ -x /etc/init.d/qdma-shaper ] || exit 0
+
+. /lib/functions.sh
+
+reapply=0
+check() {
+	local cfg="$1" enabled interface
+	config_get_bool enabled "$cfg" enabled 0
+	config_get interface "$cfg" interface
+	[ "$enabled" = "1" ] && [ "$interface" = "$INTERFACE" ] && reapply=1
+}
+
+config_load qdma-shaper
+config_foreach check shaper
+
+[ "$reapply" = "1" ] && /etc/init.d/qdma-shaper reload
+
+exit 0
