@@ -1,0 +1,83 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] netfilter: nft_set_hash: use xxh32 for measured key sizes
+
+The E8450 Cortex-A53 hash microbenchmark found that xxh32 is slower than
+specialized jhash at 4 and 12 bytes, slower again at 17 bytes, and faster at
+16, 32, 48, and 64 bytes. Keep the short and unmeasured intermediate paths on
+jhash and use the existing seeded xxh32 implementation only at the measured
+winning sizes: exactly 16 bytes and 32 bytes or larger.
+
+Apply the same threshold to both the rhashtable-backed and legacy hlist-backed
+nft hash implementations. The rhashtable-provided or set-provided seed is
+retained; no table or collision-management behavior changes.
+
+This deliberately does not alter jhash_1word() or jhash_3words() users, the
+MediaTek PPE hardware hash, or the 8-byte cookie-keyed PPE table.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/net/netfilter/nft_set_hash.c
++++ b/net/netfilter/nft_set_hash.c
+@@ -11,6 +11,7 @@
+ #include <linux/list.h>
+ #include <linux/log2.h>
+ #include <linux/jhash.h>
++#include <linux/xxhash.h>
+ #include <linux/netlink.h>
+ #include <linux/workqueue.h>
+ #include <linux/rhashtable.h>
+@@ -41,18 +41,26 @@
+ 	u64				tstamp;
+ };
+ 
++static inline u32 nft_hash_key(const void *data, u32 len, u32 seed)
++{
++	if (len == 16 || len >= 32)
++		return xxh32(data, len, seed);
++
++	return jhash(data, len, seed);
++}
++
+ static inline u32 nft_rhash_key(const void *data, u32 len, u32 seed)
+ {
+ 	const struct nft_rhash_cmp_arg *arg = data;
+ 
+-	return jhash(arg->key, len, seed);
++	return nft_hash_key(arg->key, len, seed);
+ }
+ 
+ static inline u32 nft_rhash_obj(const void *data, u32 len, u32 seed)
+ {
+ 	const struct nft_rhash_elem *he = data;
+ 
+-	return jhash(nft_set_ext_key(&he->ext), len, seed);
++	return nft_hash_key(nft_set_ext_key(&he->ext), len, seed);
+ }
+ 
+ static inline int nft_rhash_cmp(struct rhashtable_compare_arg *arg,
+@@ -513,7 +522,7 @@
+ 	const struct nft_hash_elem *he;
+ 	u32 hash;
+ 
+-	hash = jhash(key, set->klen, priv->seed);
++	hash = nft_hash_key(key, set->klen, priv->seed);
+ 	hash = reciprocal_scale(hash, priv->buckets);
+ 	hlist_for_each_entry_rcu(he, &priv->table[hash], node) {
+ 		if (!memcmp(nft_set_ext_key(&he->ext), key, set->klen) &&
+@@ -536,7 +545,7 @@
+ 	if (set->klen == 4)
+ 		hash = jhash_1word(*key, priv->seed);
+ 	else
+-		hash = jhash(key, set->klen, priv->seed);
++		hash = nft_hash_key(key, set->klen, priv->seed);
+ 
+ 	hash = reciprocal_scale(hash, priv->buckets);
+ 	hlist_for_each_entry_rcu(he, &priv->table[hash], node) {
+@@ -579,7 +588,7 @@
+ 		k1 = *(u32 *)key;
+ 		hash = jhash_1word(k1, priv->seed);
+ 	} else {
+-		hash = jhash(key, set->klen, priv->seed);
++		hash = nft_hash_key(key, set->klen, priv->seed);
+ 	}
+ 	hash = reciprocal_scale(hash, priv->buckets);

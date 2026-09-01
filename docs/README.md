@@ -111,6 +111,7 @@ and no patch can add that without new silicon.
 |---|---|
 | [`e8450-ppe-validation.md`](e8450-ppe-validation.md) | PPE/WED hardware validation: the ring-desync fix, the PSE port-mapping fix, the controlled-SER investigation and its auto-reboot mitigation, the mt76 upstream pin bump. |
 | [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md) | The full QoS/AQM/HQoS investigation: what NETSYSv1's QDMA block can and cannot do in hardware, the `qos-01`..`qos-13` patch series, and the production HQoS+AQM profile. |
+| [`selective-xxhash-plan.md`](selective-xxhash-plan.md) | Historical A53 hash benchmark, selective seeded xxh32 policy, flowtable use, and thresholded nftables-set wrapper. |
 | [`e8450-upstream-backport-roadmap.md`](e8450-upstream-backport-roadmap.md) | Tracking sheet for which local patches are hand-backports of commits later merged upstream, and candidates for future pin bumps. |
 | [`wed-v1-opportunities.md`](wed-v1-opportunities.md) | Survey of WED-v1-specific opportunities and their disposition. |
 | [`WED-breadcrumb-harness-design.md`](WED-breadcrumb-harness-design.md) | Recovered from an earlier, since-abandoned investigation branch (preserved at git tag `archive/wed-ser-investigation-2026-07-12`); the closing writeup on the controlled-SER MCU-death investigation this fork's own testing later independently reproduced. |
