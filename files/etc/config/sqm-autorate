@@ -1,0 +1,17 @@
+config network
+	option upload_interface 'wan'
+	option download_interface 'ifb4wan'
+	option upload_base_kbits '8300'
+	option download_base_kbits '64000'
+	option upload_min_percent '60'
+	option download_min_percent '60'
+
+config output
+	option log_level 'WARN'
+	option use_syslog '1'
+	option suppress_statistics 'false'
+	option stats_file '/tmp/sqm-autorate.csv'
+	option speed_hist_file '/tmp/sqm-speedhist.csv'
+
+config advanced_settings
+	option reflector_list_file '/etc/sqm-autorate-rust/reflectors-icmp.csv'

@@ -1,0 +1,46 @@
+# qos-07/qos-10 queue steering and production HQoS marks:
+# - Unmarked WAN-bound traffic uses HQoS q7 (the capped bulk queue).
+# - ICMP and high-priority DSCP traffic use q8 (uncapped priority queue).
+# - meta mark 4 keeps non-offloaded priority packets on q4 in qos-07.
+#
+# The ct mark is set after conntrack has attached (forward priority -1) and
+# before fw4's flow-add rule (forward priority filter). qos_toggle=1 consumes
+# the low nibble as the PPE/QDMA queue. qos_toggle=2 ignores ct marks and
+# qos-10 continues to select q4 from DSCP.
+#
+# mac80211 already sets skb->priority to the 802.11 QoS TID in rx.c before
+# the packet reaches prerouting. This avoids a mt76-specific rx change and
+# covers both mt7622-wmac and mt7915e/WED without altering IP payloads in
+# the driver.
+
+# Translate WiFi WMM access categories to IP DSCP before conntrack/QoS
+# learning. Existing non-zero DSCP values are preserved.
+chain wifi_tid_dscp {
+	type filter hook prerouting priority -225; policy accept;
+	iifname "wl0-ap0" meta priority 6 ip  dscp 0 ip  dscp set ef
+	iifname "wl0-ap0" meta priority 7 ip  dscp 0 ip  dscp set ef
+	iifname "wl1-ap0" meta priority 6 ip  dscp 0 ip  dscp set ef
+	iifname "wl1-ap0" meta priority 7 ip  dscp 0 ip  dscp set ef
+	iifname "wl0-ap0" meta priority 4 ip  dscp 0 ip  dscp set af41
+	iifname "wl0-ap0" meta priority 5 ip  dscp 0 ip  dscp set af41
+	iifname "wl1-ap0" meta priority 4 ip  dscp 0 ip  dscp set af41
+	iifname "wl1-ap0" meta priority 5 ip  dscp 0 ip  dscp set af41
+	iifname "wl0-ap0" meta priority 6 ip6 dscp 0 ip6 dscp set ef
+	iifname "wl0-ap0" meta priority 7 ip6 dscp 0 ip6 dscp set ef
+	iifname "wl1-ap0" meta priority 6 ip6 dscp 0 ip6 dscp set ef
+	iifname "wl1-ap0" meta priority 7 ip6 dscp 0 ip6 dscp set ef
+	iifname "wl0-ap0" meta priority 4 ip6 dscp 0 ip6 dscp set af41
+	iifname "wl0-ap0" meta priority 5 ip6 dscp 0 ip6 dscp set af41
+	iifname "wl1-ap0" meta priority 4 ip6 dscp 0 ip6 dscp set af41
+	iifname "wl1-ap0" meta priority 5 ip6 dscp 0 ip6 dscp set af41
+}
+
+# Default WAN bulk queue for HQoS. Priority rules below override the ct mark.
+chain queue_mark_forward {
+	type filter hook forward priority filter - 1; policy accept;
+	oifname "wan" ct mark set 7
+	oifname "wan" ip protocol icmp ct mark set 8 meta mark set 4
+	oifname "wan" ip6 nexthdr ipv6-icmp ct mark set 8 meta mark set 4
+	oifname "wan" ip dscp { ef, af41, cs4, cs5 } ct mark set 8 meta mark set 4
+	oifname "wan" ip6 dscp { ef, af41, cs4, cs5 } ct mark set 8 meta mark set 4
+}

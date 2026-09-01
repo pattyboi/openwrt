@@ -1,0 +1,34 @@
+#!/bin/sh
+
+# Bridged IPv4/IPv6 flows must enter fw4's inet forward hook for the flowtable
+# rule to install hardware offload entries. kmod-br-netfilter ships
+# /etc/sysctl.d/11-br-netfilter.conf defaulting these controls to 0.
+#
+# /etc/sysctl.conf cannot carry the override: it is a base-files conffile
+# listed in /lib/upgrade/keep.d/base-files-essential, so sysupgrade preserves
+# the running copy and clobbers any value baked into a new image. Persist the
+# setting here instead (uci-defaults ships fresh in every image and edits the
+# preserved /etc/sysctl.conf), then apply it live.
+
+. /lib/functions/system.sh
+
+case "$(board_name)" in
+linksys,e8450-ubi|\
+belkin,rt3200-ubi)
+	for key in \
+		net.bridge.bridge-nf-call-iptables \
+		net.bridge.bridge-nf-call-ip6tables; do
+		if grep -q "^[[:space:]]*${key}[[:space:]]*=" /etc/sysctl.conf; then
+			sed -i "s|^[[:space:]]*${key}[[:space:]]*=.*|${key}=1|" /etc/sysctl.conf
+		else
+			echo "${key}=1" >> /etc/sysctl.conf
+		fi
+	done
+
+	# ARP stays outside netfilter; leave bridge-nf-call-arptables at 0.
+	modprobe br_netfilter 2>/dev/null
+	/etc/init.d/sysctl restart >/dev/null 2>&1
+	;;
+esac
+
+exit 0

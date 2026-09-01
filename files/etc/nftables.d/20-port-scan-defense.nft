@@ -1,0 +1,96 @@
+# Port-scan defense for OpenWrt fw4 / nftables
+# Included into `table inet fw4` automatically on every `fw4 reload`.
+# Scope: WAN ingress to the router itself only. Forwarded LAN traffic and
+# LAN-side management are untouched.
+
+set scan_whitelist_v4 {
+	type ipv4_addr
+	flags interval
+	comment "port-scan-defense: trusted IPv4 sources (edit elements below)"
+	# elements = { 203.0.113.0/24 }
+}
+
+set scan_whitelist_v6 {
+	type ipv6_addr
+	flags interval
+	comment "port-scan-defense: trusted IPv6 sources"
+}
+
+set scanners_v4 {
+	type ipv4_addr
+	flags dynamic,timeout
+	timeout 30m
+	size 65535
+	comment "port-scan-defense: blocked IPv4 scanners"
+}
+
+set scanners_v6 {
+	type ipv6_addr
+	flags dynamic,timeout
+	timeout 30m
+	size 65535
+	comment "port-scan-defense: blocked IPv6 scanners"
+}
+
+set scan_track_v4 {
+	type ipv4_addr
+	flags dynamic,timeout
+	timeout 1m
+	size 65535
+	comment "port-scan-defense: per-source new-conn meter (v4)"
+}
+
+set scan_track_v6 {
+	type ipv6_addr
+	flags dynamic,timeout
+	timeout 1m
+	size 65535
+	comment "port-scan-defense: per-source new-conn meter (v6)"
+}
+
+chain scan_report {
+	limit rate 10/minute burst 5 packets \
+		log prefix "port-scan-defense: " level warn
+	counter drop
+}
+
+chain scan_guard_v4 {
+	ip saddr @scan_whitelist_v4 accept
+	ip saddr @scanners_v4 counter drop
+
+	tcp flags & (fin|syn|rst|psh|ack|urg) == 0x0         add @scanners_v4 { ip saddr } jump scan_report
+	tcp flags & (fin|syn|rst|psh|ack|urg) == fin         add @scanners_v4 { ip saddr } jump scan_report
+	tcp flags & (fin|syn|rst|psh|ack|urg) == fin|psh|urg add @scanners_v4 { ip saddr } jump scan_report
+	tcp flags & (syn|fin) == syn|fin                     add @scanners_v4 { ip saddr } jump scan_report
+	tcp flags & (syn|rst) == syn|rst                     add @scanners_v4 { ip saddr } jump scan_report
+	tcp flags & (fin|rst) == fin|rst                     add @scanners_v4 { ip saddr } jump scan_report
+
+	ct state new meta l4proto { tcp, udp } \
+		add @scan_track_v4 { ip saddr limit rate over 25/second burst 50 packets } \
+		add @scanners_v4 { ip saddr } jump scan_report
+}
+
+chain scan_guard_v6 {
+	ip6 saddr @scan_whitelist_v6 accept
+	ip6 saddr @scanners_v6 counter drop
+
+	tcp flags & (fin|syn|rst|psh|ack|urg) == 0x0         add @scanners_v6 { ip6 saddr } jump scan_report
+	tcp flags & (fin|syn|rst|psh|ack|urg) == fin         add @scanners_v6 { ip6 saddr } jump scan_report
+	tcp flags & (fin|syn|rst|psh|ack|urg) == fin|psh|urg add @scanners_v6 { ip6 saddr } jump scan_report
+	tcp flags & (syn|fin) == syn|fin                     add @scanners_v6 { ip6 saddr } jump scan_report
+	tcp flags & (syn|rst) == syn|rst                     add @scanners_v6 { ip6 saddr } jump scan_report
+	tcp flags & (fin|rst) == fin|rst                     add @scanners_v6 { ip6 saddr } jump scan_report
+
+	ct state new meta l4proto { tcp, udp } \
+		add @scan_track_v6 { ip6 saddr limit rate over 25/second burst 50 packets } \
+		add @scanners_v6 { ip6 saddr } jump scan_report
+}
+
+chain scan_guard_input {
+	type filter hook input priority -1; policy accept;
+
+	iifname != "wan" accept
+	ct state established,related accept
+	meta nfproto ipv4 jump scan_guard_v4
+	meta nfproto ipv6 jump scan_guard_v6
+}
