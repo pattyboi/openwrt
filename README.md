@@ -1,3 +1,18 @@
+# Linksys E8450 (MT7622/NETSYSv1) fork
+
+This is an OpenWrt fork carrying a from-source, hardware-validated patch
+set for the Linksys E8450 — WED-v1 DMA-offload fixes, a NETSYSv1 QoS/AQM
+implementation built from first principles (no equivalent exists upstream
+for this chip), and an mt76 upstream tracking policy, all confirmed against
+a live production router rather than a lab bench.
+
+**Start here: [`docs/README.md`](docs/README.md)** for the TL;DR,
+architecture diagram, and links to the full investigation writeups.
+
+everything below this point is the stock upstream OpenWrt README.
+
+---
+
 ![OpenWrt logo](include/logo.png)
 
 OpenWrt Project is a Linux operating system targeting embedded devices. Instead
