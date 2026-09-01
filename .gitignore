@@ -52,3 +52,6 @@ git-src
 .cproject
 .ccache
 .vscode*
+/router-backups
+/e8450-ubi.config
+/.router-credentials
