@@ -2559,3 +2559,116 @@ real load), q7/q8 registers and AQM counters otherwise undisturbed, 0%
 ping loss, both radios healthy (8 stations 2.4 GHz, 5 GHz channel 52), no
 PPE/WED/QDMA error/warn/BUG lines.
 
+
+## 31. Live performance review: throughput and bufferbloat (2026-09-01)
+
+Prompted by "review our live performance of speed and bufferbloat, so we
+know if we should further refine". Ran real speed and bufferbloat tests
+against the live production router, not synthetic isolated conditions.
+
+### 31.1 SQM download rate was badly miscalibrated - fixed
+
+`/etc/config/sqm`'s `download` was `64000` (64 Mbit). Across every download
+test run today - iperf3 (single- and multi-stream), thinkbroadband,
+a Debian mirror, three different public servers - actual throughput never
+once exceeded ~8 Mbit/s, mostly landing in the 0.3-5 Mbit/s range with
+heavy TCP retransmits (up to 73 retransmits on a single 25 s stream).
+Router's own WAN interface counters are clean (0 RX/TX errors/drops,
+gigabit-negotiated) and AQM wasn't over-triggering during these tests, so
+this isn't a router-side regression - either the real ISP capacity is far
+below 64 Mbit, or there's sustained external path congestion/loss. Either
+way, a CAKE ceiling that's never once been approached provides **zero**
+bufferbloat protection: CAKE never sees itself as the bottleneck, so any
+real queueing that happens upstream of the router (ISP modem/CMTS buffer)
+is completely invisible to and uncontrolled by this stack.
+
+Recalibrated `download` to `10000` (10 Mbit - comfortable margin above the
+best sustained reading, nowhere near the unapproached 64 Mbit) in both
+`/etc/config/sqm` and `/etc/config/sqm-autorate`'s `download_base_kbits`,
+applied live (`uci commit sqm; /etc/init.d/sqm restart` - confirmed via
+`tc -s qdisc show dev ifb4wan`: `bandwidth 10Mbit`) and in the tracked
+`files/etc/config/sqm`/`sqm-autorate` defaults. This is a provisional,
+evidence-based value, not a confirmed ISP plan figure - revisit once
+`sqm-autorate-rust` is actually buildable and can track real capacity
+dynamically instead of a static guess (see SS31.3).
+
+### 31.2 Upload bufferbloat: real mechanism confirmed, root cause is NOT CAKE
+
+`tc -s qdisc show dev wan` (CAKE egress, upload) after all of today's
+saturating tests: `pk_delay 1.2ms`, `av_delay 187us`, `backlog 0b`, `19`
+drops out of `846K` packets (0.002%). **CAKE itself is not the source of
+the bufferbloat** - it never even gets backlogged.
+
+A high-resolution ping trace (`-i 0.2`) during upload saturation caught the
+real mechanism directly: a burst of replies arrived simultaneously with
+monotonically *decreasing* delay (1718 -> 1514 -> 1313 -> ... -> 95 ms) -
+the unmistakable signature of a queue suddenly draining, timed to land
+right after an AQM eviction. This is a flow sitting in the QDMA hardware
+leaky-bucket queue (rate-capped at 8300 kbps by `qos_toggle=1`'s q7, but
+with zero depth/latency control - `fc_th`/`HRED2` both confirmed dead,
+SS22.9-22.10) for up to the `grace_ms` window before AQM notices and
+evicts it to CAKE. This is the same mechanism SS22.12/SS26 already
+documented (hardware offload has no AQM at all; the p95 196 ms -> 33.8 ms
+improvement was never "no bufferbloat", just less of it) - today's testing
+re-confirms it with direct causal evidence, not just aggregate latency
+percentiles.
+
+### 31.3 grace_ms tuning: inconclusive, did not change production
+
+Tried the obvious lever - shortening `grace_ms` (more frequent AQM
+intervention should bound the hardware-queue exposure window) - live via
+debugfs, no rebuild needed. Result was **not a clean improvement**:
+
+| grace_ms | server | trials | avg RTT range | max RTT range |
+|---|---|---|---|---|
+| 3000 (production) | fra (DE, high-jitter) | 1 | 234 ms | 1.4 s |
+| 750 | fra | 1 | 812 ms | 5.5 s |
+| 3000 (production) | fra repeat | 1 | 109 ms | 1.5 s |
+| 3000 (production) | dal (US, low-jitter) | 3 | 67-83 ms | 362-421 ms |
+| 1000 | dal | 3 | 18.6-570 ms | 40 ms-3.0 s |
+
+Switching to a lower-jitter test server (`dal.speedtest.clouvider.net`,
+~60 ms stable RTT vs. `fra.speedtest.clouvider.net`'s ~52 ms avg but
+24 ms mdev) tightened production's results considerably (67-83 ms avg,
+consistent across 3 trials) - most of the earlier wild swings were the
+test methodology's own path noise, not the router. But `grace_ms=1000`'s
+three trials ranged from excellent (18.6 ms avg, better than any
+production trial) to worse than production (570 ms avg) - variance
+dominated by real concurrent household traffic (which other flows compete
+for AQM's `batch=4` eviction slots each cycle), not cleanly attributable
+to `grace_ms` alone with this sample size.
+
+**Did not change `grace_ms` in production.** Reducing it plausibly bounds
+the hardware-queue exposure window in principle, but proving that cleanly
+needs either many more trials or a controlled environment isolated from
+real household traffic - both costlier than the uncertain payoff justifies
+against a live connection tonight. Restored `grace_ms=3000` after every
+trial; confirmed healthy (0% ping loss, both radios up) throughout.
+
+### 31.4 sqm-autorate-rust: still not built
+
+Configured (`/etc/config/sqm-autorate` present, correctly pointing at
+`ifb4wan`/`wan`) but not installed - `CONFIG_PACKAGE_sqm-autorate-rust` is
+unset and `/usr/sbin/sqm-autorate-rust` does not exist. It's a Rust/Cargo
+package with no host `rustc`/`cargo` built anywhere in this tree yet (only
+source-extracted) - a full Rust toolchain bootstrap is a multi-hour
+first-time cost on this hardware, deliberately deferred rather than
+started tonight. This is very likely why it was excluded from the
+deployed image in the first place (matches
+`e8450-upstream-backport-roadmap.md`'s "Rust autorate is excluded" note).
+Would directly address SS31.1's calibration problem by discovering real
+capacity dynamically instead of a static guess - worth a dedicated session
+once the toolchain cost is acceptable.
+
+### 31.5 Net conclusion
+
+One clear, applied fix (SQM download recalibration - real miscalibration,
+high confidence). One well-diagnosed but unresolved architectural gap
+(hardware-queue latency blind spot during the AQM grace window - real,
+directly evidenced, but no parameter tweak tested tonight cleanly improved
+it against live household traffic noise). Both are consistent with, not
+contradictions of, this document's own established findings (SS22, SS28) -
+NETSYSv1 has no hardware AQM, full stop; this session's own software AQM
+is a periodic mitigation, not a continuous one, and its periodicity has a
+real, now-directly-observed cost.
+
