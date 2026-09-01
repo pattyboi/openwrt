@@ -1,0 +1,335 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] mac80211: parameterize IEEE80211_MIN_ACTION_SIZE
+
+Newer mt76 (2026-08-04 pin) calls IEEE80211_MIN_ACTION_SIZE(addba_req.capab)
+to compute the minimum frame size up to and including a specific action
+subtype's payload, but this tree's macro is still the older
+argument-less form (base offset of the action union only), so the call
+expands to offsetof(...)(addba_req.capab) - calling an integer as a
+function - and fails to build.
+
+Make the macro variadic with __VA_OPT__: called with no arguments it
+expands to exactly the previous offsetof(struct ieee80211_mgmt,
+u.action.u), byte-for-byte identical to today's behavior; called with a
+field path it appends '.<field>' to reach that action subtype's start.
+Update every existing argument-less call site tree-wide (this header's
+own seven, plus net/mac80211/s1g.c, mesh_plink.c, mesh_hwmp.c, ibss.c,
+and rx.c - 28 in total) to the new explicit-empty-args form.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/include/linux/ieee80211.h
++++ b/include/linux/ieee80211.h
+@@ -1636,7 +1636,8 @@
+ #define BSS_MEMBERSHIP_SELECTOR_MIN	BSS_MEMBERSHIP_SELECTOR_EHT_PHY
+ 
+ /* mgmt header + 1 byte category code */
+-#define IEEE80211_MIN_ACTION_SIZE offsetof(struct ieee80211_mgmt, u.action.u)
++#define IEEE80211_MIN_ACTION_SIZE(...) \
++	offsetof(struct ieee80211_mgmt, u.action.u __VA_OPT__(.) __VA_ARGS__)
+ 
+ 
+ /* Management MIC information element (IEEE 802.11w) */
+@@ -4691,7 +4692,7 @@
+  */
+ static inline bool ieee80211_is_robust_mgmt_frame(struct sk_buff *skb)
+ {
+-	if (skb->len < IEEE80211_MIN_ACTION_SIZE)
++	if (skb->len < IEEE80211_MIN_ACTION_SIZE())
+ 		return false;
+ 	return _ieee80211_is_robust_mgmt_frame((void *)skb->data);
+ }
+@@ -4707,7 +4708,7 @@
+ {
+ 	struct ieee80211_mgmt *mgmt = (void *)hdr;
+ 
+-	if (len < IEEE80211_MIN_ACTION_SIZE)
++	if (len < IEEE80211_MIN_ACTION_SIZE())
+ 		return false;
+ 	if (!ieee80211_is_action(hdr->frame_control))
+ 		return false;
+@@ -4728,10 +4729,10 @@
+ 	u8 action;
+ 
+ 	if (!ieee80211_is_public_action((void *)skb->data, skb->len) ||
+-	    skb->len < IEEE80211_MIN_ACTION_SIZE + 1)
++	    skb->len < IEEE80211_MIN_ACTION_SIZE() + 1)
+ 		return false;
+ 
+-	action = *(u8 *)(skb->data + IEEE80211_MIN_ACTION_SIZE);
++	action = *(u8 *)(skb->data + IEEE80211_MIN_ACTION_SIZE());
+ 
+ 	return action != WLAN_PUB_ACTION_20_40_BSS_COEX &&
+ 		action != WLAN_PUB_ACTION_DSE_REG_LOC_ANN &&
+@@ -4770,7 +4771,7 @@
+  */
+ static inline bool ieee80211_is_group_privacy_action(struct sk_buff *skb)
+ {
+-	if (skb->len < IEEE80211_MIN_ACTION_SIZE)
++	if (skb->len < IEEE80211_MIN_ACTION_SIZE())
+ 		return false;
+ 	return _ieee80211_is_group_privacy_action((void *)skb->data);
+ }
+@@ -5114,7 +5115,7 @@
+ 	if (!ieee80211_is_action(mgmt->frame_control))
+ 		return false;
+ 
+-	if (skb->len < IEEE80211_MIN_ACTION_SIZE +
++	if (skb->len < IEEE80211_MIN_ACTION_SIZE() +
+ 		       sizeof(mgmt->u.action.u.tpc_report))
+ 		return false;
+ 
+@@ -5155,7 +5156,7 @@
+ {
+ 	struct ieee80211_mgmt *mgmt = (void *)skb->data;
+ 
+-	if (skb->len < IEEE80211_MIN_ACTION_SIZE)
++	if (skb->len < IEEE80211_MIN_ACTION_SIZE())
+ 		return false;
+ 
+ 	if (!ieee80211_is_action(mgmt->frame_control))
+--- a/net/mac80211/s1g.c
++++ b/net/mac80211/s1g.c
+@@ -34,7 +34,7 @@
+ ieee80211_s1g_send_twt_setup(struct ieee80211_sub_if_data *sdata, const u8 *da,
+ 			     const u8 *bssid, struct ieee80211_twt_setup *twt)
+ {
+-	int len = IEEE80211_MIN_ACTION_SIZE + 4 + twt->length;
++	int len = IEEE80211_MIN_ACTION_SIZE() + 4 + twt->length;
+ 	struct ieee80211_local *local = sdata->local;
+ 	struct ieee80211_mgmt *mgmt;
+ 	struct sk_buff *skb;
+@@ -71,12 +71,12 @@
+ 	u8 *id;
+ 
+ 	skb = dev_alloc_skb(local->hw.extra_tx_headroom +
+-			    IEEE80211_MIN_ACTION_SIZE + 2);
++			    IEEE80211_MIN_ACTION_SIZE() + 2);
+ 	if (!skb)
+ 		return;
+ 
+ 	skb_reserve(skb, local->hw.extra_tx_headroom);
+-	mgmt = skb_put_zero(skb, IEEE80211_MIN_ACTION_SIZE + 2);
++	mgmt = skb_put_zero(skb, IEEE80211_MIN_ACTION_SIZE() + 2);
+ 	mgmt->frame_control = cpu_to_le16(IEEE80211_FTYPE_MGMT |
+ 					  IEEE80211_STYPE_ACTION);
+ 	memcpy(mgmt->da, da, ETH_ALEN);
+--- a/net/mac80211/mesh_plink.c
++++ b/net/mac80211/mesh_plink.c
+@@ -1225,7 +1225,7 @@
+ 	u8 *baseaddr;
+ 
+ 	/* need action_code, aux */
+-	if (len < IEEE80211_MIN_ACTION_SIZE + 3)
++	if (len < IEEE80211_MIN_ACTION_SIZE() + 3)
+ 		return;
+ 
+ 	if (sdata->u.mesh.user_mpm)
+--- a/net/mac80211/mesh_hwmp.c
++++ b/net/mac80211/mesh_hwmp.c
+@@ -938,7 +938,7 @@
+ 	struct sta_info *sta;
+ 
+ 	/* need action_code */
+-	if (len < IEEE80211_MIN_ACTION_SIZE + 1)
++	if (len < IEEE80211_MIN_ACTION_SIZE() + 1)
+ 		return;
+ 
+ 	rcu_read_lock();
+--- a/net/mac80211/ibss.c
++++ b/net/mac80211/ibss.c
+@@ -890,7 +890,7 @@
+ {
+ 	int required_len;
+ 
+-	if (len < IEEE80211_MIN_ACTION_SIZE + 1)
++	if (len < IEEE80211_MIN_ACTION_SIZE() + 1)
+ 		return;
+ 
+ 	/* CSA is the only action we handle for now */
+@@ -898,7 +898,7 @@
+ 	    WLAN_ACTION_SPCT_CHL_SWITCH)
+ 		return;
+ 
+-	required_len = IEEE80211_MIN_ACTION_SIZE +
++	required_len = IEEE80211_MIN_ACTION_SIZE() +
+ 		       sizeof(mgmt->u.action.u.chan_switch);
+ 	if (len < required_len)
+ 		return;
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -268,7 +268,7 @@
+ 	if (!sdata)
+ 		return;
+ 
+-	BUILD_BUG_ON(sizeof(action) != IEEE80211_MIN_ACTION_SIZE + 1);
++	BUILD_BUG_ON(sizeof(action) != IEEE80211_MIN_ACTION_SIZE() + 1);
+ 
+ 	if (skb->len < rtap_space + sizeof(action) +
+ 		       VHT_MUMIMO_GROUPS_DATA_LEN)
+@@ -1081,7 +1081,7 @@
+ 			u8 category;
+ 
+ 			/* make sure category field is present */
+-			if (rx->skb->len < IEEE80211_MIN_ACTION_SIZE)
++			if (rx->skb->len < IEEE80211_MIN_ACTION_SIZE())
+ 				return RX_DROP;
+ 
+ 			mgmt = (struct ieee80211_mgmt *)hdr;
+@@ -3425,7 +3425,7 @@
+ 
+ 	/* drop too small action frames */
+ 	if (ieee80211_is_action(mgmt->frame_control) &&
+-	    rx->skb->len < IEEE80211_MIN_ACTION_SIZE)
++	    rx->skb->len < IEEE80211_MIN_ACTION_SIZE())
+ 		return RX_DROP_U_RUNT_ACTION;
+ 
+ 	/* Drop non-broadcast Beacon frames */
+@@ -3478,7 +3478,7 @@
+ 	case WLAN_S1G_TWT_SETUP: {
+ 		struct ieee80211_twt_setup *twt;
+ 
+-		if (rx->skb->len < IEEE80211_MIN_ACTION_SIZE +
++		if (rx->skb->len < IEEE80211_MIN_ACTION_SIZE() +
+ 				   1 + /* action code */
+ 				   sizeof(struct ieee80211_twt_setup) +
+ 				   2 /* TWT req_type agrt */)
+@@ -3488,7 +3488,7 @@
+ 		if (twt->element_id != WLAN_EID_S1G_TWT)
+ 			break;
+ 
+-		if (rx->skb->len < IEEE80211_MIN_ACTION_SIZE +
++		if (rx->skb->len < IEEE80211_MIN_ACTION_SIZE() +
+ 				   4 + /* action code + token + tlv */
+ 				   twt->length)
+ 			break;
+@@ -3496,7 +3496,7 @@
+ 		return true; /* queue the frame */
+ 	}
+ 	case WLAN_S1G_TWT_TEARDOWN:
+-		if (rx->skb->len < IEEE80211_MIN_ACTION_SIZE + 2)
++		if (rx->skb->len < IEEE80211_MIN_ACTION_SIZE() + 2)
+ 			break;
+ 
+ 		return true; /* queue the frame */
+@@ -3538,7 +3538,7 @@
+ 			break;
+ 
+ 		/* verify action & smps_control/chanwidth are present */
+-		if (len < IEEE80211_MIN_ACTION_SIZE + 2)
++		if (len < IEEE80211_MIN_ACTION_SIZE() + 2)
+ 			goto invalid;
+ 
+ 		switch (mgmt->u.action.u.ht_smps.action) {
+@@ -3605,7 +3605,7 @@
+ 		break;
+ 	case WLAN_CATEGORY_PUBLIC:
+ 	case WLAN_CATEGORY_PROTECTED_DUAL_OF_ACTION:
+-		if (len < IEEE80211_MIN_ACTION_SIZE + 1)
++		if (len < IEEE80211_MIN_ACTION_SIZE() + 1)
+ 			goto invalid;
+ 		if (sdata->vif.type != NL80211_IFTYPE_STATION)
+ 			break;
+@@ -3629,18 +3629,18 @@
+ 			break;
+ 
+ 		/* verify action code is present */
+-		if (len < IEEE80211_MIN_ACTION_SIZE + 1)
++		if (len < IEEE80211_MIN_ACTION_SIZE() + 1)
+ 			goto invalid;
+ 
+ 		switch (mgmt->u.action.u.vht_opmode_notif.action_code) {
+ 		case WLAN_VHT_ACTION_OPMODE_NOTIF: {
+ 			/* verify opmode is present */
+-			if (len < IEEE80211_MIN_ACTION_SIZE + 2)
++			if (len < IEEE80211_MIN_ACTION_SIZE() + 2)
+ 				goto invalid;
+ 			goto queue;
+ 		}
+ 		case WLAN_VHT_ACTION_GROUPID_MGMT: {
+-			if (len < IEEE80211_MIN_ACTION_SIZE + 25)
++			if (len < IEEE80211_MIN_ACTION_SIZE() + 25)
+ 				goto invalid;
+ 			goto queue;
+ 		}
+@@ -3657,22 +3657,22 @@
+ 			break;
+ 
+ 		/* verify action_code is present */
+-		if (len < IEEE80211_MIN_ACTION_SIZE + 1)
++		if (len < IEEE80211_MIN_ACTION_SIZE() + 1)
+ 			break;
+ 
+ 		switch (mgmt->u.action.u.addba_req.action_code) {
+ 		case WLAN_ACTION_ADDBA_REQ:
+-			if (len < (IEEE80211_MIN_ACTION_SIZE +
++			if (len < (IEEE80211_MIN_ACTION_SIZE() +
+ 				   sizeof(mgmt->u.action.u.addba_req)))
+ 				goto invalid;
+ 			break;
+ 		case WLAN_ACTION_ADDBA_RESP:
+-			if (len < (IEEE80211_MIN_ACTION_SIZE +
++			if (len < (IEEE80211_MIN_ACTION_SIZE() +
+ 				   sizeof(mgmt->u.action.u.addba_resp)))
+ 				goto invalid;
+ 			break;
+ 		case WLAN_ACTION_DELBA:
+-			if (len < (IEEE80211_MIN_ACTION_SIZE +
++			if (len < (IEEE80211_MIN_ACTION_SIZE() +
+ 				   sizeof(mgmt->u.action.u.delba)))
+ 				goto invalid;
+ 			break;
+@@ -3683,7 +3683,7 @@
+ 		goto queue;
+ 	case WLAN_CATEGORY_SPECTRUM_MGMT:
+ 		/* verify action_code is present */
+-		if (len < IEEE80211_MIN_ACTION_SIZE + 1)
++		if (len < IEEE80211_MIN_ACTION_SIZE() + 1)
+ 			break;
+ 
+ 		switch (mgmt->u.action.u.measurement.action_code) {
+@@ -3691,7 +3691,7 @@
+ 			if (status->band != NL80211_BAND_5GHZ)
+ 				break;
+ 
+-			if (len < (IEEE80211_MIN_ACTION_SIZE +
++			if (len < (IEEE80211_MIN_ACTION_SIZE() +
+ 				   sizeof(mgmt->u.action.u.measurement)))
+ 				break;
+ 
+@@ -3702,7 +3702,7 @@
+ 			goto handled;
+ 		case WLAN_ACTION_SPCT_CHL_SWITCH: {
+ 			u8 *bssid;
+-			if (len < (IEEE80211_MIN_ACTION_SIZE +
++			if (len < (IEEE80211_MIN_ACTION_SIZE() +
+ 				   sizeof(mgmt->u.action.u.chan_switch)))
+ 				break;
+ 
+@@ -3728,7 +3728,7 @@
+ 		}
+ 		break;
+ 	case WLAN_CATEGORY_SELF_PROTECTED:
+-		if (len < (IEEE80211_MIN_ACTION_SIZE +
++		if (len < (IEEE80211_MIN_ACTION_SIZE() +
+ 			   sizeof(mgmt->u.action.u.self_prot.action_code)))
+ 			break;
+ 
+@@ -3750,7 +3750,7 @@
+ 		}
+ 		break;
+ 	case WLAN_CATEGORY_MESH_ACTION:
+-		if (len < (IEEE80211_MIN_ACTION_SIZE +
++		if (len < (IEEE80211_MIN_ACTION_SIZE() +
+ 			   sizeof(mgmt->u.action.u.mesh_action.action_code)))
+ 			break;
+ 
+@@ -3921,7 +3921,7 @@
+ 
+ 	switch (mgmt->u.action.category) {
+ 	case WLAN_CATEGORY_SA_QUERY:
+-		if (len < (IEEE80211_MIN_ACTION_SIZE +
++		if (len < (IEEE80211_MIN_ACTION_SIZE() +
+ 			   sizeof(mgmt->u.action.u.sa_query)))
+ 			break;
+ 

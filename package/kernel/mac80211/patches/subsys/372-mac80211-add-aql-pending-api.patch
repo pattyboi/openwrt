@@ -1,0 +1,54 @@
+From 9a197e71eb7b4e82c2f9bc10e1c6d6445aa1ef9d Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Tue, 28 Jul 2026 16:02:03 +0200
+Subject: [PATCH] mac80211: add ieee80211_txq_aql_pending()
+
+Add a function to allow drivers to query the pending AQL airtime
+for a given txq, for both unicast and broadcast. This is used by
+mt76 to limit buffering in AP mode for power-save stations.
+
+This tree names the multicast AQL accumulator aql_bc_pending_airtime;
+use that existing backport field instead of the upstream
+ aql_mc_pending_airtime name.
+
+Upstream commit: 9a197e71eb7b4e82c2f9bc10e1c6d6445aa1ef9d
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ include/net/mac80211.h | 11 +++++++++++
+ net/mac80211/tx.c      | 18 ++++++++++++++++++
+ 2 files changed, 29 insertions(+)
+
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -6636,0 +6636,11 @@
++/**
++ * ieee80211_txq_aql_pending - get pending AQL airtime for a txq
++ *
++ * @hw: pointer obtained from ieee80211_alloc_hw()
++ * @txq: pointer obtained from station or virtual interface
++ *
++ * Return: pending airtime (in usec) for the given txq.
++ */
++u32 ieee80211_txq_aql_pending(struct ieee80211_hw *hw,
++			      struct ieee80211_txq *txq);
++
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -4186,0 +4186,17 @@
++u32 ieee80211_txq_aql_pending(struct ieee80211_hw *hw,
++			      struct ieee80211_txq *txq)
++{
++	struct ieee80211_local *local = hw_to_local(hw);
++	struct sta_info *sta;
++
++	if (unlikely(txq->tid == IEEE80211_NUM_TIDS))
++		return 0;
++
++	if (!txq->sta)
++		return atomic_read(&local->aql_bc_pending_airtime);
++
++	sta = container_of(txq->sta, struct sta_info, sta);
++
++	return atomic_read(&sta->airtime[txq->ac].aql_tx_pending);
++}
++EXPORT_SYMBOL(ieee80211_txq_aql_pending);

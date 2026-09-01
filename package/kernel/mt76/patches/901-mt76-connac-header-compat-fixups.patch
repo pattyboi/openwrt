@@ -1,0 +1,74 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] mt76: connac: fix two compat gaps against this tree's ieee80211.h
+
+Two independent fixups needed to build the 2026-08-04 mt76 pin against
+this tree's mac80211 backports headers:
+
+1. mt76_connac_mcu.c added three
+   "case NL80211_IFTYPE_NAN: case NL80211_IFTYPE_NAN_DATA:" fall-through
+   pairs alongside the mt7925 NAN feature work (2026-06-25..08-24). This
+   tree's nl80211_iftype enum does not define NL80211_IFTYPE_NAN_DATA and
+   does not build kmod-mt7925e/kmod-mt7996e (the only drivers upstream
+   that can ever construct that interface type), so the symbol is both
+   undefined and unreachable here. Rather than add
+   NL80211_IFTYPE_NAN_DATA to the shared nl80211_iftype enum - which
+   cascades into -Werror=switch failures across unrelated exhaustive
+   switches in cfg80211/mac80211 core (net/wireless/core.c,
+   net/mac80211/iface.c, ...) that would each need a defensible case arm
+   guessed for a feature this tree cannot build a driver for - drop the
+   three dangling NAN_DATA case labels. Falls through to the existing
+   NAN handling simply not applying to NAN_DATA, which is correct: this
+   build can never create that interface type.
+
+2. mt76_connac_mac.c's ADDBA-request TX path accesses
+   mgmt->u.action.action_code and mgmt->u.action.addba_req.capab
+   directly. This tree's struct ieee80211_mgmt still nests the action
+   subtype union under a named 'u' member
+   (mgmt->u.action.u.addba_req...), unlike whatever upstream tree this
+   mt76 snapshot was written against, where that union is anonymous.
+   Add the missing '.u.' to match this tree's actual layout instead of
+   restructuring ieee80211_mgmt itself, which is referenced by its old
+   nested form in hundreds of other call sites across mac80211 core and
+   every other driver.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/mt76_connac_mcu.c
++++ b/mt76_connac_mcu.c
+@@ -466,7 +466,6 @@
+ 		basic->aid = cpu_to_le16(link_sta->sta->aid);
+ 		break;
+ 	case NL80211_IFTYPE_NAN:
+-	case NL80211_IFTYPE_NAN_DATA:
+ 		basic->conn_type = cpu_to_le32(CONNECTION_NAN);
+ 		break;
+ 	default:
+@@ -1265,7 +1264,6 @@
+ 		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_IBSS_ADHOC);
+ 		break;
+ 	case NL80211_IFTYPE_NAN:
+-	case NL80211_IFTYPE_NAN_DATA:
+ 		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_NAN);
+ 		basic_req.basic.conn_state = !enable;
+ 		break;
+@@ -1680,7 +1678,6 @@
+ 		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_IBSS_ADHOC);
+ 		break;
+ 	case NL80211_IFTYPE_NAN:
+-	case NL80211_IFTYPE_NAN_DATA:
+ 		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_NAN);
+ 		basic_req.basic.active = enable;
+ 		break;
+--- a/mt76_connac_mac.c
++++ b/mt76_connac_mac.c
+@@ -424,8 +424,8 @@
+ 	if (ieee80211_is_action(fc) &&
+ 	    skb->len >= IEEE80211_MIN_ACTION_SIZE(addba_req.capab) &&
+ 	    mgmt->u.action.category == WLAN_CATEGORY_BACK &&
+-	    mgmt->u.action.action_code == WLAN_ACTION_ADDBA_REQ) {
+-		u16 capab = le16_to_cpu(mgmt->u.action.addba_req.capab);
++	    mgmt->u.action.u.addba_req.action_code == WLAN_ACTION_ADDBA_REQ) {
++		u16 capab = le16_to_cpu(mgmt->u.action.u.addba_req.capab);
+ 
+ 		txwi[5] |= cpu_to_le32(MT_TXD5_ADD_BA);
+ 		tid = (capab >> 2) & IEEE80211_QOS_CTL_TID_MASK;

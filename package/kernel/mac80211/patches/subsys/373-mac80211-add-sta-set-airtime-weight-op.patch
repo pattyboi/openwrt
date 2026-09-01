@@ -1,0 +1,46 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] mac80211: add sta_set_airtime_weight driver op
+
+Add the sta_set_airtime_weight callback to struct ieee80211_ops so
+out-of-tree drivers (mt76's HW ATF support, upstream commit
+6b7b98627bcc "wifi: mt76: mt7915: HW ATF support for mt7986+", merged
+2026-06-29) can register a hardware-airtime-fairness callback.
+
+This tree does not add a mac80211-core caller for the op (no in-tree
+driver needs mac80211 to invoke it directly: mt7915's own
+mt7915_sta_set_airtime_weight() is a no-op on mt7915 - HW ATF is
+enabled only on mt7916 and newer - and MT7996 support is not built in
+this configuration). This patch exists solely so mt7915/mt7996's
+`const struct ieee80211_ops` designated initializer compiles; adding
+this local mac80211 struct field is sufficient because ieee80211_ops
+is populated with C99 designated initializers, so drivers assigning
+one more optional field costs nothing for drivers that don't use it.
+
+IEEE80211_DEFAULT_AIRTIME_WEIGHT (referenced by mt7915's HW ATF code)
+already exists in this tree's include/net/cfg80211.h; no change needed
+for that symbol.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -4484,6 +4484,9 @@
+  * @set_sar_specs: Update the SAR (TX power) settings.
+  * @sta_set_decap_offload: Called to notify the driver when a station is allowed
+  *	to use rx decapsulation offload
++ * @sta_set_airtime_weight: Update the airtime weight the driver should use for
++ *	a given station, e.g. to program a hardware airtime-fairness scheduler.
++ *	This callback can sleep.
+  * @add_twt_setup: Update hw with TWT agreement parameters received from the peer.
+  *	This callback allows the hw to check if requested parameters
+  *	are supported and if there is enough room for a new agreement.
+@@ -4896,6 +4899,9 @@
+ 	void (*sta_set_decap_offload)(struct ieee80211_hw *hw,
+ 				      struct ieee80211_vif *vif,
+ 				      struct ieee80211_sta *sta, bool enabled);
++	void (*sta_set_airtime_weight)(struct ieee80211_hw *hw,
++				       struct ieee80211_vif *vif,
++				       struct ieee80211_sta *sta, u16 weight);
+ 	void (*add_twt_setup)(struct ieee80211_hw *hw,
+ 			      struct ieee80211_sta *sta,
+ 			      struct ieee80211_twt_setup *twt);

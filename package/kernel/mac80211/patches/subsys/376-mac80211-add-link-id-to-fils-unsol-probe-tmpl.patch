@@ -1,0 +1,113 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] mac80211: add link_id to FILS/unsol-probe template getters
+
+mt7915/mcu.c (2026-08-04 mt76 pin) calls
+ieee80211_get_fils_discovery_tmpl(hw, vif, 0) and
+ieee80211_get_unsol_bcast_probe_resp_tmpl(hw, vif, 0) with a third
+link_id argument, matching the per-link API extension pattern applied
+elsewhere in mac80211 during 2026 (e.g. FILS discovery/unsolicited
+probe response templates becoming per-link, alongside
+ieee80211_obss_color_collision_notify's existing u8 link_id
+parameter), but this tree's copies of both functions still take only
+(hw, vif).
+
+Add the link_id parameter using the same lookup idiom already used by
+ieee80211_nullfunc_get() in this file: link_id 0 (the only value any
+driver in this tree passes) keeps using sdata->deflink exactly as
+before; a nonzero link_id looks up sdata->link[link_id] instead. No
+other caller in this tree's mac80211 core uses either function.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -7699,19 +7699,22 @@
+  * ieee80211_get_fils_discovery_tmpl - Get FILS discovery template.
+  * @hw: pointer obtained from ieee80211_alloc_hw().
+  * @vif: &struct ieee80211_vif pointer from the add_interface callback.
++ * @link_id: the link ID to get the template for, 0 for non-MLO.
+  *
+  * The driver is responsible for freeing the returned skb.
+  *
+  * Return: FILS discovery template. %NULL on error.
+  */
+ struct sk_buff *ieee80211_get_fils_discovery_tmpl(struct ieee80211_hw *hw,
+-						  struct ieee80211_vif *vif);
++						  struct ieee80211_vif *vif,
++						  unsigned int link_id);
+ 
+ /**
+  * ieee80211_get_unsol_bcast_probe_resp_tmpl - Get unsolicited broadcast
+  *	probe response template.
+  * @hw: pointer obtained from ieee80211_alloc_hw().
+  * @vif: &struct ieee80211_vif pointer from the add_interface callback.
++ * @link_id: the link ID to get the template for, 0 for non-MLO.
+  *
+  * The driver is responsible for freeing the returned skb.
+  *
+@@ -7719,7 +7722,8 @@
+  */
+ struct sk_buff *
+ ieee80211_get_unsol_bcast_probe_resp_tmpl(struct ieee80211_hw *hw,
+-					  struct ieee80211_vif *vif);
++					  struct ieee80211_vif *vif,
++					  unsigned int link_id);
+ 
+ /**
+  * ieee80211_obss_color_collision_notify - notify userland about a BSS color
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -5857,17 +5857,24 @@
+ EXPORT_SYMBOL(ieee80211_proberesp_get);
+ 
+ struct sk_buff *ieee80211_get_fils_discovery_tmpl(struct ieee80211_hw *hw,
+-						  struct ieee80211_vif *vif)
++						  struct ieee80211_vif *vif,
++						  unsigned int link_id)
+ {
+ 	struct sk_buff *skb = NULL;
+ 	struct fils_discovery_data *tmpl = NULL;
+ 	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
++	struct ieee80211_link_data *link;
+ 
+ 	if (sdata->vif.type != NL80211_IFTYPE_AP)
+ 		return NULL;
+ 
+ 	rcu_read_lock();
+-	tmpl = rcu_dereference(sdata->deflink.u.ap.fils_discovery);
++	link = link_id ? rcu_dereference(sdata->link[link_id]) : &sdata->deflink;
++	if (!link) {
++		rcu_read_unlock();
++		return NULL;
++	}
++	tmpl = rcu_dereference(link->u.ap.fils_discovery);
+ 	if (!tmpl) {
+ 		rcu_read_unlock();
+ 		return NULL;
+@@ -5886,17 +5893,24 @@
+ 
+ struct sk_buff *
+ ieee80211_get_unsol_bcast_probe_resp_tmpl(struct ieee80211_hw *hw,
+-					  struct ieee80211_vif *vif)
++					  struct ieee80211_vif *vif,
++					  unsigned int link_id)
+ {
+ 	struct sk_buff *skb = NULL;
+ 	struct unsol_bcast_probe_resp_data *tmpl = NULL;
+ 	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
++	struct ieee80211_link_data *link;
+ 
+ 	if (sdata->vif.type != NL80211_IFTYPE_AP)
+ 		return NULL;
+ 
+ 	rcu_read_lock();
+-	tmpl = rcu_dereference(sdata->deflink.u.ap.unsol_bcast_probe_resp);
++	link = link_id ? rcu_dereference(sdata->link[link_id]) : &sdata->deflink;
++	if (!link) {
++		rcu_read_unlock();
++		return NULL;
++	}
++	tmpl = rcu_dereference(link->u.ap.unsol_bcast_probe_resp);
+ 	if (!tmpl) {
+ 		rcu_read_unlock();
+ 		return NULL;
