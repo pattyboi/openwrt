@@ -147,6 +147,51 @@ vendor changelog without independent verification.
   release existed, so this was the actual shortcut) so the rate now tracks
   real capacity continuously instead of a static guess. See
   [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md).
+- **Radio TX power raised to the legal ceiling via factory-eeprom
+  calibration** (2026-09-04): decoded the complete field map of both
+  radio eeproms (MT7622 WMAC 2.4G, MT7915 5G — V1 layout, not the
+  MT7916/MT7981-era V2 layout an off-the-shelf community tool assumes),
+  found the stock calibration ceiling (27/28 dBm) sat *below* the
+  regdomain limit on both bands, and raised it to 30 dBm with a
+  validated power model (`0.5 dBm/byte`) and a one-command apply/
+  revert tool. RSSI-measured real gain, not just register math: +4 dB
+  far-field on 5 GHz at a fixed test point. A router-side channel
+  survey (radios scanning while serving — undocumented capability
+  before this) then moved both bands off their most contested/noisiest
+  channels, including off the DFS channel (52) an earlier investigation
+  had flagged as a real instability source but lacked the on-site RF
+  survey to act on. See
+  [`../.recall/router-probes/2026-09-04-factory-dump/`](../.recall/router-probes/2026-09-04-factory-dump/)
+  (full map, dumps, RSSI logs) and
+  [`../scripts/e8450/eeprom.sh`](../scripts/e8450/eeprom.sh) (the tool).
+- **Download-direction bufferbloat root-caused as an upstream
+  `sqm-autorate-rust` bug, not a router-side shaping gap** (2026-09-04,
+  §36-38): an external "B" bufferbloat grade prompted checking the
+  download direction directly under load — real, severe latency spikes
+  reproduced, but direct `tc` telemetry showed CAKE's own ingress queue
+  at ~0 backlog throughout, exonerating this router's queue management
+  by measurement rather than inference. Root cause: the vendored
+  autorate tool's shaped-rate ramp had no upper clamp, silently
+  drifting to 6-7x the connection's real ~6-10 Mbit/s sustained
+  capacity (confirmed via an actual router-side speedtest, not a
+  public server). One-line fix restores the documented ceiling;
+  verified holding exactly at 10 Mbit under a genuine saturating
+  download, real bounded CAKE backlog, ping maxing at 92 ms instead of
+  2153 ms.
+- **PSE (Packet Switch Engine) per-port buffer thresholds: audited,
+  closed** (`999-qos-17`, 2026-09-04). The one register range never
+  covered by qos-01..16's QDMA-scoped debugfs work. Built a read-only
+  diagnostic (mirrors `999-qos-01`'s exact scope), flashed live, and
+  read `PSE_IQ_REV`/`PSE_OQ_TH` as all-zero — confirmed by source: the
+  driver's PSE-threshold init code has no NETSYSv1 code path at all.
+  Joins QDMA scheduler-1 and `HRED2`/`fc_th` as a third confirmed-inert
+  hardware avenue on this chip. Also corrected an earlier hypothesis
+  about how this chip routes WLAN-egress hardware-offloaded flows, with
+  stronger evidence: `mtk_foe_entry_set_wdma()`/`mtk_foe_entry_set_queue()`
+  write mutually exclusive flow-table bitfields, so WLAN-bound offloaded
+  downloads never carry a QDMA queue ID — whether that means they
+  bypass CAKE shaping entirely is the one open question tracked in
+  [`e8450-download-shaping-handoff.md`](e8450-download-shaping-handoff.md).
 
 ## Architecture
 
@@ -201,7 +246,8 @@ and no patch can add that without new silicon.
 | [`e8450-upstream-backport-roadmap.md`](e8450-upstream-backport-roadmap.md) | Tracking sheet for which local patches are hand-backports of commits later merged upstream, and candidates for future pin bumps. |
 | [`wed-v1-opportunities.md`](wed-v1-opportunities.md) | Survey of WED-v1-specific opportunities and their disposition. |
 | [`WED-breadcrumb-harness-design.md`](WED-breadcrumb-harness-design.md) | Recovered from an earlier, since-abandoned investigation branch (preserved at git tag `archive/wed-ser-investigation-2026-07-12`); the closing writeup on the controlled-SER MCU-death investigation this fork's own testing later independently reproduced. |
-| [`wifi-cpu-and-stability-investigation.md`](wifi-cpu-and-stability-investigation.md) | 2.4GHz MT7615/WMAC CPU-overhead reduction (IRQ affinity, mt76 core DMA fix) and MT7915 5GHz connection-stability findings (DFS channel-52 radar switching, rate-control/AMPDU/roaming-assist candidates investigated and mostly found low-value or unavailable). |
+| [`wifi-cpu-and-stability-investigation.md`](wifi-cpu-and-stability-investigation.md) | 2.4GHz MT7615/WMAC CPU-overhead reduction (IRQ affinity, mt76 core DMA fix) and MT7915 5GHz connection-stability findings (DFS channel-52 radar switching, rate-control/AMPDU/roaming-assist candidates investigated and mostly found low-value or unavailable — the DFS channel finding was later acted on directly, see the radio-calibration note below). |
+| [`e8450-download-shaping-handoff.md`](e8450-download-shaping-handoff.md) | Download-direction bufferbloat: the real root cause (an upstream `sqm-autorate-rust` ceiling bug, fixed) versus the one still-open architectural question (does a real Wi-Fi client's hardware-offloaded download bypass CAKE), with the register-level FOE-bitfield evidence and the PSE closure that ruled out a hardware-shaping alternative. |
 
 ## Repo-specific notes for anyone building this
 
@@ -211,6 +257,16 @@ and no patch can add that without new silicon.
   `e8450-ppe-validation.md`'s controlled-SER section) — no fix exists at the
   driver level, so this bounds the outage instead. Self-enabling via
   `files/etc/rc.d/S99mt7915-ser-watchdog`.
+- Both radio eeproms were raised from their stock calibration ceiling
+  to the legal 30 dBm maximum, and the 5/2.4 GHz channels moved off
+  their most contested channels (including off DFS channel 52). Fully
+  reversible: pristine backup + one-command tool at
+  `scripts/e8450/eeprom.sh`, full field map and revert procedure at
+  `.recall/router-probes/2026-09-04-factory-dump/EEPROM-MAP.md`. If you
+  build and flash this tree for a *different physical unit*, do not
+  assume its factory calibration matches — dump and check with
+  `eeprom.sh check` before assuming the same bytes apply; per-device
+  calibration regions are unit-specific and flagged in the map.
 - `files/usr/sbin/sqm-autorate-rust` is a hand-built binary sidecar, not an
   opkg-managed package — `CONFIG_PACKAGE_sqm-autorate-rust` is deliberately
   left unset since a normal `make` of it still hits the full from-source
