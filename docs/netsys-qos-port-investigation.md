@@ -43,7 +43,7 @@ accuracy/targeting improvements. See `docs/README.md` for the repo-wide
 index.
 
 
-Status: COMPLETE through §36. The QoS investigation and production verdict
+Status: COMPLETE through §37. The QoS investigation and production verdict
 are complete, and the hardware-capability question is closed: every
 plausible NETSYSv1 QDMA AQM/HQoS register has now been hardware-tested.
 qos-01 through qos-13 and the `qdma-shaper` backend/UCI package are
@@ -74,7 +74,14 @@ new production default - consistently lower latency and, uniquely,
 zero packet loss across every rep), `poll_ms` stayed at 100 (tested,
 effect too small/inconsistent to justify changing). §34's remaining item
 1 (dedicated CPU-time profiling to quantify qos-15's savings) is still
-open.
+open. §37 checked `sqm-autorate-rust`'s `download_base_kbits`/
+`download_min_percent` against the confirmed contracted ISP plan
+(75/10 Mbps) and found, by reading the vendored source directly, that
+those options are not a rate ceiling at all - only a floor and a minor
+nudge term - so §36's "download ceiling calibrated above capacity"
+theory needed correcting: the real gap is the vendored tool's lack of
+any upper-bound clamp, confirmed live by watching the shaped rate swing
+from its 6 Mbit floor to 69.5 Mbit and back within one boot.
 **Reference HQoS stack:** `flow_offloading=1/hw=1`, persistent HQoS (`q7` bulk
 at 8300 kbps, `q8` priority), qos-06+qos-12+qos-13 byte-accurate
 flow-aware AQM on q7, and nftables ct-mark steering.
@@ -3307,15 +3314,13 @@ confirmed by direct `tc` telemetry sampled *during* saturating load, not
 inferred. A "B" external bufferbloat grade with this evidence in hand
 points at causes this document's whole investigation cannot reach from
 the OpenWrt side: real household multi-client contention (not a bug,
-just real usage) and/or `sqm-autorate-rust`'s download ceiling being
-calibrated well above the connection's actual sustained capacity. The
-concrete next step, if the operator wants to chase this further, is
-**not** another kernel patch - it's checking the actual contracted ISP
-download speed against `sqm-autorate-rust`'s `download_base_kbits`
-(currently `64000`) and `download_min_percent` (`60`, i.e. a floor of
-~38 Mbit) and lowering both if the real plan is smaller, so autorate's
-own RTT-based backoff logic gets a realistic ceiling to scale down from
-instead of one 5-10x the connection's real sustained rate.
+just real usage) and/or `sqm-autorate-rust`'s adaptive rate ramp
+outrunning the connection's actual sustained capacity between OWD-
+detected pullbacks (see SS37 - this was checked directly against the
+contracted ISP plan and the tool's actual source and turned out to be
+more specific, and less simply-fixable, than "lower a config number":
+`download_base_kbits`/`download_min_percent` are not a ceiling in this
+tool's algorithm).
 
 ### 36.5 Follow-up: is this DOCSIS-side bufferbloat? (2026-09-04)
 
@@ -3413,6 +3418,125 @@ specific tool's loaded phase, and separately, ask Comcast (or check
 the modem's own DOCSIS event log, if accessible) whether Internet
 Essentials is provisioned with different QoS/service-flow parameters
 than their standard tiers on this node.
+
+## 37. Checking `download_base_kbits`/`download_min_percent` against the contracted ISP plan (2026-09-04)
+
+Direct follow-up on SS36.4's own suggested next step. Confirmed with the
+operator: this connection is Xfinity/Comcast **Internet Essentials**,
+contracted at **75 Mbps down / 10 Mbps up**.
+
+### 37.1 The premise was wrong: `download_base_kbits` is not a ceiling
+
+SS36.4 assumed `download_base_kbits`/`download_min_percent` bound the
+shaper from above ("currently `64000`... a floor of ~38 Mbit... lowering
+both if the real plan is smaller"). Both parts of that were checked
+directly and don't hold:
+
+- **The `64000` figure was already stale when SS36 was written.** The
+  tracked config, and the live router's `/etc/config/sqm-autorate`
+  (read directly over SSH), both already say `download_base_kbits
+  '10000'` - recalibrated three days earlier (SS31.1, commit
+  `d3dd97edd1`). SS36's own author never re-checked the live config
+  before writing "currently 64000."
+- **`download_base_kbits`/`download_min_percent` are not a ceiling in
+  this tool at all.** Read the pinned source
+  (`Lochnair/sqm-autorate-rust`, `src/ratecontroller.rs`) directly:
+  `download_min_kbits()` (`base * min_percent / 100`) is used only as a
+  **floor** (`state.next_rate = state.next_rate.max(min_rate)`) and as
+  the boot-time initial rate (60% of base). The up-ramp formula -
+  `next_rate = current_rate * (1.0 + 0.1 * (1.0 - current_rate/max_safe_rate).max(0.0))
+  + base_rate * 0.03` - has **no corresponding `.min()` clamp anywhere
+  in the file**. As long as measured load stays high and the reflector
+  OWD delta stays under `download_delay_ms` (15 ms default), the shaped
+  rate keeps climbing every tick with no upper bound tied to
+  `download_base_kbits`; the only thing that ever pulls it back down is
+  a detected OWD spike.
+
+### 37.2 Confirmed live: the shaped rate is nowhere near the 6 Mbit floor
+
+Pulled the live `tc qdisc show dev ifb4wan`/`dev wan` bandwidth (ground
+truth - not the CSV, not the config file) three times over about 10
+minutes on the router's current boot (up 6.5 h at the time of the first
+read):
+
+| time | download (`ifb4wan`) | upload (`wan`) |
+|---|---:|---:|
+| T+0 | 69,507 kbit | 9,595 kbit |
+| T+~5 min | 5,412 -> 38,432 kbit (mid-ramp) | 5,412 kbit |
+| T+~10 min | 40,597 kbit | 5,412 kbit |
+
+(Upload column values are from `wan`, download from `ifb4wan`; the two
+snapshots weren't perfectly aligned to the same instant, so treat this
+as "swinging over a wide range," not a precise paired series.) Both
+directions were observed well above their `_base_kbits` (10,000 /
+8,300) and, at the high point, download reached 93% of the contracted
+75 Mbps line rate - a single-boot ramp from the 6,000/4,980 kbit floor
+all the way past base and toward line rate, exactly as SS37.1's reading
+of the algorithm predicts.
+
+A `tc`-backlog sample taken once per second during two ~20 s windows
+(no synthetic load added by this session - ordinary household traffic
+only, `wget` failed to add any: no SSL support in this image's
+`wget`) showed `ifb4wan` backlog was 0 most seconds but spiked to
+83,270 / 204,390 / 116,578 / 51,476 / 161,998 / 264,950 / 230,128 bytes
+in several individual samples - real, non-trivial queueing (a 265 KB
+backlog at a ~30-40 Mbit shaped rate is on the order of 50-70 ms of
+extra queuing delay) happening under ordinary load, not a synthetic
+test. Concurrent `ping -A` (150 pings, adaptive/fast interval) during
+one of these windows stayed clean regardless (16.2-41.5 ms, 0% loss) -
+CAKE's per-flow isolation kept the backlog contained to whichever flows
+were actually contending, without it landing on the ICMP flow that
+happened to be measured. This is consistent with, not contradicting,
+SS36.2's finding that CAKE itself manages its queue correctly; the
+point here is different - the *ceiling CAKE is shaping to* is itself
+drifting well past what SS31.1's dozens of iperf3/curl tests measured
+as sustained real throughput (0.3-8 Mbit/s), which is the mechanism
+SS36.5's candidate 1 ("a bursty phenomenon on a timescale autorate's
+control loop is deliberately insensitive to") already named.
+
+### 37.3 What this means, and what doesn't fix it
+
+Two readings coexist and both have direct evidence:
+
+1. SS31.1's synthetic single/multi-stream tests to public servers
+   consistently topped out at 0.3-8 Mbit/s with heavy retransmits.
+2. This session's live, organic-load `tc` reading shows the shaper
+   itself sustaining a 40-70 Mbit ceiling for extended periods without
+   a sustained OWD-detected pullback.
+
+These aren't necessarily contradictory - SS31.1's synthetic tests hit
+*specific remote servers/paths* that may themselves be bottlenecked or
+rate-limited independent of last-mine capacity, while autorate's climb
+is driven by whatever the *actual LAN clients* are doing, on whatever
+paths they're using. But it does mean the "0.3-8 Mbit/s is this
+connection's real capacity" conclusion from SS31.1/SS36.3 is not as
+settled as it was treated - the router's own adaptive tool is
+regularly asking for, and apparently getting, far more than that
+without triggering its own bufferbloat detector.
+
+**Lowering `download_base_kbits`/`download_min_percent` to match (or
+sit below) the 75 Mbps contracted line, per SS36.4's original
+suggestion, would not fix an overshoot problem** - per SS37.1, those
+options only set the floor and a minor nudge term; the algorithm will
+still ramp past them the same way it already ramps past the current
+10,000/8,300 base today. The floor itself (6,000/4,980 kbit, i.e.
+8%/50% of the contracted 75/10 Mbps line) is already conservative
+relative to SS31.1's worst observed readings and does not need
+lowering on the contracted-speed evidence alone.
+
+The only correctness lever this tool actually exposes for "stop
+overshooting" is the OWD sensitivity itself
+(`download_delay_ms`/`upload_delay_ms`, 15 ms default, SS35's tuning
+only touched `grace_ms`/`poll_ms` on the *kernel AQM* side, not these)
+- or a real upstream fix: `Lochnair/sqm-autorate-rust`'s
+`src/ratecontroller.rs` has no `max_kbits`/ceiling clamp at all in the
+pinned commit this fork vendors. Not attempted this round - a source
+patch to add one, or a `download_delay_ms` A/B, would each need their
+own live-hardware validation pass the same way SS33-35 validated the
+kernel-side changes, and is a real, scoped enough project to warrant
+its own session rather than a same-turn tweak.
+
+
 
 
 

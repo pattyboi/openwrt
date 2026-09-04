@@ -64,10 +64,20 @@ vendor changelog without independent verification.
   (`ifb4wan`) at ~0 backlog and <16 ms internal delay throughout - the
   router's own queue management is exonerated by direct measurement, not
   inference. The likely causes (10 real concurrently-associated
-  stations, and/or `sqm-autorate-rust`'s 64 Mbit download ceiling being
-  well above this connection's historically observed 0.3-8 Mbit/s real
-  throughput) are both outside anything a further kernel/CAKE patch on
-  this router could fix.
+  stations, and/or `sqm-autorate-rust`'s adaptive rate ramp outrunning
+  real sustained capacity between OWD-detected pullbacks) are both
+  outside anything a further kernel/CAKE patch on this router could fix.
+  A same-day follow-up (§37) checked that against the confirmed
+  contracted plan (Internet Essentials, 75/10 Mbps): `download_base_kbits`/
+  `download_min_percent` turned out **not** to be a ceiling at all (read
+  directly from the vendored `sqm-autorate-rust` source - they set only
+  the floor and a minor nudge term, with no `.min()` clamp on the
+  up-ramp), confirmed live by watching the shaped rate swing from its
+  6 Mbit floor up to 69.5 Mbit (93% of the contracted line) and back
+  within one boot. Lowering the base/percent config would not have
+  fixed an overshoot problem; the real gap is that the vendored
+  `sqm-autorate-rust` has no rate ceiling at all, only OWD-based
+  pullback - a real upstream gap, not a config error.
 - **Hash audit extended, rapidhash evaluated and rejected, both dormant
   conversions reverted**: swept the rest of the reachable kernel for
   jhash call sites matching the measured xxh32-winning size class and
