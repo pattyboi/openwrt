@@ -1,0 +1,74 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add read-only PSE debugfs
+
+Expose PSE (Packet Switch Engine) per-port buffer-occupancy registers
+(PSE_FQFC_CFG1/2, PSE_DROP_CFG, PSE_PPE_DROP, PSE_IQ_REV, PSE_OQ_TH)
+for register-pairing verification. This is the block that routes
+PPE-offloaded WLAN-egress flows (mtk_foe_entry_set_wdma, distinct from
+the QDMA-queue mtk_foe_entry_set_queue path qdma-shaper/qdma_aqm
+already cover) - never previously instrumented by this tree's QDMA
+debugfs work (qos-01..16).
+
+Read-only: no register writes, no queue changes, no WED operations.
+Intended to test the port-pairing hypothesis in
+docs/e8450-download-shaping-handoff.md against live register readback
+before any write is trusted, per this tree's own gate discipline
+(SS13 Gate A, SS28 dual-scheduler verification). Disposable diagnostic,
+like qos-01.
+
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1674,6 +1674,41 @@
+ 	.write	 = mtk_qdma_aqm_write,
+ };
+ 
++static int mtk_pse_debugfs_show(struct seq_file *s, void *unused)
++{
++	struct mtk_eth *eth = s->private;
++	unsigned int i;
++
++	if (!MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA))
++		return -EOPNOTSUPP;
++
++	seq_printf(s, "fqfc_cfg1=0x%08x fqfc_cfg2=0x%08x drop_cfg=0x%08x\n",
++		   mtk_r32(eth, PSE_FQFC_CFG1), mtk_r32(eth, PSE_FQFC_CFG2),
++		   mtk_r32(eth, PSE_DROP_CFG));
++
++	for (i = 0; i < 3; i++)
++		seq_printf(s, "ppe_drop(%u)=0x%08x\n", i,
++			   mtk_r32(eth, PSE_PPE_DROP(i)));
++
++	/* PSE_IQ_REV/PSE_OQ_TH pack two ports per register (low/high 16
++	 * bits); read-only, no writes. See docs/e8450-download-shaping-
++	 * handoff.md for the (unverified) port-pairing hypothesis this
++	 * dump is meant to test against a live comparison.
++	 */
++	for (i = 1; i <= 8; i++) {
++		u32 iq = mtk_r32(eth, PSE_IQ_REV(i));
++		u32 oq = mtk_r32(eth, PSE_OQ_TH(i));
++
++		seq_printf(s,
++			   "reg=%u iq_rev=0x%08x (lo=%u hi=%u) oq_th=0x%08x (lo=%u hi=%u)\n",
++			   i, iq, iq & 0xffff, iq >> 16,
++			   oq, oq & 0xffff, oq >> 16);
++	}
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(mtk_pse_debugfs);
++
+ static void mtk_qdma_debugfs_init(struct mtk_eth *eth)
+ {
+ 	struct dentry *root;
+@@ -1684,7 +1719,9 @@
+ 
+ 	eth->qdma_debugfs_dir = root;
+ 	if (IS_ERR_OR_NULL(debugfs_create_file("qdma_regs", 0444, root, eth,
+-					       &mtk_qdma_debugfs_fops)))
++					       &mtk_qdma_debugfs_fops)) ||
++	    IS_ERR_OR_NULL(debugfs_create_file("pse_regs", 0444, root, eth,
++					       &mtk_pse_debugfs_fops)))
+ 		goto error;
+ 
+ 	if (mtk_qdma_v1_override_supported(eth) &&

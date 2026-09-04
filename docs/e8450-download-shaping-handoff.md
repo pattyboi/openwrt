@@ -44,7 +44,7 @@ traffic bypasses CAKE entirely the same way §13.4 proved for the
 software TX selector, remains untested — but the mechanism by which it
 *could* bypass is now solidly confirmed, independent of any A/B test.
 
-## New finding: PSE per-port buffer thresholds (unexplored by §1-38)
+## Correction: v1 WLAN-egress port routing (superseded an earlier draft)
 
 **Correction to an earlier draft of this doc:** the original claim
 here cited `PSE_WDMA0_PORT`/`PSE_WDMA1_PORT` (`enum mtk_pse_port`,
@@ -54,15 +54,13 @@ those enum constants are used only in the `mtk_is_netsys_v2_or_greater()`
 branch; **the v1/`else` branch hardcodes `pse_port = 3`**
 (`mtk_ppe_offload.c:310-312`), committed via
 `mtk_foe_entry_set_pse_port()` → `IB2_DEST_PORT`
-(`mtk_ppe.c:441-451`). Whether that raw "3" aligns with this doc's
-`PSE_OQ_TH`/`PSE_IQ_REV` register-pairing guess (built from the enum's
-ordinal position) is genuinely unknown — the enum's numeric values may
-not correspond 1:1 with v1 hardware's actual `DEST_PORT` numbering
-outside the v2+ code path that defines them. **The bitfield evidence
-above (set_wdma vs set_queue) is the reliable finding; the specific
-register-pairing decode below is a hypothesis, not a fact, pending
-live readback.**
-
+(`mtk_ppe.c:441-451`). Whether that raw "3" aligns with the enum's
+ordinal position doesn't matter in the end — **see "PSE per-port
+buffer thresholds" below: the registers those fields would live in are
+never initialized at all on this chip**, confirmed by both source
+gating and live readback, so the port-pairing question is moot. The
+bitfield evidence above (set_wdma vs set_queue) remains the reliable
+finding for the offload-bypass question.
 
 ## Why (benefit) — revised
 
@@ -100,71 +98,58 @@ narrative) for every candidate register block on the WLAN-egress path:
   15x-over-cap throughput proof); `HRED2`/`fc_th` also dead (§22.9-22.10);
   "no vendor-firmware secret to extract" (§28.5). Nothing new to find
   there.
-- **Genuinely new ground: PSE (Packet Switch Engine).** See below.
+- **PSE (Packet Switch Engine) — investigated, DEFINITIVELY CLOSED.** See
+  below.
 
-PSE has its own, never-instrumented register range (`mtk_eth_soc.h:156-173`,
-offsets 0x100-0x1ff — same `1b100000.ethernet` MMIO block as QDMA's
-0x1800+ range, but a different sub-block; confirmed NOT covered by the
-existing `qdma_regs` debugfs, which is hardcoded to the QDMA offset
-range only):
+## PSE per-port buffer thresholds — CLOSED, hardware-confirmed dead (2026-09-04)
+
+PSE has a register range never previously instrumented by this tree's
+QDMA debugfs work (`mtk_eth_soc.h:156-173`, offsets 0x100-0x1ff, same
+`1b100000.ethernet` MMIO block as QDMA but a different sub-block):
+`PSE_FQFC_CFG1/2`, `PSE_DROP_CFG`, `PSE_PPE_DROP(x)`, `PSE_IQ_REV(x)`,
+`PSE_OQ_TH(x)` (per-port input/output queue thresholds, x=1..8, two
+ports packed per register).
+
+**Source confirms these are never initialized on NETSYSv1/MT7622 at
+all.** `mtk_hw_init()` (`mtk_eth_soc.c:5430-5513`) is exactly:
+`if (mtk_is_netsys_v3_or_greater(eth)) { ...MT7988/MT7987 PSE writes... }
+else if (!mtk_is_netsys_v1(eth)) { ...PSE_IQ_REV/PSE_OQ_TH writes,
+including the 0x000f000f-style values an earlier draft of this doc
+mis-attributed as "live E8450 values"... }` — **there is no fallback
+for v1.** Both branches explicitly exclude MT7622; the driver simply
+never writes these registers on this chip.
+
+**Verified live, not just from source.** Built a read-only debugfs
+patch (`999-qos-17-mtk_eth-add-read-only-pse-debugfs.patch`, mirrors
+qos-01's exact scope: no writes, no queue changes, no WED operations),
+built (`r33075-4dfd876771`), flashed via sysupgrade (config preserved,
+dmesg clean, radios back at ch6/ch157 30 dBm, both AQM/PPE state
+intact), and read `/sys/kernel/debug/1b100000.ethernet/pse_regs` on the
+live box:
 
 ```text
-PSE_FQFC_CFG1/2   0x100/0x104   free-queue flow control (opaque, no field decode in this driver)
-PSE_DROP_CFG      0x108         global drop config
-PSE_PPE_DROP(x)   0x110+4x      per-PPE-instance drop config
-PSE_IQ_REV(x)     0x140+4(x-1)  per-port INPUT queue reservation (pages), x=1..8, packed 2 ports/register
-PSE_OQ_TH(x)      0x160+4(x-1)  per-port OUTPUT queue threshold (pages), same packing
+fqfc_cfg1=0xffff9070 fqfc_cfg2=0x0000aa9a drop_cfg=0x080c0c08
+ppe_drop(0..2)=0x00000000
+reg=1..8 iq_rev=0x00000000 (lo=0 hi=0) oq_th=0x00000000 (lo=0 hi=0)
 ```
 
-Live init values decoded from `mtk_eth_soc.c:5450-5467` (pairing inferred
-from register-write order matching the enum sequence — **not yet
-verified by register readback, and per the correction above, v1's raw
-`DEST_PORT=3` may not even correspond to this enum's ordinal position —
-treat every port attribution below as a guess**): register
-`PSE_OQ_TH(5) = 0x000f000f` — if the enum-ordinal guess holds, this
-covers ports 8-9 (`PSE_WDMA0_PORT`/`PSE_WDMA1_PORT`) — both halves
-decode to **15 pages**, matching `PSE_IQ_REV(5) = 0x000e000e` → **14
-pages**. If instead v1's real WDMA port is "3" as the source literally
-says, the relevant register would be `PSE_OQ_TH(2) = 0x001a000f`
-(high 16 bits, odd port) → **26 pages**. `PSE_DROP_PORT` (port 7)
-gets `0x1ff` = 511 pages regardless of pairing — an outlier, consistent
-with being a sink port. **Only register readback (a debugfs patch) can
-resolve which of these is correct.**
+`PSE_IQ_REV`/`PSE_OQ_TH` read **all zero** across every register —
+confirming the source-level gating exactly. `PSE_FQFC_CFG1/2` and
+`PSE_DROP_CFG` are live/nonzero (PSE itself is powered and functional),
+it's specifically the per-port threshold fields that are dead. This
+definitively supersedes this doc's earlier hedged "port-pairing
+hypothesis" — **there is no port pairing to resolve; the registers hold
+power-on-reset zero and nothing in the running system depends on them.**
 
+**Verdict: this joins QDMA scheduler-1/`TX_SEL` and `HRED2`/`fc_th`
+(§28, §22.9-22.10) as a third confirmed-inert hardware avenue on this
+chip.** §28.5's "no further hardware SQM/AQM capability is available to
+port on this chip" now extends to PSE with the same rigor (source
+gating + live register readback) applied to every other claim in this
+investigation. The diagnostic patch is kept in the tree (matches
+qos-01's own precedent) as a reusable read-only tool, not because PSE
+has further potential here.
 
-**What this is, and isn't:** a per-port shared-buffer occupancy
-cap/backpressure threshold — closer to a hardware tail-drop depth limit
-than a shaper. No rate control, no AQM sophistication, no ECN, no
-per-flow fairness (CAKE has all four; this has none). Lowering
-`PSE_OQ_TH` for the WDMA ports would bound worst-case *standing queue
-depth* for WLAN-egress traffic at the hardware fabric level — a real,
-physically-plausible lever, but:
-
-- **not live-readable today** — no existing debugfs covers this offset
-  range; a new patch (mirroring qos-01's approach) would be needed just
-  to observe it, before any write is trusted;
-- **field-packing/units are inferred from write-order pattern-matching,
-  not a TRM or register readback** — exactly the kind of unverified claim
-  this project's own methodology (§28's dual-scheduler test, §13's
-  Gate A) has repeatedly shown is necessary to hardware-test before
-  trusting;
-- **shared fabric risk**: PSE serves every port (GDM/ethernet MACs, PPE,
-  QDMA, WDMA, drop). A wrong write here risks indiscriminate packet loss
-  across all WLAN traffic — beacons, management frames, other
-  stations — not just the flows you meant to affect, unlike a QDMA
-  per-queue write which is provably isolated (§16.7's soak-test
-  acceptance criteria exist precisely because of this class of risk).
-
-**Recommendation: do not act on this without the same gate discipline
-applied to every other register in this project.** If pursued: (1) add a
-read-only PSE debugfs patch mirroring qos-01, (2) verify the inferred
-port-pairing/units via a controlled write+readback (analogous to §28's
-scheduler-1 test — pick an idle/test-only port pairing if one exists,
-not a live WDMA port, to first prove field semantics without touching
-production traffic), (3) only then consider a live WDMA-port adjustment
-with the same soak-test rigor as §16.7. This is exploratory and
-low-priority given the headline symptom is already fixed — track
-separately, do not block on it.
 
 ## Mechanism (if Phase 0 finds a real gap)
 
@@ -184,12 +169,17 @@ headline symptom is fixed by the autorate patch.
 
 ## Current box state (2026-09-04, verified)
 
-- Stock-ish OpenWrt 25.12 (apk) kernel 6.12.94 (root@DietPi build
-  2026-09-01); access `ssh root@192.168.1.1`, pw `Braxtonb112218!` (eth0
-  direct, ARP 80:69:1a:1e:85:83). WAN-side: Netgear topology history — see
-  e8450-router-access memory note; verify reachability first.
+- **SECOND KERNEL FLASH THIS SESSION**: running `r33075-4dfd876771`
+  (built with `999-qos-17-mtk_eth-add-read-only-pse-debugfs.patch`,
+  built + sysupgrade-flashed 2026-09-04, config preserved, verified
+  clean). Was `r33052-7eb00e60ba` (root@DietPi, 2026-09-01) before this
+  session. access `ssh root@192.168.1.1`, pw `Braxtonb112218!` (eth0
+  direct, ARP 80:69:1a:1e:85:83). WAN-side: Netgear topology history —
+  see e8450-router-access memory note; verify reachability first.
 - Country US. radio0 ch6 HT20 txpower 30; radio1 ch157 HE40 txpower 30
-  (uci). 8x 2.4G clients + S23 (d2:29:f6:28:f9:40) on 5G.
+  (uci). 7x 2.4G clients + S23 (d2:29:f6:28:f9:40, 5G) reconnecting
+  post-reboot as of last check — same settle pattern as every prior
+  reboot this session, not a regression.
 - **FACTORY VOLUME MODIFIED** (first time ever): both radio eeproms raised
   to legal max (2.4G chain targets 0x26→0x2A @0x58+c*6; 5G UNII-3 group-7
   0x26→0x2B @0x5352+c*12). Pristine backup on box:
@@ -242,10 +232,10 @@ CAKE). Throughput, p50/p95/p99/max, loss/ECN, CPU, PPE/WED queues;
 second wired client for fairness. Success: D matches or beats A for wifi
 clients while eth stays offloaded.
 
-### PSE exploratory track (independent, low-priority, own gate sequence)
-See "New finding: PSE per-port buffer thresholds" above. Not gated on
-Phase 0-2; track separately since it targets standing-queue depth, not
-rate — a different, complementary problem to any offload-bypass finding.
+### PSE exploratory track — CLOSED (2026-09-04)
+See "PSE per-port buffer thresholds — CLOSED, hardware-confirmed dead"
+above. No further work here: registers confirmed never-initialized on
+this chip via source gating and live readback. Nothing gated on this.
 
 ## Risks / unknowns
 
@@ -262,9 +252,9 @@ rate — a different, complementary problem to any offload-bypass finding.
 - CAKE per-host fairness cannot fix medium-level airtime waste by a far
   low-MCS station (no HW airtime fairness) — power raise mitigates, does
   not eliminate.
-- PSE track: field-packing inferred from write-order, not verified by
-  readback — treat as a hypothesis, not a fact, until tested per the
-  gate sequence above.
+- ~~PSE track: field-packing inferred from write-order~~ — resolved:
+  registers confirmed never-initialized on v1 (source gating +
+  `pse_regs` live readback, all zero). No longer a risk.
 
 ## Operating rules (hard locks — CLAUDE.md is source of truth)
 
@@ -278,7 +268,6 @@ rate — a different, complementary problem to any offload-bypass finding.
 - Verify router life from a second path (eth0 vs wifi) — IP/reachability
   has drifted before; check the e8450-router-access memory note.
 
-
 ## Cross-references
 
 - docs/netsys-qos-port-investigation.md — §13 (Gate A/QDMA register
@@ -289,6 +278,8 @@ rate — a different, complementary problem to any offload-bypass finding.
 - docs/wed-v1-opportunities.md, docs/e8450-ppe-validation.md
 - .recall/router-probes/2026-09-04-factory-dump/ (map, dumps, A/B logs)
 - scripts/e8450/eeprom.sh
+- target/linux/mediatek/patches-6.12/999-qos-17-mtk_eth-add-read-only-pse-debugfs.patch
+  (`pse_regs` debugfs — live-verified all-zero on this chip)
 - `files/etc/config/{firewall,sqm,sqm-autorate}`, `files/etc/nftables.d/`
 - kernel source (this box's build tree):
   `build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_mt7622/linux-6.12.94/drivers/net/ethernet/mediatek/`
