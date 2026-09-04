@@ -340,6 +340,11 @@
 				"type": "string"
 			}
 		},
+		"vht2g": {
+			"description": "Enable vendor QAM-256 VHT operation on supported 2.4GHz radios",
+			"type": "boolean",
+			"default": false
+		},
 		"ht_coex": {
 			"description": "Disable honoring 40 MHz intolerance in coexistence flags of stations",
 			"type": "boolean",

@@ -34,6 +34,11 @@ process history; every item worth carrying forward is repeated here.
   `372` (AQL pending API), `373` (STA airtime-weight op), `374` (parameterize
   min-action-size macro), plus upstream MLO patches `370`/`371`/`376`
   unrelated to this fork's work.
+- 2.4 GHz vendor VHT20/QAM-256 support is implemented as a default-off
+  `vht2g` opt-in across mac80211, mt76/MT7615, and wifi-scripts. The live
+  experiment is recorded in
+  [`e8450-vht2g-experiment.md`](e8450-vht2g-experiment.md).
+
 - WED-v1 attaches as version 1; PPE hardware flow offload active; both
   radios operational. Known, accepted, unfixable-from-here limitation: a
   controlled full-chip SER/reset under active 5 GHz traffic can leave the
@@ -41,6 +46,21 @@ process history; every item worth carrying forward is repeated here.
   `mt7915-ser-watchdog` bounds the resulting outage to ~65 s via auto-reboot.
   Do not reopen this without UART/firmware access — confirmed twice,
   independently, not fixable from host driver source.
+
+## Completed follow-up: 2.4 GHz vendor VHT20/QAM-256 — DONE (2026-09-04)
+
+The default-off VHT20 path was built, flashed, and hardware-tested on the
+live E8450. Radio0 was set to `VHT20` with `vht2g=1`; radio1 remained
+`HE40`, and the MT7915 WED-v1 boot-only configuration was not changed.
+
+The PS4 client negotiated `VHT-MCS 3`–`4` at 26–39 Mbps RX during the
+test, with expected throughput reaching 53.2 Mbps in a later sample. All
+seven 2.4 GHz clients returned after the reload and remained associated
+through a 60-second soak. This proves VHT negotiation and client stability;
+it does not claim a controlled throughput improvement because no dedicated
+VHT iperf endpoint was available. See the full
+[`e8450-vht2g-experiment.md`](e8450-vht2g-experiment.md) record.
+
 
 ## Task 1: Linux kernel point-release bump `6.12.94` → `6.12.103` — DONE (2026-09-04)
 

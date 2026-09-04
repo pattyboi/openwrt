@@ -1,0 +1,51 @@
+From 309d05fdf260697b1f15b26ebd4f71f0446dd605 Mon Sep 17 00:00:00 2001
+From: DENG Qingfang <dengqf6@mail2.sysu.edu.cn>
+Date: Mon, 23 Nov 2020 10:46:37 +0800
+Subject: [PATCH] mt76: allow VHT rate on 2.4GHz
+
+Allow the MT7615/MT7622 radio to use vendor 256-QAM rates on 2.4GHz.
+Keep the capability opt-in per driver so unsupported mt76 devices do not
+advertise VHT on 2.4GHz.
+
+Signed-off-by: DENG Qingfang <dqfext@gmail.com>
+
+--- a/mac80211.c
++++ b/mac80211.c
+@@ -295,2 +295,2 @@
+ 	if (phy->cap.has_2ghz)
+-		mt76_init_stream_cap(phy, &phy->sband_2g.sband, false);
++		mt76_init_stream_cap(phy, &phy->sband_2g.sband, vht);
+@@ -362,2 +362,2 @@
+ mt76_init_sband_2g(struct mt76_phy *phy, struct ieee80211_rate *rates,
+-		   int n_rates)
++		   int n_rates, bool vht)
+@@ -365,4 +365,6 @@
+ 	phy->hw->wiphy->bands[NL80211_BAND_2GHZ] = &phy->sband_2g.sband;
+ 
++	vht = vht && phy->sband_2g.sband.vht_cap.vendor_qam256_supported;
++
+ 	return mt76_init_sband(phy, &phy->sband_2g, mt76_channels_2ghz,
+ 			       ARRAY_SIZE(mt76_channels_2ghz), rates,
+@@ -368,2 +370,2 @@
+ 			       ARRAY_SIZE(mt76_channels_2ghz), rates,
+-			       n_rates, true, false);
++			       n_rates, true, vht);
+@@ -561,2 +563,2 @@
+ 	if (phy->cap.has_2ghz) {
+-		ret = mt76_init_sband_2g(phy, rates, n_rates);
++		ret = mt76_init_sband_2g(phy, rates, n_rates, vht);
+@@ -763,2 +765,2 @@
+ 	if (phy->cap.has_2ghz) {
+-		ret = mt76_init_sband_2g(phy, rates, n_rates);
++		ret = mt76_init_sband_2g(phy, rates, n_rates, vht);
+--- a/mt7615/init.c
++++ b/mt7615/init.c
+@@ -413,5 +413,8 @@
+ 
+ 	phy->mt76->sband_2g.sband.ht_cap.cap |= IEEE80211_HT_CAP_LDPC_CODING;
++	phy->mt76->sband_2g.sband.vht_cap.cap |=
++			IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK;
++	phy->mt76->sband_2g.sband.vht_cap.vendor_qam256_supported = true;
+ 	phy->mt76->sband_5g.sband.ht_cap.cap |= IEEE80211_HT_CAP_LDPC_CODING;
+ 	phy->mt76->sband_5g.sband.vht_cap.cap |=
+ 			IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK;

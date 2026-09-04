@@ -127,6 +127,14 @@ vendor changelog without independent verification.
   the host; moving off the DFS channel needs an on-site RF survey this
   session doesn't have. See
   [`wifi-cpu-and-stability-investigation.md`](wifi-cpu-and-stability-investigation.md).
+- **2.4 GHz vendor VHT20/QAM-256**: added a default-off `vht2g` opt-in
+  spanning mac80211, mt76/MT7615, and both wifi-scripts paths. Built and
+  flashed the corrected image to the live E8450; the compatible PS4 client
+  negotiated `VHT-MCS 3`–`4` at 26–39 Mbps RX during the soak. All seven
+  2.4 GHz clients returned after reload and remained associated for 60 s;
+  no controlled throughput gain was claimed because no dedicated VHT
+  iperf endpoint was available. Full record:
+  [`e8450-vht2g-experiment.md`](e8450-vht2g-experiment.md).
 - **Dual hardware scheduler / HW airtime fairness**: both investigated and
   confirmed **dead on this chip** — wired in the register map (inherited
   from the shared v2/v3 template) but with no enforcement circuit behind

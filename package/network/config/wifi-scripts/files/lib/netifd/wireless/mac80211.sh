@@ -34,7 +34,7 @@ drv_mac80211_init_device_config() {
 	config_add_int radio beacon_int chanbw frag rts
 	config_add_int rxantenna txantenna txpower min_tx_power
 	config_add_int num_global_macaddr multiple_bssid
-	config_add_boolean noscan ht_coex acs_exclude_dfs background_radar
+	config_add_boolean noscan ht_coex acs_exclude_dfs background_radar vht2g
 	config_add_array ht_capab
 	config_add_array channels
 	config_add_array scan_list
@@ -144,7 +144,7 @@ mac80211_hostapd_setup_base() {
 	[ -n "$acs_exclude_dfs" ] && [ "$acs_exclude_dfs" -gt 0 ] &&
 		append base_cfg "acs_exclude_dfs=1" "$N"
 
-	json_get_vars noscan ht_coex min_tx_power:0 tx_burst
+	json_get_vars noscan ht_coex min_tx_power:0 tx_burst vht2g:0
 	json_get_values ht_capab_list ht_capab
 	json_get_values channel_list channels
 
@@ -314,7 +314,10 @@ mac80211_hostapd_setup_base() {
 		esac
 		[ -n "$op_class" ] && append base_cfg "op_class=$op_class" "$N"
 	}
-	[ "$hwmode" = "a" ] || enable_ac=0
+	[ "$hwmode" = "a" ] || {
+		[ "$band" = "2g" ] || enable_ac=0
+		[ "$vht2g" -gt 0 ] || enable_ac=0
+	}
 	[ "$band" = "6g" ] && enable_ac=0
 
 	if [ "$enable_ac" != "0" ]; then

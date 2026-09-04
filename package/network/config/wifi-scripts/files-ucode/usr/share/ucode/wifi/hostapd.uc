@@ -258,6 +258,10 @@ function device_htmode_append(config) {
 		config.ieee80211ac = 0;
 		break;
 	}
+	if (config.band == '2g' &&
+	    (!config.vht2g || !phy_capabilities.vht_capa))
+		config.ieee80211ac = 0;
+
 
 	config.eht_oper_chwidth = config.vht_oper_chwidth;
 	config.eht_oper_centr_freq_seg0_idx = config.vht_oper_centr_freq_seg0_idx;
@@ -309,7 +313,9 @@ function device_htmode_append(config) {
 		append_vars(config, [ 'op_class' ]);
 	}
 
-	if (config.ieee80211ac && config.hw_mode == 'a') {
+	if (config.ieee80211ac &&
+	    (config.hw_mode == 'a' ||
+	     (config.band == '2g' && config.vht2g))) {
 		/* VHT capab */
 		if (config.vht_oper_chwidth < 2) {
 			config.vht160 = 0;
