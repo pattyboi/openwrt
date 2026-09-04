@@ -37,6 +37,56 @@ preserved as-is for process history, but several of its open items and
   flow-aware occupancy AQM and the confirmed-dead dual-scheduler/HW-ATF
   findings.
 
+## Roadmap closed (2026-09-04)
+
+This roadmap is complete as a working document. Every item still open as of
+the 2026-08-31 status update above now has a definitive disposition below.
+Continuation work starts fresh in
+[`e8450-upstream-roadmap-2026-09.md`](e8450-upstream-roadmap-2026-09.md).
+
+- **Priority 1 acceptance** (`Acceptance for Priority 1`): "5 GHz traffic
+  survives controlled L1 SER" and "no PSE/PPE/WED lock, MCU timeout, AXI
+  hang" are answered, not pending — won't-fix from host source (the MT7915
+  MCU firmware never acknowledges a command during full chip reset),
+  mitigated with `mt7915-ser-watchdog`'s ~65 s bounded auto-reboot. See
+  `e8450-ppe-validation.md`'s TL;DR table. "PPE/conntrack state remains
+  synchronized in both directions" is satisfied — every multi-hour session
+  recorded matching inbound/outbound `BND` counter growth with no desync.
+  "No recurrence of the TX watchdog timeout" is satisfied — zero
+  recurrences across every logged session since the single original
+  boot-time incident. "AWG UDP idle/resume, teardown/rebind, WAN-renumber,
+  Wi-Fi-roam" remains genuinely open (needs operator-driven physical
+  tests) — carried forward.
+- **Priority 2 "Alternative, broader track"**: superseded. The
+  `c5a3bd91aa73` target it names is stale — the pin has since moved twice
+  more, to `6d1c6a75` (2026-08-04, current). Re-opened as a new task
+  against the current pin in the 2026-09 roadmap, not resumed against a
+  stale target.
+- **Priority 3 correctness fixes** ("runtime validation remains pending"):
+  the specific narrow trigger conditions (missing HE-cap pointer, TWT MCU
+  rejection, failed interface creation, MMIO bounds, retry-counter
+  underflow) were never deliberately exercised, but all five fixes shipped
+  in every image since the June refresh and ran through dozens of hours of
+  routed/bridged/5 GHz traffic with zero related crash or `WARN`. Also:
+  patches `907`-`910` no longer exist as separate files — the August mt76
+  pin bump superseded them (upstream already carries the fix; confirmed
+  via the local patch inventory, only `901`/`902` remain). Treat as done.
+- **Priority 4 (PS buffering)**: validation checklist never run — no
+  sleeping/power-save 5 GHz client was ever tested against. Genuinely
+  open, carried forward.
+- **Priority 5 (PPE cache-lock)**: "routed/bridged offload, flow churn,
+  throughput, latency" are satisfied by the 2026-08-31 session (5 GHz
+  traffic, bridge offload, long-duration flow churn, and a WAN interface
+  bounce "all passed cleanly" per `e8450-ppe-validation.md`). "Reset/SER
+  behavior" folds into the Priority 1 disposition above — it's the same
+  MCU firmware limitation, not a cache-lock-specific defect. Treat as done.
+- **Priority 6 (kernel 6.18 migration)**: not started. Carried forward
+  unchanged, low urgency.
+- **Hardware audit item 3 (`schedutil` vs `ondemand` A/B)**: not run.
+  Carried forward as a low-priority optional item.
+
+See `docs/wed-v1-opportunities.md` for the matching closure of its own
+open items (WED-03 test, WED-16).
 
 ## Original pre-backport baseline
 

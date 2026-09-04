@@ -17,6 +17,25 @@ both a recovered prior investigation and this session. Full detail:
 process history; treat every "pending"/`[ ]` item below about controlled
 SER as answered by the above, not open.
 
+## Status update (2026-09-04) — roadmap closed here
+
+- **WED-03**: "Test with a 5 GHz client attached and saved pstore/UART
+  access" is done — this is exactly what the 2026-08-31 session ran
+  (`999-wed-14`), confirmed on hardware: stuck ring before, clean
+  `QCNT=0` with advancing CIDX/DIDX after, same repro, same hardware. See
+  `e8450-ppe-validation.md`.
+- **WED-16**: now provably moot, not just low-priority. Its own stated
+  trigger condition was "only if repeated SER or attach causes ring
+  allocation conflicts" — and separately, the vendor rationale ties it to
+  the MCU-death loop. That loop is independently confirmed twice (a
+  recovered prior investigation, and this fork's own 2026-08-31 testing)
+  to be an MT7915 MCU firmware ACK failure during full-chip reset, not a
+  ring double-initialization issue. No ring-init patch, including
+  WED-16, can address it. Dropped from further consideration.
+- **WED-20**: still the one real open candidate. Carried forward to
+  [`e8450-upstream-roadmap-2026-09.md`](e8450-upstream-roadmap-2026-09.md).
+- **WED-04**: still correctly deferred (no normal-runtime benefit).
+
 This is an audit note for the E8450's PCIe MT7915 WED-v1 path. The two
 
 ### Current test image
@@ -206,7 +225,11 @@ module lifecycle testing becomes necessary.
 
 ## Recommended order
 
-1. [ ] Rebase WED-03 and add the WED-v1 RX prefetch reset fix.
-2. [ ] Add reduced WED-v1 queue diagnostics.
-3. [ ] Evaluate WED-20's 100 ms timeout under real bidirectional traffic.
-4. [ ] Rebase WED-16 only if ring double-initialization is observed.
+1. [x] Rebase WED-03 and add the WED-v1 RX prefetch reset fix — done,
+   hardware-confirmed (`999-wed-14`).
+2. [x] Add reduced WED-v1 queue diagnostics — done (`915`/`917`).
+3. [ ] Evaluate WED-20's 100 ms timeout under real bidirectional traffic —
+   open, see `e8450-upstream-roadmap-2026-09.md`.
+4. ~~Rebase WED-16 only if ring double-initialization is observed~~ —
+   dropped, trigger condition provably unmet (see 2026-09-04 status
+   update above).
