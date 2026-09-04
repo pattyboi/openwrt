@@ -77,7 +77,20 @@ vendor changelog without independent verification.
   within one boot. Lowering the base/percent config would not have
   fixed an overshoot problem; the real gap is that the vendored
   `sqm-autorate-rust` has no rate ceiling at all, only OWD-based
-  pullback - a real upstream gap, not a config error.
+  pullback - a real upstream gap, not a config error. §38 then ran an
+  actual controlled speedtest from the router itself (no `opkg`/`curl`/
+  `iperf3` on this image - used `wget`/interface byte counters instead):
+  real sustained download throughput measured at 6-10 Mbit/s across
+  three tests (1-stream, 6-stream, 4-stream), confirming it was never a
+  single-stream/BDP limitation and matching `download_base_kbits`'s
+  already-conservative 10 Mbit value almost exactly - the shaper's drift
+  to 68-69 Mbit was pure algorithm defect, not evidence of hidden real
+  capacity. Patched the one line in the vendored source missing the
+  `.min(base_rate)` clamp upstream's own docs describe, cross-compiled
+  and deployed live: shaped rate now holds exactly at 10 Mbit under a
+  genuine 4-stream saturating download (10.56 Mbit/s achieved), with
+  real bounded CAKE backlog and ping maxing at 92 ms - not SS36's
+  uncontrolled 300-1200 ms spikes.
 - **Hash audit extended, rapidhash evaluated and rejected, both dormant
   conversions reverted**: swept the rest of the reachable kernel for
   jhash call sites matching the measured xxh32-winning size class and

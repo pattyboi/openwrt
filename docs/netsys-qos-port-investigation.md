@@ -43,7 +43,7 @@ accuracy/targeting improvements. See `docs/README.md` for the repo-wide
 index.
 
 
-Status: COMPLETE through §37. The QoS investigation and production verdict
+Status: COMPLETE through §38. The QoS investigation and production verdict
 are complete, and the hardware-capability question is closed: every
 plausible NETSYSv1 QDMA AQM/HQoS register has now been hardware-tested.
 qos-01 through qos-13 and the `qdma-shaper` backend/UCI package are
@@ -3535,6 +3535,116 @@ patch to add one, or a `download_delay_ms` A/B, would each need their
 own live-hardware validation pass the same way SS33-35 validated the
 kernel-side changes, and is a real, scoped enough project to warrant
 its own session rather than a same-turn tweak.
+
+
+## 38. Real router-side speedtest, and a max-rate clamp fix for `sqm-autorate-rust` (2026-09-04)
+
+Prompted directly: "maybe we have the wrong tool, maybe we need to
+speedtest direct from the router to get proper up and down numbers."
+Two things followed: an actual controlled speedtest run from the router
+itself (not a public speedtest site, not synthetic guesswork), and,
+once the numbers were in, a source patch closing the gap SS37 found.
+
+### 38.1 Tooling reality check
+
+This image has no `opkg` (deliberately stripped, per the repo name) and
+no `iperf3`/`curl`. `wget` here is `uclient-fetch` - minimal option set,
+but HTTPS does work (confirmed with a 1 MB `speed.cloudflare.com`
+fetch). Its upload path does not: both `--post-file` and `--method=PUT`
+against `speed.cloudflare.com/__up` returned "Connection reset
+prematurely" over IPv4 and IPv6 alike - not investigated further,
+treated as an uclient-fetch/Cloudflare-edge incompatibility rather than
+a network problem. Download-direction testing used
+`speed.cloudflare.com/__down?bytes=N` in the background plus
+`/sys/class/net/wan/statistics/rx_bytes` sampled before/after a fixed
+wall-clock window - real byte counters, not wget's own progress
+reporting (which stopped being reliable once the process was
+backgrounded and killed mid-transfer for timing purposes).
+
+### 38.2 Real measured download throughput: ~6-10 Mbit/s, not 68 Mbit/s
+
+Three controlled, router-side tests, each with concurrent `ping -A` and
+per-second `tc -s qdisc show dev ifb4wan` backlog sampling, all while
+the shaper (pre-patch) was sitting at a 68-69 Mbit ceiling from SS37.2's
+ramp:
+
+| test | streams | duration | measured throughput | ping avg/max | backlog |
+|---|---:|---:|---:|---|---|
+| 1 | 1 | 25 s | 8.02 Mbit/s | 26.3 / 53.9 ms | ~0, two brief spikes |
+| 2 | 6 | 25 s | 6.19 Mbit/s | 26.7 / 50.3 ms | ~0, two brief spikes |
+| 3 (post-patch) | 4 | 25 s | **10.56 Mbit/s** | 26.9 / 92.1 ms | real, bounded (0-58 KB) |
+
+Test 2 (6 parallel streams) measuring *lower* aggregate throughput than
+test 1 (1 stream) rules out single-TCP-stream/BDP limitation as the
+explanation - if that were the bottleneck, more streams would have
+measured more throughput, not less. Both are close to SS31.1's
+historical 0.3-8 Mbit/s range and nowhere near the 68 Mbit ceiling the
+shaper had drifted to. This directly falsifies SS37.3's more hopeful
+reading ("the router's own adaptive tool is regularly asking for, and
+apparently getting, far more than that") - it wasn't getting more; it
+was asking for a ceiling nothing on this connection was pulling toward,
+and backlog stayed nearly empty in tests 1-2 not because the link could
+sustain 68 Mbit, but because neither test's real achievable throughput
+ever came close enough to the (wrongly elevated) ceiling to queue
+against it locally - consistent with SS36.2's original finding that any
+real queueing from this mismatch happens upstream of the router, not in
+CAKE.
+
+### 38.3 The fix: clamp the ramp-up to `base_kbits`, matching upstream's own documented design
+
+Upstream's own README/design description (`sqm-autorate`/`cake-autorate`,
+which this is a Rust port of) says the algorithm should incrementally
+increase "until the setting reaches the maximum configured value."
+Read `Lochnair/sqm-autorate-rust`'s `src/ratecontroller.rs` at the exact
+pinned commit this fork vendors (`3316918`, not just `master` -
+re-verified both match) and confirmed the Rust port's
+`calculate_rate()` never enforces that maximum: `next_rate` is clamped
+with `.max(min_rate)` (the floor) but has no corresponding `.min()`
+against `base_rate` anywhere. This is a real gap relative to the
+algorithm's own documented behavior, not a config error.
+
+Patched `state.next_rate = state.next_rate.max(min_rate).floor()` to
+`.max(min_rate).min(base_rate).floor()` - the minimal, single-line fix
+that restores the documented ceiling. Cross-compiled following SS31.4's
+exact recipe (rustup's prebuilt `aarch64-unknown-linux-musl` target,
+this tree's own `aarch64-openwrt-linux-musl-gcc`/`libuci`/`libubox` via
+`UCI_DIR`, `-Wl,--dynamic-linker=/lib/ld-musl-aarch64.so.1`): output
+binary is byte-for-byte the same size (725,720 bytes) as the unpatched
+one, same interpreter/NEEDED-libs signature. Deployed to the live
+router (backed up the running binary first), restarted the
+procd-supervised service, killed one leftover stray process from this
+session's own earlier exploratory testing that was still holding the
+old unclamped binary and briefly wrote interleaved garbage into
+`/tmp/sqm-autorate.csv` until killed.
+
+### 38.4 Verified live: the clamp holds under genuine saturation
+
+Post-patch, download `current_rate` climbed from its 6,000 kbit boot
+floor and stopped exactly at `bandwidth 10Mbit` (`download_base_kbits`)
+ - never exceeded it in any of dozens of one-second `tc` samples,
+including test 3 above, a genuine 4-stream saturating download that
+pulled 10.56 Mbit/s aggregate (slightly *above* the 10 Mbit shaped
+ceiling's nominal rate, within CAKE's normal overhead/ECN tolerance)
+against it for the full 25 s window. Real, bounded CAKE backlog
+appeared for the first time in this session's testing (0-57,532 bytes,
+never runaway) - because the shaper is now actually the bottleneck it's
+supposed to be, and correctly managing it: ping avg stayed at 26.9 ms
+(same as every other test in this document), max reached 92.1 ms under
+genuine full saturation - nowhere near SS36.2's 300-1,200 ms
+uncontrolled-overshoot spikes, and a small, real, expected AQM cost of
+actually being at capacity rather than evidence of a problem.
+
+**Net result:** this connection's real sustained download capacity is
+~6-10 Mbit/s, matching `download_base_kbits`'s already-conservative
+10,000 value almost exactly (no config change needed there). The actual
+defect was the vendored tool silently ignoring that ceiling under
+sustained low-delay ticks with no decay-to-idle path, exposing the
+household to exactly the kind of unbounded, undetectable-by-CAKE
+overshoot that could explain an external "B" bufferbloat grade (SS36)
+whenever real demand briefly approached the wrongly-elevated ceiling.
+Fixed with a one-line, build-verified, live-validated patch;
+`files/usr/sbin/sqm-autorate-rust` now ships the clamped binary.
+
 
 
 
