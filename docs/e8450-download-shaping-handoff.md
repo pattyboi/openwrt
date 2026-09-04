@@ -1,62 +1,161 @@
-# e8450: wifi-egress download shaping — handoff (2026-09-04)
+# e8450: wifi-egress download shaping — handoff (2026-09-04, revised)
 
-## Status summary
+## STATUS UPDATE (same day, later session): original plan superseded
 
-The router now runs both radios at the US-legal ceiling (30 dBm) on freshly
-surveyed clean channels (2.4G ch6 HT20, 5G ch157 HE40), with far-field
-measured gains (+4 dB 5G at the S23's fixed spot). The remaining open QoS
-problem is **download-direction bufferbloat to wifi clients**: PPE
-offloading bypasses the ifb4wan CAKE, and the offloaded WAN→wifi path
-(PPE → WDMA → WED) has no NETSYSv1 hardware shaper.
+**The severe symptom this doc was written to fix is already resolved —
+by a different mechanism than this doc proposed.** Deep-research pass
+confirmed: `docs/netsys-qos-port-investigation.md` §36-38 (all dated
+2026-09-04, committed to `e8450-deployed-minimal` at 08:40 — before this
+handoff was even written) root-caused the download-direction bufferbloat
+as `sqm-autorate-rust`'s missing `.min(base_rate)` clamp: the shaped
+ceiling drifted to 68-69 Mbit while real sustained capacity is ~6-10
+Mbit/s (router-side speedtest, §38.2), so excess traffic queued
+**upstream of the router** where CAKE structurally cannot see or manage
+it. Fixed with a one-line patch, verified live: post-fix, genuine
+saturating download shows real bounded CAKE backlog and ping avg 26.9 ms
+/ max 92.1 ms — down from pre-fix max 2153 ms. This has nothing to do
+with PPE/WDMA/WED offload routing.
 
-The plan below makes that gap closeable **without hardware**: exclude wlan
-egress from the flowtable so wifi-bound downloads take the CPU path the
-existing CAKE already governs. Feasible because ISP download (~75 Mbps) is
-~10x below MT7622 software-forwarding capacity, so not offloading wifi
-downloads costs no throughput and little CPU.
+**This doc's original citation was a misreading.** §16.8's "download
+remains a separate IFB/CAKE question because q7 cannot shape WAN
+ingress" says the upload-queue shaper can't help ingress — it does NOT
+say offloaded flows bypass CAKE. That claim was never actually tested
+in this project prior to today's deep-research pass (below).
 
-Next action: **Phase 0 baseline** (download bufferbloat to the S23 on
-ch157 @ 30 dBm, current state), then Phase 1 selective-offload rule.
+**What's still genuinely open, downgraded to low-priority:** all of
+§31-38's validation traffic came from the wired build workstation
+(192.168.1.6 — confirmed via `iperf3 -c`/`iw` grep across those
+sections). None of it tested an actual wifi client. Wired-client
+PPE-offloaded flows route through `PSE_QDMA_TX_PORT`/`PSE_GDM*_PORT`;
+WLAN-bound offloaded flows route through the architecturally distinct
+`PSE_WDMA0_PORT`/`PSE_WDMA1_PORT` (confirmed from
+`mtk_eth_soc.h:904-922`, kernel 6.12.94 build tree — see new §"PSE audit"
+below). So whether the (now-correct) CAKE ceiling actually protects a
+real wifi client's download, or whether that traffic bypasses CAKE
+entirely via hardware offload the same way §13.4 proved for the
+software TX selector, remains untested. Given the headline symptom is
+fixed, this is now an exploratory closing-the-loop question, not an
+active problem — see the revised Phase 0 below.
 
-## Why (benefit)
+## Why (benefit) — revised
 
-- docs/netsys-qos-port-investigation.md §33-35: "real, large, reproducible
-  download-direction latency problem"; §16.8 mode B shows PPE-offloaded
-  traffic is unshaped (CAKE sees only software-path flows).
-- `files/etc/config/firewall`: `flow_offloading=1` + `flow_offloading_hw=1`
-  (global) → established download flows never reach the SQM qdisc.
-- The affected population is mostly wifi clients (8x 2.4G stations + the
-  S23 on 5G). Download AQM for that population is the last unsolved piece
-  of the latency program.
-- Side benefit already banked: factory power raise moved weak clients out
-  of the -73..-81 dBm retry/fallback band documented in
-  wifi-cpu-and-stability-investigation.md (S23 measured -65 dBm at stock
-  ceiling vs -61 at 30 dBm from its fixed spot).
+- The production-impacting bufferbloat is fixed (§36-38). No further
+  urgency on that front.
+- What remains: confirm or rule out that wifi clients' PPE-offloaded
+  downloads bypass CAKE-on-ifb4wan altogether (independent of ceiling
+  correctness) — closes a real architectural gap in this project's own
+  test coverage, cheaply, with tools already built.
+- Side benefit already banked, unaffected by any of this: factory power
+  raise moved weak clients out of the -73..-81 dBm retry/fallback band
+  documented in wifi-cpu-and-stability-investigation.md (S23 measured
+  -65 dBm at stock ceiling vs -61 at 30 dBm from its fixed spot).
 
-## Why not shape the offloaded path in hardware
+## Why not shape the offloaded path in hardware — revised, register-confirmed
 
-- Offloaded WAN→wifi download = PPE → WDMA → WED v1 → mt7915 (validated in
-  E8450-hardware-software-reference.md) — outside the QDMA TX queues
-  (0-15) that qdma-shaper/q7 owns.
-- NETSYSv1 has ONE functional scheduler; a second slot (TX_SEL=1) and
-  hardware airtime fairness are wired but non-enforcing
-  (netsys-qos-port-investigation.md top summary). Download shaping in the
-  ImmortalWrt `luci-app-eqos-mtk` reference runs on 64-queue / 4-scheduler
-  MT798x silicon (its §17) — not portable to MT7622.
-- WDMA-side rate fields: not found in the QDMA audit; unknown = gate A
-  from netsys-qos §7 stays open. Treat as likely-impossible; revisit only
-  if Phase 2 (below) disappoints.
+Deep-research pass read the actual kernel source (not just doc
+narrative) for every candidate register block on the WLAN-egress path:
 
-## Mechanism: selective offload
+- **WED (`mtk_wed_regs.h`, both `1020a000`/`1020b000`, full 815-line
+  header + live regmap dump via `/sys/kernel/debug/regmap/dummy-wed@…`):
+  zero rate/shaper/leaky-bucket/WFQ/WRR/throttle fields anywhere.**
+  It's a DMA/buffer-manager/interrupt engine (reset bits, TX/RX buffer
+  pools with token IDs, ring descriptors, MIB counters, PCIe/WPDMA
+  config). This is a stronger, source-level close of the question this
+  doc's original §"gate A" left open — not "likely impossible", now
+  **confirmed impossible** by exhaustive register enumeration.
+- **There is no separate "WDMA" register block.** No `mtk_wdma.c` exists;
+  "WDMA" is WED's own descriptor-format nomenclature
+  (`struct mtk_wdma_desc`) for the rings it drives toward the wifi
+  device — not a standalone shaping-capable block.
+- **QDMA is already exhaustively covered** by this project's own §13-28:
+  every plausible AQM/HQoS register hardware-tested; scheduler 1/`TX_SEL`
+  confirmed wired-but-dead (§28, 2026-08-31, register-readback +
+  15x-over-cap throughput proof); `HRED2`/`fc_th` also dead (§22.9-22.10);
+  "no vendor-firmware secret to extract" (§28.5). Nothing new to find
+  there.
+- **Genuinely new ground: PSE (Packet Switch Engine).** See below.
+
+## New finding: PSE per-port buffer thresholds (unexplored by §1-38)
+
+`mtk_eth_soc.h:904-922` defines `enum mtk_pse_port` with **`PSE_WDMA0_PORT`
+and `PSE_WDMA1_PORT` as ports architecturally separate from
+`PSE_QDMA_TX_PORT`/`PSE_QDMA_RX_PORT`.`** This is the direct, source-level
+confirmation that PPE-offloaded WLAN-egress traffic never touches a QDMA
+queue at all — it's routed via PSE straight to a WDMA port, bypassing
+everything qdma-shaper/qdma_aqm was built to control.
+
+PSE has its own, never-instrumented register range (`mtk_eth_soc.h:156-173`,
+offsets 0x100-0x1ff — same `1b100000.ethernet` MMIO block as QDMA's
+0x1800+ range, but a different sub-block; confirmed NOT covered by the
+existing `qdma_regs` debugfs, which is hardcoded to the QDMA offset
+range only):
+
+```text
+PSE_FQFC_CFG1/2   0x100/0x104   free-queue flow control (opaque, no field decode in this driver)
+PSE_DROP_CFG      0x108         global drop config
+PSE_PPE_DROP(x)   0x110+4x      per-PPE-instance drop config
+PSE_IQ_REV(x)     0x140+4(x-1)  per-port INPUT queue reservation (pages), x=1..8, packed 2 ports/register
+PSE_OQ_TH(x)      0x160+4(x-1)  per-port OUTPUT queue threshold (pages), same packing
+```
+
+Live init values decoded from `mtk_eth_soc.c:5450-5467` (pairing inferred
+from register-write order matching the enum sequence — **not yet
+verified by register readback**, flagged below): register
+`PSE_OQ_TH(5) = 0x000f000f` covers ports 8-9 (`PSE_WDMA0_PORT`,
+`PSE_WDMA1_PORT`) — both halves decode to **15 pages**, matching
+`PSE_IQ_REV(5) = 0x000e000e` → **14 pages** input reservation. Comparable
+to `PSE_QDMA_TX_PORT` (port 5, also ~15). `PSE_DROP_PORT` (port 7) gets
+`0x1ff` = 511 pages — an outlier, consistent with being a sink port.
+
+**What this is, and isn't:** a per-port shared-buffer occupancy
+cap/backpressure threshold — closer to a hardware tail-drop depth limit
+than a shaper. No rate control, no AQM sophistication, no ECN, no
+per-flow fairness (CAKE has all four; this has none). Lowering
+`PSE_OQ_TH` for the WDMA ports would bound worst-case *standing queue
+depth* for WLAN-egress traffic at the hardware fabric level — a real,
+physically-plausible lever, but:
+
+- **not live-readable today** — no existing debugfs covers this offset
+  range; a new patch (mirroring qos-01's approach) would be needed just
+  to observe it, before any write is trusted;
+- **field-packing/units are inferred from write-order pattern-matching,
+  not a TRM or register readback** — exactly the kind of unverified claim
+  this project's own methodology (§28's dual-scheduler test, §13's
+  Gate A) has repeatedly shown is necessary to hardware-test before
+  trusting;
+- **shared fabric risk**: PSE serves every port (GDM/ethernet MACs, PPE,
+  QDMA, WDMA, drop). A wrong write here risks indiscriminate packet loss
+  across all WLAN traffic — beacons, management frames, other
+  stations — not just the flows you meant to affect, unlike a QDMA
+  per-queue write which is provably isolated (§16.7's soak-test
+  acceptance criteria exist precisely because of this class of risk).
+
+**Recommendation: do not act on this without the same gate discipline
+applied to every other register in this project.** If pursued: (1) add a
+read-only PSE debugfs patch mirroring qos-01, (2) verify the inferred
+port-pairing/units via a controlled write+readback (analogous to §28's
+scheduler-1 test — pick an idle/test-only port pairing if one exists,
+not a live WDMA port, to first prove field semantics without touching
+production traffic), (3) only then consider a live WDMA-port adjustment
+with the same soak-test rigor as §16.7. This is exploratory and
+low-priority given the headline symptom is already fixed — track
+separately, do not block on it.
+
+## Mechanism (if Phase 0 finds a real gap)
+
+Only pursue this if Phase 0 (below) actually finds wifi-bound offloaded
+downloads bypassing CAKE — do not implement pre-emptively now that the
+headline symptom is fixed by the autorate patch.
 
 - Keep hw offload for eth/wan traffic (upload q7 shaping keeps working).
 - Exclude wlan egress from the flowtable: nft rule matching
   `oifname wl0-ap0` / `oifname wl1-ap0` must NOT `flow add @ft`.
 - Non-offloaded wifi-bound downloads then traverse the existing SQM path
-  (layer_cake on ifb4wan per files/etc/config/sqm) — the proven §16.8
-  mode-A CAKE control, restored for the wifi population with no qdisc work.
-- CPU cost at ≤75 Mbps ≪ the ~900 Mbps software-forwarding capacity
-  measured on this box (cacheline-audit / reference doc).
+  (layer_cake on ifb4wan per `files/etc/config/sqm`), now correctly
+  ceilinged by the §38 autorate fix.
+- CPU cost at ~6-10 Mbit/s real sustained capacity (§38.2, not the ~75
+  Mbps contracted line) is trivially below the ~900 Mbps software-
+  forwarding capacity measured on this box.
 
 ## Current box state (2026-09-04, verified)
 
@@ -85,53 +184,61 @@ ch157 @ 30 dBm, current state), then Phase 1 selective-offload rule.
 
 ## The plan
 
-### Phase 0 — baseline (do first)
-Reproduce netsys-qos §33-35 download test with the S23 at its fixed spot,
-current state (offloaded, unshaped for wifi downloads):
-- saturating download to the S23 (wifi leg) while pinging from a WIRED
-  client (192.168.1.6) to WAN + to the S23's IP;
-- record p50/p95/p99/max RTT, loss, retry counts (`iw dev wl1-ap0 station
-  dump`), PPE/WED queue state, CPU;
-- also ping FROM the router to WAN for a clean reference.
-Success metric: a defensible "current damage" number to A/B against.
+### Phase 0 — close the real open question (do first, cheap, decisive)
+Controlled A/B mirroring §36's own methodology, but with an actual wifi
+client (the S23, at its now-measured fixed spot) instead of the wired
+workstation every prior test used:
+- saturating download **to the S23** (not the router, not 192.168.1.6)
+  with `flow_offloading_hw=1` (current default) — watch
+  `/sys/kernel/debug/ppe0/entries` for the flow's presence/QID and
+  `tc -s qdisc show dev ifb4wan` backlog concurrently, plus ping p50/p95/
+  p99/max from a wired client;
+- repeat with `flow_offloading_hw=0` (flows forced to CPU/CAKE path) —
+  same measurements;
+- compare: if CAKE backlog and PPE-entry presence differ meaningfully
+  between the two runs for the *same* wifi-bound flow, offload bypass is
+  real and Phase 1 is justified. If not, the autorate fix already covers
+  wifi clients and this whole thread closes here.
+Success metric: a yes/no answer with hardware telemetry, not inference —
+matching this project's own evidentiary standard throughout §1-38.
 
-### Phase 1 — selective offload rule
+### Phase 1 — selective offload rule (only if Phase 0 confirms a gap)
 nftables: add flowtable offload rules that exclude wlan egress
 (`oifname != "wl0-ap0"` and `!= "wl1-ap0"` on the `flow add @ft` rules —
 confirm exact syntax on the running nft/6.12 stack), keep everything else
-unchanged.
-Verify on box: established wifi-bound downloads do NOT create PPE entries
-(`ppe0` debugfs / flow count), while eth downloads still do; CPU during a
-wifi download stays sane; no regression to upload q7 shaping.
+unchanged. Verify: wifi-bound downloads stop creating PPE entries while
+eth downloads still do; CPU during a wifi download stays sane; no
+regression to upload q7 shaping.
 
-### Phase 2 — A/B (acceptance-criteria pattern from §16.8)
-- Mode A: CAKE, offload off (control, already characterized)
-- Mode B: offload on, unshaped (current state, Phase 0 numbers)
-- Mode D: selective offload (eth offloaded, wifi downloads → CAKE)
-Throughput, p50/p95/p99/max, loss/ECN, CPU, PPE/WED queues; second wired
-client for fairness. Success: D keeps wifi download near ISP rate with
-latency/loss acceptably close to or better than A — i.e., the §33-35
-download problem gone while eth stays offloaded.
+### Phase 2 — A/B validation (only if Phase 1 was built)
+Mode A: CAKE, offload off (control). Mode B: offload on (current
+default). Mode D: selective offload (eth offloaded, wifi downloads →
+CAKE). Throughput, p50/p95/p99/max, loss/ECN, CPU, PPE/WED queues;
+second wired client for fairness. Success: D matches or beats A for wifi
+clients while eth stays offloaded.
 
-### Phase 3 — only if D disappoints
-WDMA register audit for rate-control fields (extend the netsys register-map
-methodology; gate A in netsys-qos §7). Prior low. Also possible: per-station
-fairness needs radio-side airtime (non-enforcing on this silicon) — CAKE
-per-host fairness at the router queue is the software substitute; the power
-raise already shrinks the low-MCS population.
+### PSE exploratory track (independent, low-priority, own gate sequence)
+See "New finding: PSE per-port buffer thresholds" above. Not gated on
+Phase 0-2; track separately since it targets standing-queue depth, not
+rate — a different, complementary problem to any offload-bypass finding.
 
 ## Risks / unknowns
 
-- Flowtable oif-exclusion must be verified EFFECTIVE with PPE on 6.12 —
-  config alone is not proof; check PPE entry creation on a live flow.
+- Phase 0's premise itself is unconfirmed — do not skip straight to
+  Phase 1's implementation on the strength of the architectural argument
+  alone (`PSE_WDMA` ports existing doesn't prove CAKE sees zero traffic,
+  only that it's architecturally possible for it to see none).
+- Flowtable oif-exclusion (if built) must be verified EFFECTIVE with PPE
+  on 6.12 — config alone is not proof; check PPE entry creation on a
+  live flow.
 - NAS→wifi LAN flows must not be swept in (flowtable scope is
   wan-forwarded; confirm no lan→lan offload exists in current config).
 - CAKE per-host fairness cannot fix medium-level airtime waste by a far
   low-MCS station (no HW airtime fairness) — power raise mitigates, does
   not eliminate.
-- Wifi egress CAKE + WED/mt7915 TX interplay: host TX to wlan with WED
-  enabled goes via the mt7915 driver path; verify no double-queue/drop
-  behavior when the qdisc is attached to wl*-ap0.
+- PSE track: field-packing inferred from write-order, not verified by
+  readback — treat as a hypothesis, not a fact, until tested per the
+  gate sequence above.
 
 ## Operating rules (hard locks — CLAUDE.md is source of truth)
 
@@ -145,14 +252,20 @@ raise already shrinks the low-MCS population.
 - Verify router life from a second path (eth0 vs wifi) — IP/reachability
   has drifted before; check the e8450-router-access memory note.
 
+
 ## Cross-references
 
-- docs/netsys-qos-port-investigation.md (§16 q7 shaper, §17 eqos review,
-  §33-35 download problem, gates in §7)
+- docs/netsys-qos-port-investigation.md — §13 (Gate A/QDMA register
+  source), §28 (scheduler-1 decisive negative), §36-38 (bufferbloat root
+  cause + fix, **read this before assuming any WLAN-offload problem
+  exists**)
 - docs/wifi-cpu-and-stability-investigation.md (weak-signal/retry record)
 - docs/wed-v1-opportunities.md, docs/e8450-ppe-validation.md
 - .recall/router-probes/2026-09-04-factory-dump/ (map, dumps, A/B logs)
 - scripts/e8450/eeprom.sh
 - `files/etc/config/{firewall,sqm,sqm-autorate}`, `files/etc/nftables.d/`
+- kernel source (this box's build tree):
+  `build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_mt7622/linux-6.12.94/drivers/net/ethernet/mediatek/`
+  (`mtk_wed_regs.h`, `mtk_eth_soc.h` PSE definitions)
 - commit history: 939ee75e68..9aac9ce12b on e8450-deployed-minimal
   (probe record ca104806ac, tool+map 9aac9ce12b)
