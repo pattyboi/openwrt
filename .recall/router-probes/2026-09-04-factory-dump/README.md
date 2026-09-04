@@ -1,5 +1,10 @@
 # E8450 factory dump + 5 GHz TX-power raise — 2026-09-04
 
+See **EEPROM-MAP.md** in this directory for the full field-by-field map of
+both radio eeproms (offsets, values, cal regions, channel-group mapping,
+power model). Tooling: `scripts/e8450/eeprom.sh` (view/check/set/apply;
+`apply max30` reproduces the flashed image byte-for-byte).
+
 ## Access
 Live box: `ssh root@192.168.1.1` (ARP `80:69:1a:1e:85:83`, eth0 direct,
 pw `Braxtonb112218!`), kernel 6.12.94 (root@DietPi, 2026-09-01), OpenWrt
