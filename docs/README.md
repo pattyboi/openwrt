@@ -41,6 +41,69 @@ vendor changelog without independent verification.
   byte accounting, instead of arbitrary walk order). Reduced p95 latency
   under saturating load from 196 ms to 22-34 ms. See
   [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md).
+- **AQM eviction code review, then built/flashed/hardware-validated**:
+  with the hardware-capability question closed (§28.5), re-read the
+  software AQM eviction path itself and found three fixable software
+  issues: `999-qos-14` dedups a hand-copied PPE accessor, `999-qos-15`
+  removes a doubled `ppe_lock`-guarded flow-table walk from every AQM
+  trigger (reuses pass 1's eviction ranking in pass 2 instead of
+  re-deriving it), and `999-qos-16` fixes a latent `u32` overflow in the
+  byte-threshold auto-compute. Built into a real image, flashed to the
+  live E8450, and hardware-validated: a saturating-load p95 latency test
+  (30.5 ms) landed squarely inside the already-good 22-34 ms band, no
+  dmesg regressions, AQM actively triggering/evicting under load. See
+  [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md)
+  §32-36. A follow-up live A/B (§35) then tuned the AQM's own timing
+  knobs: `grace_ms` dropped from 3000 to **1000 ms** (adopted as the new
+  production default - lower latency and, uniquely, zero packet loss
+  across every rep of a 3-rep saturating-load grid), `poll_ms` stayed at
+  100 (tested, effect too small to justify a change). §36 then checked
+  the **download** direction after a reported external "B" bufferbloat
+  grade: real, severe loaded-latency spikes (p95 300-1200 ms) reproduced,
+  but `tc` telemetry sampled *during* the load shows CAKE's ingress queue
+  (`ifb4wan`) at ~0 backlog and <16 ms internal delay throughout - the
+  router's own queue management is exonerated by direct measurement, not
+  inference. The likely causes (10 real concurrently-associated
+  stations, and/or `sqm-autorate-rust`'s 64 Mbit download ceiling being
+  well above this connection's historically observed 0.3-8 Mbit/s real
+  throughput) are both outside anything a further kernel/CAKE patch on
+  this router could fix.
+- **Hash audit extended, rapidhash evaluated and rejected, both dormant
+  conversions reverted**: swept the rest of the reachable kernel for
+  jhash call sites matching the measured xxh32-winning size class and
+  converted two more (bridge multicast MDB/(S,G) keys, IPv6
+  fragment-reassembly key — `999-xxhash-02`, `999-xxhash-03`). Live
+  telemetry then showed both targets are dormant on this specific router
+  (`multicast_snooping=0`, zero IPv6 fragment-reassembly events in 2+
+  days), so both were reverted rather than carry unexercised patches
+  through future rebases — the audit findings remain documented for
+  later if usage changes. Separately benchmarked
+  [rapidhash](https://github.com/Nicoshev/rapidhash) on real arm64
+  hardware against this tree's actual jhash/xxh32 call-site sizes: xxh32
+  wins at every tested length, so rapidhash was not adopted. See
+  [`selective-xxhash-plan.md`](selective-xxhash-plan.md).
+- **2.4GHz CPU overhead and 5GHz stability**: MT7622 is actually a
+  **dual-core** Cortex-A53 SoC (2 CPUs, not 4 — corrected during this
+  pass). Found all three device IRQs with real per-packet cost
+  (2.4GHz WMAC, Ethernet TX, 5GHz MT7915) statically stacked onto one of
+  the two cores; rebalanced WMAC onto the other (`files/etc/rc.local`).
+  Also found and fixed an mt76-core inefficiency: every 2.4GHz TX-status
+  event unconditionally took a lock and an MMIO register read for up to
+  5 queues regardless of whether they had anything queued
+  (`902-mt76-dma-skip-empty-queue-tx-cleanup.patch`) — confirmed live
+  against the running router: a 4.9x `TASKLET` softirq imbalance between
+  the two cores, and all 5 WMAC hardware queues reading empty even with 8
+  active 2.4GHz clients. For 5GHz stability, identified DFS channel 52's
+  radar-triggered channel switching as a real, distinct instability
+  mechanism, and separately confirmed **background CAC cannot be enabled
+  on this board at all** — not a disabled policy flag, but a genuine
+  missing-second-radio hardware limitation, confirmed both from driver
+  source and live against the router (one 5GHz `wiphy`, no second PHY to
+  host it). Rate control, AMPDU caps, and per-chain TX power were all
+  found to be firmware-only or architecturally unavailable to tune from
+  the host; moving off the DFS channel needs an on-site RF survey this
+  session doesn't have. See
+  [`wifi-cpu-and-stability-investigation.md`](wifi-cpu-and-stability-investigation.md).
 - **Dual hardware scheduler / HW airtime fairness**: both investigated and
   confirmed **dead on this chip** — wired in the register map (inherited
   from the shared v2/v3 template) but with no enforcement circuit behind
@@ -110,11 +173,12 @@ and no patch can add that without new silicon.
 | Doc | Covers |
 |---|---|
 | [`e8450-ppe-validation.md`](e8450-ppe-validation.md) | PPE/WED hardware validation: the ring-desync fix, the PSE port-mapping fix, the controlled-SER investigation and its auto-reboot mitigation, the mt76 upstream pin bump. |
-| [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md) | The full QoS/AQM/HQoS investigation: what NETSYSv1's QDMA block can and cannot do in hardware, the `qos-01`..`qos-13` patch series, and the production HQoS+AQM profile. |
-| [`selective-xxhash-plan.md`](selective-xxhash-plan.md) | Historical A53 hash benchmark, selective seeded xxh32 policy, flowtable use, and thresholded nftables-set wrapper. |
+| [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md) | The full QoS/AQM/HQoS investigation: what NETSYSv1's QDMA block can and cannot do in hardware, the `qos-01`..`qos-16` patch series (including the qos-14/15/16 software-only AQM eviction-path review), and the production HQoS+AQM profile. |
+| [`selective-xxhash-plan.md`](selective-xxhash-plan.md) | Historical A53 hash benchmark, selective seeded xxh32 policy, flowtable/nftables conversions (active), bridge-multicast/IPv6-fragment conversions (reverted — confirmed dormant on this router), and the rapidhash evaluation (measured, not adopted). |
 | [`e8450-upstream-backport-roadmap.md`](e8450-upstream-backport-roadmap.md) | Tracking sheet for which local patches are hand-backports of commits later merged upstream, and candidates for future pin bumps. |
 | [`wed-v1-opportunities.md`](wed-v1-opportunities.md) | Survey of WED-v1-specific opportunities and their disposition. |
 | [`WED-breadcrumb-harness-design.md`](WED-breadcrumb-harness-design.md) | Recovered from an earlier, since-abandoned investigation branch (preserved at git tag `archive/wed-ser-investigation-2026-07-12`); the closing writeup on the controlled-SER MCU-death investigation this fork's own testing later independently reproduced. |
+| [`wifi-cpu-and-stability-investigation.md`](wifi-cpu-and-stability-investigation.md) | 2.4GHz MT7615/WMAC CPU-overhead reduction (IRQ affinity, mt76 core DMA fix) and MT7915 5GHz connection-stability findings (DFS channel-52 radar switching, rate-control/AMPDU/roaming-assist candidates investigated and mostly found low-value or unavailable). |
 
 ## Repo-specific notes for anyone building this
 
