@@ -12,9 +12,21 @@ MT7915=$(grep "mt7915e" /proc/interrupts | \
 WMAC=$(grep "mt7615e" /proc/interrupts | \
   head -1 | awk -F: '{print $1}' | tr -d ' ')
 
+# CPU0 carries ETH_RX, which is mostly PPE-hardware-offloaded (offloaded
+# flows bypass the software NAPI/IP-stack RX path entirely) plus the
+# MT7615/WMAC 2.4GHz radio, which has no WED hardware DMA offload and so
+# pays real per-packet host CPU for every RX/TX-status/MCU interrupt.
+# CPU1 carries ETH_TX (software-forwarded packets, AQM eviction work) and
+# MT7915, whose data path is WED-offloaded and whose host IRQ load is
+# mostly the lighter MCU/status/TX-free work. Before this, WMAC shared
+# CPU1 with both of those, and CPU0 carried only the comparatively idle
+# offloaded ETH_RX - on this SoC's 2 real cores (MT7622 is dual-core
+# Cortex-A53, not quad-core), that left one core doing three device
+# IRQs' worth of work while the other was mostly idle. No irqbalance is
+# installed on this image, so this static assignment never adapts later.
 [ -n "$ETH_RX" ] && echo 1 > "/proc/irq/$ETH_RX/smp_affinity"
 [ -n "$ETH_TX" ] && echo 2 > "/proc/irq/$ETH_TX/smp_affinity"
 [ -n "$MT7915" ] && echo 2 > "/proc/irq/$MT7915/smp_affinity"
-[ -n "$WMAC" ] && echo 2 > "/proc/irq/$WMAC/smp_affinity"
+[ -n "$WMAC" ] && echo 1 > "/proc/irq/$WMAC/smp_affinity"
 
 exit 0

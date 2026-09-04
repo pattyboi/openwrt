@@ -1,0 +1,69 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] mt76: dma: skip lock+MMIO read in tx_cleanup for an already-empty queue
+
+mt76_dma_tx_cleanup(dev, q, false) unconditionally takes q->cleanup_lock
+and does an uncached MMIO register read (mt76_dma_read_dma_idx(), which
+resolves to Q_READ(q, dma_idx) -> readl()) before the while-loop even
+checks whether q->queued is nonzero. For an already-empty queue this
+lock+MMIO cost is pure overhead: the loop condition is `q->queued > 0 &&
+q->tail != last`, so an empty queue does zero work regardless of what
+`last` reads as.
+
+This is not a rare case on the MT7622 SoC-internal MT7615/WMAC (2.4GHz)
+radio, which has no WED hardware DMA offload (unlike the PCIe MT7915
+5GHz path): every TX-status notify event on this chip
+(mt7615_mac_tx_free(), mt7615/mac.c) unconditionally calls
+mt76_queue_tx_cleanup(..., false) once for the PSD queue plus once per
+WMM AC (5 calls total on the non-is_mt7615() MT7622-WMAC branch, versus
+2 calls in mt7915's equivalent handler) - on a dual-core MT7622 SoC
+where this IRQ already shares its one CPU with the 5GHz radio's MCU/
+status work and all software-forwarded Ethernet TX (see this fork's
+IRQ-affinity fix in files/etc/rc.local). Most of those 5 calls hit a
+queue with nothing queued at that moment, each still paying a spinlock
+acquisition and an MMIO round-trip for no result.
+
+Add an early return for the non-flush, empty-queue case before the lock
+is taken. flush=true is deliberately excluded: its post-loop
+mt76_dma_sync_idx()/mt76_dma_kick_queue() calls resync and kick the ring
+unconditionally and callers (queue teardown/reset paths) rely on that
+happening even when nothing was queued, so flush must keep falling
+through exactly as before. This is the shared core DMA path
+(drivers/net/wireless/mediatek/mt76/dma.c), so every mt76 driver that
+calls tx_cleanup from a hot per-event path with flush=false benefits
+(mt7615, mt7603, mt76x02, mt7915's MCU cleanup, mt7921, mt7925), not
+just this board's 2.4GHz radio.
+
+Verified: `dma.o` compiles clean under this package's own `-Werror`
+build flags against the configured 6.12.94 kernel tree (out-of-tree
+module build, cross-toolchain). A full module link was not attempted in
+this session (would require replicating the OpenWrt mac80211-backports
+include environment beyond a bare `make M=` invocation); the change
+itself only reorders an early return using already-in-scope parameters
+and touches no external symbol, so this is a low-risk, behavior-
+preserving change to verify further as part of a normal package build.
+Not hardware-validated - no live E8450 access was available this
+session; a live A/B (mpstat/perf under saturating 2.4GHz traffic) is
+recommended before treating the measured CPU savings as proven, though
+correctness (an empty queue has nothing to clean up) is provable by
+inspection alone.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/dma.c
++++ b/dma.c
+@@ -428,6 +428,15 @@
+ 	if (!q || !q->ndesc)
+ 		return;
+ 
++	/* Non-flush cleanup is opportunistic: an empty queue has nothing to
++	 * reap regardless of the hardware DMA index, so skip the lock and
++	 * the uncached MMIO register read entirely. flush=true must still
++	 * fall through unconditionally: it also resyncs/kicks the ring
++	 * below, which callers rely on even when nothing was queued.
++	 */
++	if (!flush && !q->queued)
++		return;
++
+ 	spin_lock_bh(&q->cleanup_lock);
+ 	if (flush)
+ 		last = -1;
