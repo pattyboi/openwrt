@@ -25,17 +25,44 @@ in this project prior to today's deep-research pass (below).
 **What's still genuinely open, downgraded to low-priority:** all of
 §31-38's validation traffic came from the wired build workstation
 (192.168.1.6 — confirmed via `iperf3 -c`/`iw` grep across those
-sections). None of it tested an actual wifi client. Wired-client
-PPE-offloaded flows route through `PSE_QDMA_TX_PORT`/`PSE_GDM*_PORT`;
-WLAN-bound offloaded flows route through the architecturally distinct
-`PSE_WDMA0_PORT`/`PSE_WDMA1_PORT` (confirmed from
-`mtk_eth_soc.h:904-922`, kernel 6.12.94 build tree — see new §"PSE audit"
-below). So whether the (now-correct) CAKE ceiling actually protects a
-real wifi client's download, or whether that traffic bypasses CAKE
-entirely via hardware offload the same way §13.4 proved for the
-software TX selector, remains untested. Given the headline symptom is
-fixed, this is now an exploratory closing-the-loop question, not an
-active problem — see the revised Phase 0 below.
+sections). None of it tested an actual wifi client. **Definitive
+source evidence (corrected from an earlier draft of this doc — see
+below):** `mtk_flow_set_output_device()` (`mtk_ppe_offload.c:281-384`)
+calls `mtk_foe_entry_set_wdma()` for any flow whose output device
+resolves to a WED-connected wifi interface, and that function
+(`mtk_ppe.c:600-635`, v1/`default` case) sets `MTK_FOE_IB2_WDMA_WINFO` +
+packs BSS/WCID/ring into `l2->vlan2` — it never touches `IB2_QID` or
+sets `IB2_PSE_QOS`. Eth/wan-bound flows instead call
+`mtk_foe_entry_set_queue()` (`mtk_ppe.c:637-653`), which sets exactly
+those two fields — the ones `qdma-shaper`/`qdma_aqm` watch. These two
+functions write mutually exclusive bitfields; a flow takes one path or
+the other. **This means WLAN-bound PPE-offloaded flows never carry a
+QDMA QID at all — confirmed at the bitfield level, not inferred from
+enum/port-topology.** So whether the (now-correct) CAKE ceiling
+actually protects a real wifi client's download, or whether that
+traffic bypasses CAKE entirely the same way §13.4 proved for the
+software TX selector, remains untested — but the mechanism by which it
+*could* bypass is now solidly confirmed, independent of any A/B test.
+
+## New finding: PSE per-port buffer thresholds (unexplored by §1-38)
+
+**Correction to an earlier draft of this doc:** the original claim
+here cited `PSE_WDMA0_PORT`/`PSE_WDMA1_PORT` (`enum mtk_pse_port`,
+`mtk_eth_soc.h:904-922`) as the v1 WLAN-egress routing target. Reading
+`mtk_flow_set_output_device()` fully shows this is wrong for MT7622:
+those enum constants are used only in the `mtk_is_netsys_v2_or_greater()`
+branch; **the v1/`else` branch hardcodes `pse_port = 3`**
+(`mtk_ppe_offload.c:310-312`), committed via
+`mtk_foe_entry_set_pse_port()` → `IB2_DEST_PORT`
+(`mtk_ppe.c:441-451`). Whether that raw "3" aligns with this doc's
+`PSE_OQ_TH`/`PSE_IQ_REV` register-pairing guess (built from the enum's
+ordinal position) is genuinely unknown — the enum's numeric values may
+not correspond 1:1 with v1 hardware's actual `DEST_PORT` numbering
+outside the v2+ code path that defines them. **The bitfield evidence
+above (set_wdma vs set_queue) is the reliable finding; the specific
+register-pairing decode below is a hypothesis, not a fact, pending
+live readback.**
+
 
 ## Why (benefit) — revised
 
@@ -75,15 +102,6 @@ narrative) for every candidate register block on the WLAN-egress path:
   there.
 - **Genuinely new ground: PSE (Packet Switch Engine).** See below.
 
-## New finding: PSE per-port buffer thresholds (unexplored by §1-38)
-
-`mtk_eth_soc.h:904-922` defines `enum mtk_pse_port` with **`PSE_WDMA0_PORT`
-and `PSE_WDMA1_PORT` as ports architecturally separate from
-`PSE_QDMA_TX_PORT`/`PSE_QDMA_RX_PORT`.`** This is the direct, source-level
-confirmation that PPE-offloaded WLAN-egress traffic never touches a QDMA
-queue at all — it's routed via PSE straight to a WDMA port, bypassing
-everything qdma-shaper/qdma_aqm was built to control.
-
 PSE has its own, never-instrumented register range (`mtk_eth_soc.h:156-173`,
 offsets 0x100-0x1ff — same `1b100000.ethernet` MMIO block as QDMA's
 0x1800+ range, but a different sub-block; confirmed NOT covered by the
@@ -100,12 +118,19 @@ PSE_OQ_TH(x)      0x160+4(x-1)  per-port OUTPUT queue threshold (pages), same pa
 
 Live init values decoded from `mtk_eth_soc.c:5450-5467` (pairing inferred
 from register-write order matching the enum sequence — **not yet
-verified by register readback**, flagged below): register
-`PSE_OQ_TH(5) = 0x000f000f` covers ports 8-9 (`PSE_WDMA0_PORT`,
-`PSE_WDMA1_PORT`) — both halves decode to **15 pages**, matching
-`PSE_IQ_REV(5) = 0x000e000e` → **14 pages** input reservation. Comparable
-to `PSE_QDMA_TX_PORT` (port 5, also ~15). `PSE_DROP_PORT` (port 7) gets
-`0x1ff` = 511 pages — an outlier, consistent with being a sink port.
+verified by register readback, and per the correction above, v1's raw
+`DEST_PORT=3` may not even correspond to this enum's ordinal position —
+treat every port attribution below as a guess**): register
+`PSE_OQ_TH(5) = 0x000f000f` — if the enum-ordinal guess holds, this
+covers ports 8-9 (`PSE_WDMA0_PORT`/`PSE_WDMA1_PORT`) — both halves
+decode to **15 pages**, matching `PSE_IQ_REV(5) = 0x000e000e` → **14
+pages**. If instead v1's real WDMA port is "3" as the source literally
+says, the relevant register would be `PSE_OQ_TH(2) = 0x001a000f`
+(high 16 bits, odd port) → **26 pages**. `PSE_DROP_PORT` (port 7)
+gets `0x1ff` = 511 pages regardless of pairing — an outlier, consistent
+with being a sink port. **Only register readback (a debugfs patch) can
+resolve which of these is correct.**
+
 
 **What this is, and isn't:** a per-port shared-buffer occupancy
 cap/backpressure threshold — closer to a hardware tail-drop depth limit
@@ -226,8 +251,9 @@ rate — a different, complementary problem to any offload-bypass finding.
 
 - Phase 0's premise itself is unconfirmed — do not skip straight to
   Phase 1's implementation on the strength of the architectural argument
-  alone (`PSE_WDMA` ports existing doesn't prove CAKE sees zero traffic,
-  only that it's architecturally possible for it to see none).
+  alone (the set_wdma/set_queue bitfield split proves it's
+  architecturally possible for CAKE to see zero WLAN-bound traffic, not
+  that it actually does in practice).
 - Flowtable oif-exclusion (if built) must be verified EFFECTIVE with PPE
   on 6.12 — config alone is not proof; check PPE entry creation on a
   live flow.
