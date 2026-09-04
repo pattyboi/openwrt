@@ -240,7 +240,7 @@ define Device/linksys_e8450
   DEVICE_ALT0_MODEL := RT3200
   DEVICE_DTS := mt7622-linksys-e8450
   DEVICE_DTS_DIR := ../dts
-  DEVICE_PACKAGES := kmod-mt7915-firmware kmod-usb3
+  DEVICE_PACKAGES := kmod-mt7915-firmware
 endef
 TARGET_DEVICES += linksys_e8450
 
@@ -253,7 +253,7 @@ define Device/linksys_e8450-ubi
   DEVICE_ALT0_VARIANT := UBI
   DEVICE_DTS := mt7622-linksys-e8450-ubi
   DEVICE_DTS_DIR := ../dts
-  DEVICE_PACKAGES := kmod-mt7915-firmware kmod-usb3
+  DEVICE_PACKAGES := kmod-mt7915-firmware
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
