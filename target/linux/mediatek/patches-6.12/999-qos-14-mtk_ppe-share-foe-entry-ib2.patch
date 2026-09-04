@@ -1,0 +1,78 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_ppe: share mtk_foe_entry_ib2 with the AQM
+
+mtk_aqm_get_foe_qid() (qos-06, drivers/net/ethernet/mediatek/mtk_eth_soc.c)
+carried its own comment-acknowledged "Mirror of mtk_foe_entry_ib2() from
+mtk_ppe.c (static, inaccessible here)": a byte-for-byte duplicate of
+mtk_foe_entry_ib2()'s MTK_PPE_PKT_TYPE_BRIDGE / >=IPV4_DSLITE / else
+dispatch, hand-copied because the real accessor was `static inline` in
+mtk_ppe.c and mtk_ppe.h only exports mtk_foe_entry_get_stats() alongside
+it.
+
+mtk_foe_entry_ib2() is the accessor the rest of the PPE offload path
+actually mutates through (DSCP write, QID write, MIB-count flag, L2
+subflow ib2 copy - drivers/net/ethernet/mediatek/mtk_ppe.c, several
+call sites). A future edit to its type-dispatch logic (e.g. a
+NETSYSv2+-only QID field change) would have no compiler-enforced link
+to the AQM's hand-copied mirror and could silently desync the AQM's
+QID extraction from the real accessor.
+
+Drop `static inline` so the function has external linkage, declare it
+in mtk_ppe.h next to mtk_foe_entry_get_stats(), and collapse
+mtk_aqm_get_foe_qid() to a single FIELD_GET() over the shared accessor.
+No functional change: verified line-for-line identical dispatch logic
+before this patch.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1332,24 +1332,13 @@
+  * double-clear safe.
+  */
+ 
+-/* Mirror of mtk_foe_entry_ib2() from mtk_ppe.c (static, inaccessible here).
+- * Returns the QID stored in the software copy of the FOE entry's ib2 field.
++/* mtk_foe_entry_ib2() is the shared PPE accessor (mtk_ppe.c); reuse it
++ * instead of hand-duplicating its type dispatch here.
+  */
+ static unsigned int
+ mtk_aqm_get_foe_qid(struct mtk_eth *eth, struct mtk_flow_entry *entry)
+ {
+-	struct mtk_foe_entry *foe = &entry->data;
+-	int type = mtk_get_ib1_pkt_type(eth, foe->ib1);
+-	u32 ib2;
+-
+-	if (type == MTK_PPE_PKT_TYPE_BRIDGE)
+-		ib2 = foe->bridge.ib2;
+-	else if (type >= MTK_PPE_PKT_TYPE_IPV4_DSLITE)
+-		ib2 = foe->ipv6.ib2;
+-	else
+-		ib2 = foe->ipv4.ib2;
+-
+-	return FIELD_GET(MTK_FOE_IB2_QID, ib2);
++	return FIELD_GET(MTK_FOE_IB2_QID, *mtk_foe_entry_ib2(eth, &entry->data));
+ }
+ 
+ #define MTK_QDMA_AQM_MAX_BATCH	64
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.c
+@@ -357,7 +357,7 @@
+ 	return &entry->ipv4.l2;
+ }
+ 
+-static inline u32 *
++u32 *
+ mtk_foe_entry_ib2(struct mtk_eth *eth, struct mtk_foe_entry *entry)
+ {
+ 	int type = mtk_get_ib1_pkt_type(eth, entry->ib1);
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.h
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.h
+@@ -408,6 +408,7 @@
+ int mtk_flow_entry_match_len(struct mtk_eth *eth, struct mtk_foe_entry *entry);
+ bool mtk_flow_entry_match(struct mtk_eth *eth, struct mtk_flow_entry *entry,
+ 			  struct mtk_foe_entry *data, int len);
++u32 *mtk_foe_entry_ib2(struct mtk_eth *eth, struct mtk_foe_entry *entry);
+ void mtk_foe_entry_get_stats(struct mtk_ppe *ppe, struct mtk_flow_entry *entry,
+ 			     int *idle);
+ 

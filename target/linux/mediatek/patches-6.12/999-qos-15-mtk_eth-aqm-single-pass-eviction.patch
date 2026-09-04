@@ -1,0 +1,178 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: AQM eviction: reuse pass 1's scoring in pass 2
+
+qos-13's two-pass score-then-evict eviction re-derived the same result
+twice on every trigger. Pass 1 (mtk_qdma_aqm_score_queue()) walks the
+whole flow table, and for every entry bound to the triggered queue
+(mtk_aqm_get_foe_qid()) calls mtk_foe_entry_get_stats() - which takes
+the global ppe_lock BH spinlock - purely to rank it into a top-`batch`
+set and compute a score cutoff. Pass 2 (mtk_qdma_aqm_unbind_queue())
+then re-walked the *entire* flow table a second time, re-filtered by
+queue, and called mtk_foe_entry_get_stats() a *second* time per
+matching entry just to re-derive the identical score and compare it
+against pass 1's cutoff before evicting.
+
+This is not a rare-path cost: qos-13's own on-hardware measurement
+(docs/netsys-qos-port-investigation.md SS29) saw 17 triggers in ~35 s
+under ordinary household load, so the doubled ppe_lock acquisition and
+doubled flow-table walk recur roughly every 2 s under real traffic.
+qos-13's design note also already flagged the resulting behavior as
+"approximate under score ties across the two passes" - a direct
+symptom of re-deriving rather than reusing pass 1's result: a
+differently-tied candidate can be picked between the two walks because
+each walk sees slightly different byte/idle counters.
+
+Fix: have mtk_qdma_aqm_score_queue() write its selected top-N
+candidates (including each one's entry->hash, the stable per-bound-
+entry PPE slot id already used elsewhere in this file as the
+"unbound" sentinel when == 0xffff) directly into a caller-supplied
+array instead of only returning a scalar cutoff. Pass 2 then becomes a
+cheap scalar membership check (entry->hash against the <=64 saved
+hashes) while walking the table: no mtk_aqm_get_foe_qid() call, no
+mtk_foe_entry_get_stats() call, and no ppe_lock acquisition beyond
+mtk_foe_entry_clear()'s own. This halves ppe_lock traffic on every
+trigger and evicts exactly the entries pass 1 selected, eliminating
+the "approximate ties" caveat entirely.
+
+No hardware register access changes; this is a value-preserving
+strength reduction in the eviction bookkeeping, not a behavioral
+change to which flows are eligible for eviction. Trigger detection
+(qos-12) and the batch/grace_ms cooldown (qos-06) are unchanged.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1346,6 +1346,7 @@
+ struct mtk_qdma_aqm_cand {
+ 	bool	active;	/* idle == 0 at the time it was scored */
+ 	u64	bytes;
++	u16	hash;	/* entry->hash, to re-identify the same entry in pass 2 */
+ };
+ 
+ /* True if @a should be kept over @b when only one of the two can stay in
+@@ -1360,18 +1361,22 @@
+ 	return a->bytes > b->bytes;
+ }
+ 
+-/* Pass 1: score every flow currently bound to @queue (recency via the PPE's
+- * own idle-tick from mtk_foe_entry_get_stats(), the same call the existing
++/* Score every flow currently bound to @queue (recency via the PPE's own
++ * idle-tick from mtk_foe_entry_get_stats(), the same call the existing
+  * flow_offload stats path already makes elsewhere - no new register access)
+- * and keep the @max best candidates by mtk_qdma_aqm_cand_better(). Returns
+- * the worst-kept candidate as the pass-2 cutoff, and the number actually
+- * found (may be less than @max).
++ * and keep the @max best candidates by mtk_qdma_aqm_cand_better() in @top.
++ * Returns the number of candidates written to @top (may be less than @max).
++ *
++ * @top's entry->hash values are the pass-2 eviction set: the caller must
++ * evict exactly these entries, not re-derive the same ranking a second
++ * time. Re-scoring in pass 2 could disagree with pass 1 on tie-breaks
++ * (both counts change between the two walks) and would double the
++ * ppe_lock/mtk_foe_entry_get_stats() cost of every trigger for no benefit.
+  */
+ static unsigned int
+ mtk_qdma_aqm_score_queue(struct mtk_eth *eth, unsigned int queue,
+-			 unsigned int max, struct mtk_qdma_aqm_cand *cutoff)
++			 unsigned int max, struct mtk_qdma_aqm_cand *top)
+ {
+-	struct mtk_qdma_aqm_cand top[MTK_QDMA_AQM_MAX_BATCH];
+ 	struct rhashtable_iter iter;
+ 	struct mtk_flow_entry *entry;
+ 	unsigned int n_top = 0;
+@@ -1393,12 +1398,13 @@
+ 
+ 		/* mtk_foe_entry_get_stats() takes ppe_lock (BH spinlock);
+ 		 * safe under the RCU read lock rhashtable_walk holds, same
+-		 * as the mtk_foe_entry_clear() call this replaces below.
++		 * as the mtk_foe_entry_clear() call in pass 2.
+ 		 */
+ 		mtk_foe_entry_get_stats(eth->ppe[entry->ppe_index], entry,
+ 					&idle);
+ 		cand.active = !idle;
+ 		cand.bytes  = entry->bytes;
++		cand.hash   = entry->hash;
+ 
+ 		if (n_top < max) {
+ 			top[n_top++] = cand;
+@@ -1415,25 +1421,32 @@
+ 
+ 	rhashtable_walk_stop(&iter);
+ 	rhashtable_walk_exit(&iter);
+-
+-	worst = 0;
+-	for (i = 1; i < n_top; i++)
+-		if (mtk_qdma_aqm_cand_better(&top[worst], &top[i]))
+-			worst = i;
+-	if (n_top)
+-		*cutoff = top[worst];
+ 	return n_top;
+ }
+ 
+-/* Pass 2: evict up to @max flows bound to @queue whose score meets pass 1's
+- * cutoff (currently-active flows first, ranked by cumulative bytes), instead
+- * of qos-06's original arbitrary rhashtable-walk-order eviction.
++static bool mtk_qdma_aqm_hash_selected(const struct mtk_qdma_aqm_cand *top,
++				       unsigned int n_top, u16 hash)
++{
++	unsigned int i;
++
++	for (i = 0; i < n_top; i++)
++		if (top[i].hash == hash)
++			return true;
++	return false;
++}
++
++/* Evict exactly the flows pass 1 selected for @queue (currently-active
++ * flows first, ranked by cumulative bytes), instead of qos-06's original
++ * arbitrary rhashtable-walk-order eviction. Pass 2 only needs to re-find
++ * each selected entry.hash while walking the table; it must not re-derive
++ * the queue/score, which would cost a second ppe_lock'd stats read per
++ * candidate for a result pass 1 already computed.
+  */
+ static unsigned int
+ mtk_qdma_aqm_unbind_queue(struct mtk_eth *eth, unsigned int queue,
+ 			  unsigned int max)
+ {
+-	struct mtk_qdma_aqm_cand cutoff = { };
++	struct mtk_qdma_aqm_cand top[MTK_QDMA_AQM_MAX_BATCH];
+ 	struct rhashtable_iter iter;
+ 	struct mtk_flow_entry *entry;
+ 	unsigned int cleared = 0;
+@@ -1443,32 +1456,20 @@
+ 		return 0;
+ 
+ 	max = min_t(unsigned int, max, MTK_QDMA_AQM_MAX_BATCH);
+-	n_top = mtk_qdma_aqm_score_queue(eth, queue, max, &cutoff);
++	n_top = mtk_qdma_aqm_score_queue(eth, queue, max, top);
+ 	if (!n_top)
+ 		return 0;
+ 
+ 	rhashtable_walk_enter(&eth->flow_table, &iter);
+ 	rhashtable_walk_start(&iter);
+-
+-	while (cleared < max) {
+-		struct mtk_qdma_aqm_cand cand;
+-		int idle;
+ 
++	while (cleared < n_top) {
+ 		entry = rhashtable_walk_next(&iter);
+ 		if (!entry)
+ 			break;
+ 		if (IS_ERR(entry))
+ 			continue;
+-		if (entry->hash == 0xffff)
+-			continue;
+-		if (mtk_aqm_get_foe_qid(eth, entry) != queue)
+-			continue;
+-
+-		mtk_foe_entry_get_stats(eth->ppe[entry->ppe_index], entry,
+-					&idle);
+-		cand.active = !idle;
+-		cand.bytes  = entry->bytes;
+-		if (mtk_qdma_aqm_cand_better(&cutoff, &cand))
++		if (!mtk_qdma_aqm_hash_selected(top, n_top, entry->hash))
+ 			continue;
+ 
+ 		/* mtk_foe_entry_clear() takes ppe_lock (BH spinlock).

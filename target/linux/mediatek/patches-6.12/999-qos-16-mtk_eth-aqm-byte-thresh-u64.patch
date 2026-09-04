@@ -1,0 +1,50 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: fix u32 overflow in AQM auto byte_thresh
+
+qos-12's auto byte_thresh computation (50% of queue capacity) did
+`eff * poll_ms` in 32-bit arithmetic before dividing by 16, where `eff`
+is eth->qdma_effective_kbps[q]. `eff` can legitimately be 1,000,000 for
+an uncapped Gigabit-linked queue (mtk_qdma_v1_link_word()'s SPEED_1000
+case), or an arbitrary larger value via the persisted-override write
+path (mtk_qdma_rate_write(), which validates only kbps <= U32_MAX), and
+`poll_ms` is user-settable 10-10000 via the qdma_aqm debugfs write.
+
+The multiply overflows u32 whenever eff * poll_ms > 4,294,967,295:
+reachable at the debugfs-allowed max poll_ms=10000 with any
+eff > ~429,497 kbps (i.e. stock Gigabit-link default alone, no override
+needed), or at the default poll_ms=100 with an override kbps typo north
+of ~43M kbps. The wraparound silently produces an incorrect
+byte_thresh - spurious over- or under-triggering of flow eviction, with
+no error or log signal - defeating the documented "50% of queue
+capacity" trigger semantics.
+
+Not hit by the current production default (q7 @ 8300 kbps, poll_ms=100
+-> 8300*100 = 830,000, nowhere near overflow), so this is latent, not
+currently firing, but it is a real defect in a shipped, user-facing
+debugfs ABI. Widen the multiply to u64 and clamp (saturate, don't wrap)
+the result into the u32 byte_thresh destination.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1538,9 +1538,17 @@
+ 	 * halve for the 50 % trigger point -> / 16.
+ 	 */
+ 	if (!byte_thresh) {
+-		u32 eff = eth->qdma_effective_kbps[q];
++		u64 eff = eth->qdma_effective_kbps[q];
+ 
+-		byte_thresh = max(1u, eff * poll_ms / 16u);
++		/* Widen to u64 before the multiply: eff can legitimately be
++		 * 1,000,000 (uncapped Gigabit link) or an arbitrary operator
++		 * override via qdma_rate_write(), and poll_ms can be up to
++		 * 10000 via the qdma_aqm debugfs write, so eff * poll_ms can
++		 * exceed U32_MAX and silently wrap in 32-bit arithmetic.
++		 * clamp_t saturates instead of wrapping if the /16 result
++		 * still doesn't fit the u32 byte_thresh destination.
++		 */
++		byte_thresh = clamp_t(u64, eff * poll_ms / 16, 1, UINT_MAX);
+ 	}
+ 
+ 	/* Trigger (a): hardware tail-drop.

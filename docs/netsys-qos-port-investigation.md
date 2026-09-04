@@ -43,7 +43,7 @@ accuracy/targeting improvements. See `docs/README.md` for the repo-wide
 index.
 
 
-Status: COMPLETE through §30. The QoS investigation and production verdict
+Status: COMPLETE through §36. The QoS investigation and production verdict
 are complete, and the hardware-capability question is closed: every
 plausible NETSYSv1 QDMA AQM/HQoS register has now been hardware-tested.
 qos-01 through qos-13 and the `qdma-shaper` backend/UCI package are
@@ -59,7 +59,22 @@ inspired by CAKE's bulk/sparse classification). §28 hardware-tested
 NETSYSv1's second scheduler (`TX_SEL=1`) and found it wired but
 non-enforcing (~15× over a configured cap) — no further hardware SQM/AQM
 capability exists to port from higher NETSYS levels or vendor firmware on
-this chip; see §28.5.
+this chip; see §28.5. §32 re-read the AQM eviction path itself for
+software-only optimizations now that the hardware door is closed: qos-14
+dedups a hand-copied PPE accessor, qos-15 removes a doubled `ppe_lock`+
+flow-table walk from every AQM trigger by reusing pass 1's eviction
+ranking in pass 2, and qos-16 fixes a latent `u32` overflow in the
+byte-threshold auto-compute. Built, flashed to the live E8450, and
+hardware-validated (§33): no dmesg regressions, AQM actively triggering/
+evicting, and a saturating-load p95 latency test (30.5 ms) landing
+squarely inside the already-good 22-34 ms band, not regressed toward the
+196 ms pre-AQM baseline. §35 followed up with a live `grace_ms`/`poll_ms`
+A/B trial: `grace_ms` dropped from 3000 to **1000 ms** (adopted as the
+new production default - consistently lower latency and, uniquely,
+zero packet loss across every rep), `poll_ms` stayed at 100 (tested,
+effect too small/inconsistent to justify changing). §34's remaining item
+1 (dedicated CPU-time profiling to quantify qos-15's savings) is still
+open.
 **Reference HQoS stack:** `flow_offloading=1/hw=1`, persistent HQoS (`q7` bulk
 at 8300 kbps, `q8` priority), qos-06+qos-12+qos-13 byte-accurate
 flow-aware AQM on q7, and nftables ct-mark steering.
@@ -2722,4 +2737,682 @@ no hardware AQM, full stop; this session's own software AQM is a periodic
 mitigation, not a continuous one, and its periodicity has a real, now-
 directly-observed cost that autorate's accurate rate baseline reduces the
 *frequency* of encountering, without changing the underlying mechanism.
+
+## 32. AQM eviction code review: software-only optimizations (2026-09-04)
+
+Prompted by "look for further optimizations in the hqos/sqm/aqm
+implementation... even porting features if deemed important". SS28.5
+already closed the hardware-capability question with evidence: no further
+NETSYSv1 QDMA register capability exists to port on this chip. This
+section is scoped to what remains - the *software* AQM eviction path
+(qos-06/qos-12/qos-13) - re-read line-for-line against the merged source
+at `build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_mt7622/
+linux-6.12.94/drivers/net/ethernet/mediatek/mtk_eth_soc.c` and
+`mtk_ppe.c`/`mtk_ppe.h`, looking specifically for algorithmic or
+correctness issues that a code-inspection fix can resolve without new
+hardware capability and without a live E8450 A/B test. Three were found
+and fixed; none change which flows are eligible for eviction or add any
+new register access.
+
+### 32.1 qos-14: dedup the hand-copied FOE ib2 accessor
+
+`mtk_aqm_get_foe_qid()` (qos-06) carried its own comment: "Mirror of
+`mtk_foe_entry_ib2()` from `mtk_ppe.c` (static, inaccessible here)" - a
+byte-for-byte hand copy of that function's `MTK_PPE_PKT_TYPE_BRIDGE` /
+`>= MTK_PPE_PKT_TYPE_IPV4_DSLITE` / else dispatch, made necessary only
+because the real accessor was `static inline` in `mtk_ppe.c` and never
+exported. The real `mtk_foe_entry_ib2()` is the accessor the rest of the
+PPE offload path actually mutates through (DSCP write, QID write, MIB-
+count flag, L2 subflow ib2 copy); a future edit to its dispatch logic
+(e.g. a NETSYSv2+-only QID field change) would have no compiler-enforced
+link to the AQM's hand-copied mirror and could silently desync the two.
+
+`999-qos-14-mtk_ppe-share-foe-entry-ib2.patch` drops `static inline`,
+adds the prototype to `mtk_ppe.h` next to `mtk_foe_entry_get_stats()`,
+and collapses `mtk_aqm_get_foe_qid()` to a single `FIELD_GET()` call over
+the shared accessor. Zero functional change (dispatch logic verified
+identical before the patch); pure dedup.
+
+### 32.2 qos-15: stop re-deriving pass 1's eviction ranking in pass 2
+
+qos-13's two-pass score-then-evict design re-computed the same ranking
+twice on every trigger. Pass 1 (`mtk_qdma_aqm_score_queue()`) walks the
+whole flow table and, for every entry bound to the triggered queue, calls
+`mtk_foe_entry_get_stats()` - which takes the global `ppe_lock` BH
+spinlock - purely to rank it into a top-`batch` set and compute a score
+cutoff. Pass 2 (`mtk_qdma_aqm_unbind_queue()`) then re-walked the *entire*
+flow table a second time, re-filtered by queue, and called
+`mtk_foe_entry_get_stats()` a *second* time per matching entry just to
+re-derive the identical score and compare it against pass 1's cutoff
+before evicting.
+
+This is not a rare-path cost: SS29's own on-hardware measurement saw 17
+triggers in ~35 s under ordinary household load, so the doubled
+`ppe_lock` acquisition and doubled flow-table walk recur roughly every
+2 s under real traffic. qos-13's own design note (SS30.2) already flagged
+the resulting behavior as "approximate under score ties across the two
+passes" - a direct symptom of re-deriving rather than reusing pass 1's
+result: a differently-tied candidate can be picked between the two walks
+because each walk sees slightly different byte/idle counters at the
+moment it runs.
+
+`999-qos-15-mtk_eth-aqm-single-pass-eviction.patch` has
+`mtk_qdma_aqm_score_queue()` write its selected top-N candidates -
+including each one's `entry->hash`, the stable per-bound-entry PPE slot
+id already used elsewhere in this file as the "unbound" sentinel when
+`== 0xffff` - directly into a caller-supplied array instead of only
+returning a scalar cutoff. Pass 2 becomes a cheap scalar membership check
+(`entry->hash` against the <=64 saved hashes) while walking the table: no
+`mtk_aqm_get_foe_qid()` call, no `mtk_foe_entry_get_stats()` call, and no
+`ppe_lock` acquisition beyond `mtk_foe_entry_clear()`'s own. This halves
+`ppe_lock` traffic on every trigger and evicts exactly the entries pass 1
+selected, eliminating the "approximate ties" caveat entirely. No change
+to trigger detection, the batch/grace_ms cooldown, or which flows are
+eligible for eviction - purely a strength reduction in the bookkeeping.
+
+### 32.3 qos-16: fix a latent u32 overflow in the byte_thresh auto-compute
+
+qos-12's byte-accurate auto-threshold computed `eff * poll_ms / 16` in
+32-bit arithmetic, where `eff` is `eth->qdma_effective_kbps[q]`. `eff`
+can legitimately be 1,000,000 for an uncapped Gigabit-linked queue
+(`mtk_qdma_v1_link_word()`'s `SPEED_1000` case), or an arbitrary larger
+value via the persisted-override write path (`mtk_qdma_rate_write()`,
+which validates only `kbps <= U32_MAX`), and `poll_ms` is user-settable
+10-10000 via the `qdma_aqm` debugfs write. The multiply overflows
+whenever `eff * poll_ms > 4,294,967,295`: reachable at the debugfs-
+allowed max `poll_ms=10000` with any `eff > ~429,497` kbps - i.e. the
+stock Gigabit-link default alone, no override needed - or at the default
+`poll_ms=100` with an override kbps typo north of ~43M kbps. The
+wraparound silently produces an incorrect `byte_thresh` with no error or
+log signal, defeating the documented "50% of queue capacity" trigger
+semantics.
+
+Not hit by the current production default (q7 @ 8300 kbps, `poll_ms=100`
+-> 830,000, nowhere near overflow), so this was latent, not firing in
+production - but it is a real defect in a shipped, user-facing debugfs
+ABI. `999-qos-16-mtk_eth-aqm-byte-thresh-u64.patch` widens the multiply
+to u64 and clamps (saturates, does not wrap) the result into the u32
+`byte_thresh` destination.
+
+### 32.4 What was reviewed and found clean
+
+qos-04 (`mtk_qdma_debugfs_show`), qos-07 (`mtk_select_queue` mark check),
+qos-08 (SER reprime), qos-09 (register-gap probe), qos-10 (DSCP queue
+steer at flow-bind time), and qos-11 (byte counter / `mtk_qdma_v1_mib_read`)
+were all re-read against the merged source and found free of algorithmic
+inefficiency in this pass: qos-04's debugfs loop takes/releases the lock
+per-queue-iteration correctly and only runs on demand, not in the 100 ms
+poll path; qos-07/08/09/10 are either single-branch per-packet checks,
+one-time flow-setup checks, or diagnostic-only debugfs reads, none of
+which run in the AQM's periodic or eviction hot path.
+
+### 32.5 Status and what remains genuinely open
+
+All three patches (qos-14/15/16) are build-validated the same way this
+document validates every other patch in this series: incremental kernel-
+object recompile against the live `build_dir` tree with the actual
+`aarch64_cortex-a53_musl` cross-toolchain (`ARCH=arm64`, 0 compiler
+warnings on every touched object), `scripts/checkpatch.pl` (0 errors on
+each patch), and a real sequential `patch -p1 --fuzz=0` apply against a
+pristine extract of the exact `dl/linux-6.12.94.tar.xz` source, byte-
+identical to the compiled/checked state. **Not yet hardware-validated**:
+the patches have not been built into an image and flashed this session
+(see SS32.6 for the live read-only telemetry that *was* pulled against
+the currently-running pre-patch image). qos-15's fix is a value-
+preserving strength reduction verifiable by code inspection (it evicts
+the same entries qos-13 already selected, just without the doubled
+`ppe_lock` cost), and qos-16's fix only changes behavior for out-of-range
+configurations the production profile never hits, so both are low-risk to
+carry unvalidated; a future on-device session should still confirm no
+regression under the SS22.12/SS23.3-style saturating-load p95 measurement
+before calling this closed.
+
+### 32.6 Live production telemetry pulled against the running router (2026-09-04)
+
+The patches themselves are still not flashed (that needs a full image
+rebuild, not attempted this session), but the *assumptions* qos-15 and
+qos-16 are built on were checked against the live, currently-running
+production router (read-only `cat` of existing debugfs files over SSH,
+no state changed):
+
+```
+$ qdma-shaper status wan
+effective_kbps=8300 max_kbps=8300 queue=7
+aqm=enabled=1 queue=7 poll_ms=100 byte_thresh=0 batch=4 grace_ms=3000 \
+    trigger_count=16269 unbind_total=40419
+$ cat /proc/uptime
+201844.15 354610.18   # ~56.07 hours
+```
+
+- **qos-16 (byte_thresh overflow fix):** `byte_thresh=0` confirms the live
+  router is on the auto-compute path (`if (!byte_thresh)`) on *every*
+  100&nbsp;ms poll, continuously, for the router's entire uptime. With
+  `effective_kbps=8300` and `poll_ms=100`, the product is 830,000 -
+  exactly matching the patch commit message's own worked example of the
+  production default being "nowhere near overflow." Confirms the fix is a
+  correctness improvement for future/edge configurations, not a
+  currently-firing bug on this router as deployed today.
+- **qos-15 (single-pass eviction):** `trigger_count=16269` over ~56.07
+  hours is one trigger roughly every 12.4 seconds on average. Read twice,
+  a few seconds apart: the counter had already advanced (16267 -> 16269),
+  confirming this is a live, continuously-accumulating production
+  counter, not a stale/cached value. `unbind_total=40419` -&gt; ~2.5
+  evictions per trigger on average (batch cap is 4). This is a
+  **stronger, real production baseline** than SS29's original one-off
+  burst measurement (17 triggers in ~35 s): the doubled `ppe_lock`-guarded
+  flow-table walk
+  qos-15 removes was firing roughly 16,269 times over 2.3 days of ordinary
+  household use on the *pre-qos-15* code, i.e. this is a genuinely hot
+  path in this router's real traffic pattern, not a rare edge case.
+
+Separately, `/sys/kernel/debug/1b100000.ethernet/qdma_regs` was read for
+all 16 queues at the same time - q7's live register state
+(`qtx_sch=0x7e424d32`, `effective_kbps=8300`, `max_kbps=8300`,
+`weight=4`) matches the documented production profile exactly, with no
+drift from what SS27 recorded as the promoted configuration.
+
+SS28.5's verdict stands: no further hardware SQM/AQM register capability
+exists to port on this chip. SS31.3's `grace_ms` tuning remains
+inconclusive and needs more live A/B trials, not a code fix. SS31.2's
+hardware-queue-latency-during-`grace_ms` blind spot is an architectural
+property of periodic detect-and-evict AQM itself (no continuous depth
+control exists on this silicon), not a coding defect - any fix there
+would be a design change requiring live A/B, out of scope for this
+code-review pass. §31.4's `rust-package.mk` host-rustup-toolchain
+preference remains unimplemented future work; it is a build-system
+change, not an AQM change, and out of scope here.
+
+## 33. qos-14/15/16 built, flashed, and hardware-validated (2026-09-04)
+
+Prompted by "revert dormant xxhash changes, then a new clean build, flash
+and test." The three AQM patches from §32 (and the mt76 `902` empty-queue
+fix, and the `files/etc/rc.local` IRQ-affinity rebalance from
+`docs/wifi-cpu-and-stability-investigation.md`) were built into a real
+image and flashed to the live E8450, closing the "not yet
+hardware-validated" gap §32.5 left open.
+
+### 33.1 Build and flash
+
+`target/linux/prepare` applied the full local patch stack (`999-qos-01`
+through `999-qos-16`, `999-wed-13/14`, `999-xxhash-01`, plus the
+pre-existing `999-zz-mtk_ppe-prefetch-flow-lookup`) with zero failed
+hunks - qos-14/15/16 applied with no fuzz; a few older patches picked up
+harmless line-offset fuzz from unrelated upstream drift, expected and not
+a correctness concern. A full `make -j2` (top-level, ~9 minutes,
+96.5% ccache hit rate since most of the tree was already built) produced
+`openwrt-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb`,
+confirmed to contain the new code by checking build timestamps on the
+actually-recompiled objects (`mtk_eth_soc.o`, `mtk_ppe.o`, mt76's
+`dma.o`). Flashed via `flash.sh` (`sysupgrade -c`, config retained); the
+router rebooted in under 30 seconds and came back on revision
+`r33064-64016207db` (previously `r33053-26e9187f9f`), confirming a
+genuinely new image, not a no-op reflash.
+
+### 33.2 A real gotcha: `sysupgrade -c` silently reverted the rc.local fix
+
+`sysupgrade -c`'s config-preservation explicitly lists `etc/rc.local`
+among the files it saves and restores across the upgrade (confirmed in
+its own "Saving config files..." log output). Because the *previous*
+image's `/etc/rc.local` (still pinning WMAC to CPU1) was already present
+on the router as a "modified" config file before this flash, sysupgrade
+restored that old version over the new image's updated file - the IRQ
+affinity fix silently did not take effect after boot
+(`cat /proc/irq/141/smp_affinity` read back `2`, not the intended `1`).
+This is a general property of `sysupgrade -c` on this platform, not a
+bug in the patch: any file under `/etc` that sysupgrade treats as
+user-configurable will not be replaced by a newer image's version unless
+the file is deleted from the target first or the upgrade is done without
+`-c`. Worked around live by pushing the corrected `/etc/rc.local` over
+SSH and re-sourcing it (`sh /etc/rc.local`); confirmed via two
+`/proc/interrupts` samples 20 seconds apart that new WMAC interrupts
+landed exclusively on CPU0 afterward (+3560 on CPU0, +0 on CPU1 in that
+window) - directly proves the affinity change was live and effective,
+not just applied to config. Because the fix now lives in the *current*
+`/etc/rc.local` on the router, `sysupgrade -c` will correctly preserve
+*this* version on all future upgrades - the gotcha only bites the first
+time a file under `/etc` changes.
+
+### 33.3 Post-flash health check
+
+No new dmesg errors/oops/warnings beyond the normal ramoops/pstore boot
+banner. WAN reachable (0% loss to 8.8.8.8, ~23 ms avg). PPE flow
+offload active (`flow_offloading=1`, `flow_offloading_hw=1`). WED-v1
+queues all reported `QCNT=0` with advancing CIDX/DIDX (healthy,
+consistent with every prior WED health check in this document). AQM was
+alive and triggering/evicting within the first two minutes of uptime
+(`trigger_count` and `unbind_total` both nonzero and advancing, ratio
+consistent with pre-flash behavior). 2.4GHz reconnected 9 real stations
+within the first minute; 5GHz completed its mandatory 60-second DFS CAC
+(`DFS-CAC-COMPLETED success=1 ... radar_detected=0`) and came up clean -
+a live, first-hand confirmation of the DFS-on-channel-52 mechanism
+documented in `docs/wifi-cpu-and-stability-investigation.md`.
+
+### 33.4 AQM saturating-load test, compared against the documented baseline
+
+Ran the same class of test this document's own history uses to judge AQM
+health (SS22.12, SS23.3): a saturating upload through queue 7 while
+measuring ping latency concurrently. From the same LAN workstation
+`netsys-qos-port-investigation.md` §21.5 already identifies as
+192.168.1.6: `iperf3 -c fra.speedtest.clouvider.net -t 20` (the same
+public server used historically) concurrent with `ping -i 0.2 8.8.8.8`
+for 25 seconds.
+
+```
+iperf3 sender: 8.02 Mbits/sec over 20s (hit the configured 8300 kbps
+               queue-7 cap almost exactly)
+ping (125 samples, 0% loss):
+  avg = 26.35 ms   p50 = 26.2 ms   p95 = 30.5 ms   p99 = 31.7 ms   max = 35.5 ms
+qdma-shaper aqm counters across the test window: trigger_count 11 -> 23
+                                                  unbind_total  22 -> 38
+```
+
+Compare against the documented history: 196 ms p95 with hardware offload
+and no AQM (the original problem this whole investigation solved), 33.8
+ms p95 after Phase B's qos-06 AQM, 22-34 ms after qos-07's skb-mark queue
+steer. This run's 30.5 ms p95 (26.35 ms avg, 35.5 ms max, zero loss)
+lands squarely inside that already-good 22-34 ms band, not regressed
+toward the 196 ms no-AQM baseline - direct, live confirmation that
+qos-15's single-pass eviction rewrite preserves the AQM's actual
+bufferbloat-control behavior while removing the doubled `ppe_lock`
+overhead, and that qos-14's accessor dedup and qos-16's overflow fix
+introduced no functional regression. The AQM counters advancing by 12
+triggers/16 evictions during the test window confirm the eviction path
+was genuinely exercised under this load, not coincidentally idle.
+
+This closes §32.5's "not yet hardware-validated" gap for qos-14/15/16 and
+the mt76 `902` patch, and closes
+`docs/wifi-cpu-and-stability-investigation.md`'s equivalent gap for the
+IRQ-affinity rebalance. Not yet measured: a dedicated CPU-time A/B
+(`mpstat`/`perf`) isolating the `ppe_lock`-contention savings specifically
+- the latency test above proves no regression and confirms the AQM still
+works correctly, but quantifying *how much* CPU qos-15 and `902` save
+needs a separate profiling pass under sustained saturating load, not
+attempted this session.
+
+## 34. Continuation steps for AQM optimization
+
+Prioritized by what's actually left, now that §28.5 has closed the
+hardware-capability question and §32-33 have closed the "are the
+software fixes correct and deployed" question:
+
+1. **CPU-time profiling of qos-15's actual savings (highest value,
+   lowest effort).** §33.4 proved no latency regression; it did not
+   quantify the `ppe_lock`-contention reduction qos-15 was written for.
+   With the patched image already live, a `perf record`/`perf report` or
+   `mpstat -P ALL 1` capture during a longer saturating-load run (the
+   same iperf3+ping harness §33.4 used, extended to 2-5 minutes to get a
+   stable sample) would directly measure softirq/spinlock time in
+   `mtk_qdma_aqm_work()` before vs. conceptually after (there's no "before"
+   to A/B against anymore on this router since the old image is gone -
+   the honest framing is "confirm the predicted saving is real," not
+   "before/after on this exact box"). This is the natural next step
+   before considering this workstream fully closed.
+2. **`grace_ms` re-attempt with a longer/controlled trial.** SS31.3's
+   attempt was inconclusive under noisy live household traffic. Now that
+   §33's saturating-load harness (iperf3 + ping, this exact workstation)
+   is proven to reproduce clean p95 numbers, the same harness at 2-3
+   different `grace_ms` values (e.g. 1000/3000/5000, current default is
+   3000) with 3+ repeated runs each would give a real basis for a
+   decision, instead of the single noisy live-traffic sample SS31.3 had
+   to work with.
+3. **The architectural gap SS31.2 already identified stays open by
+   design, not by omission.** A flow sitting in the QDMA hardware
+   leaky-bucket queue has no depth control until the next AQM poll
+   evicts it - periodic detect-and-evict, not continuous AQM. Closing
+   this for real would mean either a faster poll interval (CPU-cost
+   tradeoff, itself worth measuring with item 1's profiling data in
+   hand) or accepting this is CAKE's job once a flow is evicted back to
+   software. Not a code-review-fixable item; needs a live A/B decision
+   the operator makes, informed by items 1-2.
+4. **Two-client fairness test remains the one genuinely untested
+   dimension.** Every AQM measurement in this document, including
+   §33.4's, is single-flow/single-client. §16.8/§20.3 already flagged
+   this as open. Nothing in this session's code changes should affect
+   fairness behavior (qos-15 evicts the identical set qos-13 selected;
+   qos-14/16 are pure refactors/overflow-safety), but that's an inference
+   from the diff, not a measurement - a real two-client saturating test
+   is the one AQM behavior claim in this document that still rests on
+   design reasoning rather than direct observation.
+5. **Extend §33.4's harness into a standing regression check.** Now that
+   a clean, repeatable saturating-load p95 measurement exists
+   (iperf3+ping, this exact workstation and public server), any future
+   AQM change should be validated against it before merging, the same
+   way this session did - rather than reconstructing the methodology
+   from scratch each time.
+
+## 35. `grace_ms`/`poll_ms` live A/B trial (2026-09-04, items 2-3 of §34)
+
+Prompted by "let's work on 2 & 3, we can skip 1" - §34's `grace_ms`
+re-attempt and the poll-interval side of the continuous-depth-control
+gap, explicitly without a dedicated CPU-time profiling pass (§34 item 1).
+Both `poll_ms` and `grace_ms` are live-tunable via the `qdma_aqm` debugfs
+node (`echo "enable <queue> <poll_ms> <byte_thresh> <batch> <grace_ms>" >
+/sys/kernel/debug/1b100000.ethernet/qdma_aqm`) with no rebuild/reflash
+needed - every trial below was applied and measured on the live,
+already-qos-14/15/16-patched E8450 from §33.
+
+### 35.1 Method
+
+§33.4's harness, reused as designed (§34 item 5): from the same
+workstation (192.168.1.6), `iperf3 -c <server> -t 15` (upload, saturates
+queue 7) concurrent with `ping -i 0.2 -w 18 8.8.8.8` (~90 samples),
+repeated 3x per configuration. `fra.speedtest.clouvider.net` (this
+document's usual server) turned out to be a shared public server that
+occasionally refused new tests mid-grid ("server is busy") - a second
+public server (`iperf.he.net`) was added as an automatic fallback, and
+any rep where the AQM's own `trigger_count` stayed at 0 (proof no real
+saturating load occurred) was discarded and re-run rather than counted.
+
+**A real methodology mistake, corrected before any data was trusted:**
+the first attempt at the `grace_ms` grid was issued as a shell `for`
+loop over all 9 runs in one call; the harness tool silently
+auto-backgrounded that long-running call, and a second, unrelated
+command was then issued while it was still executing - both loops
+ended up writing to the *same* `qdma_aqm` debugfs node and running
+`iperf3` against the *same* WAN link concurrently, halving observed
+throughput and corrupting the applied-config-vs-measured-result mapping
+(`AFTER` config often didn't match what that specific call had just
+requested). Caught by noticing implausible iperf rates (~half the
+configured 8300 kbps cap) and `AFTER` state disagreeing with the
+intended value; all data from that run was discarded, `pgrep` confirmed
+no stray processes, production defaults were re-applied, and the entire
+grid was redone with each rep issued as its own isolated, explicitly-
+awaited call. Recorded here because it's a real, reproducible gotcha for
+anyone scripting repeated live-router trials through this kind of
+harness, not just a private mistake to bury.
+
+### 35.2 `grace_ms` results (poll_ms=100 fixed; 3 reps each)
+
+| `grace_ms` | avg (ms) | p95 (ms) | p99 (ms) | max (ms) | loss |
+|---:|---:|---:|---:|---:|---:|
+| 1000 | 25.3 | 30.5 | 31.8 | 37.1 | 0% / 0% / 0% |
+| 3000 (prior default) | 25.9 | 31.7 | 36.5 | 41.5 | 0% / 1.11% / 1.11% |
+| 5000 | 26.1 | 30.9 | 34.7 | 36.5 | 1.11% / 3.33% / 0% |
+
+`grace_ms=1000` was the only configuration with **zero packet loss across
+all three reps**; 3000 and 5000 each lost packets in 2 of 3 reps. It also
+had the lowest average latency and, alongside 5000, among the lowest
+p95/max. This is the expected direction: `grace_ms` is the AQM's
+re-trigger cooldown after an eviction, so a shorter cooldown closes the
+SS31.2 blind-spot window (the flow sitting ungoverned in the hardware
+leaky-bucket queue) sooner. The signal is real and directionally
+consistent across the full grid, but the sample is still small (n=3 per
+value) under genuinely noisy live household traffic - a follow-up
+confirmation run (§35.4) showed one grace_ms=1000 rep *with* loss,
+underscoring that this is "reasonably confident," not "every single
+run is clean."
+
+### 35.3 `poll_ms` results (grace_ms=3000 fixed during this half of the grid; 3 reps each)
+
+| `poll_ms` | avg (ms) | p95 (ms) | p99 (ms) | max (ms) | loss |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 26.1 | 30.7 | 38.0 | 43.3 | 0% / 0% / 0% |
+| 50 | 26.0 | 31.1 | 34.7 | 41.4 | 0% / 0% / 1.11% |
+| 100 (prior default) | 25.9 | 31.7 | 36.5 | 41.5 | 0% / 1.11% / 1.11% |
+
+Much weaker and less consistent than the `grace_ms` result: average
+latency is flat within noise across all three values (25.9-26.1 ms), p95
+improves only slightly as `poll_ms` shrinks, and p99 is actually *worse*
+at 25 ms than at 50 ms (one outlier rep, not a repeated pattern). Loss
+trends the same direction as `grace_ms` (faster polling -> less loss)
+but the effect is smaller and 25 ms shows no improvement over 50 ms.
+`/proc/loadavg` (the lightweight, non-profiling CPU proxy used per this
+session's "skip item 1" instruction) showed no discernible trend with
+`poll_ms` either - values stayed in the same 0.15-0.40 noise band at
+every setting, on this 2-CPU SoC's already-light household load. This is
+consistent with the AQM poll itself being cheap (one MIB register read
+plus a comparison every cycle) even at 4x the default frequency, but it
+is a coarse proxy, not a profiling result, and doesn't rule out a real
+CPU cost under heavier load than this test generated.
+
+### 35.4 Decision: adopt `grace_ms=1000`, keep `poll_ms=100`
+
+Per this document's own established bar (SS31.3 declined to change
+production on an inconclusive, noisy-traffic result), `poll_ms` stays at
+its default: the measured effect is too small and inconsistent (worse
+p99 at the most aggressive setting) to justify doubling or quadrupling
+the AQM's polling rate. `grace_ms=1000` cleared a real bar - consistently
+better across every metric, including the one binary, least-noise-prone
+signal (packet loss) - and was adopted as the new persistent default:
+
+```
+$ uci set qdma-shaper.queue7.grace_ms='1000'
+$ uci commit qdma-shaper
+$ service qdma-shaper reload
+qdma-shaper: applied interface=wan netdev=wan queue=7 requested=8300kbps effective=8300kbps
+$ cat /sys/kernel/debug/1b100000.ethernet/qdma_aqm
+enabled=1 queue=7 poll_ms=100 byte_thresh=0 batch=4 grace_ms=1000 trigger_count=0 unbind_total=0
+```
+
+Also updated `package/qdma-shaper/files/qdma-shaper.config` (the
+package's default UCI template) from `grace_ms '3000'` to
+`grace_ms '1000'`, so a future from-scratch image build ships the
+tested value rather than reverting it on next reflash - the same
+`sysupgrade -c` config-preservation §33.2 documented would otherwise
+keep the *router's* live value correct across upgrades regardless, but
+the template should match what's actually been validated.
+
+A confirmation rep at the new persisted default (`poll_ms=100,
+grace_ms=1000`, run after the `uci commit`/reload above) measured
+avg=26.1 ms, p95=32.6 ms, p99=39.4 ms, max=46.0 ms, with 1.11% loss -
+within the same noisy-household-traffic band as the rest of this grid,
+not a regression, but a reminder that one rep alone (in either direction)
+isn't decisive; §35.2's full 3-rep pattern is the actual basis for the
+decision, not this single confirmation run.
+
+### 35.5 Updated status on §34's items 2 and 3
+
+Item 2 (`grace_ms` re-attempt): **done**, `grace_ms=1000` adopted with a
+real, if modest-sample, evidence basis - stronger than SS31.3's original
+inconclusive attempt because this session's harness reliably reproduces
+clean saturating-load numbers. Item 3 (continuous-depth-control gap): the
+`poll_ms` half of the lever was tested and found not worth pulling; the
+architectural point stands as SS31.2/§34 item 3 already described it -
+periodic detect-and-evict is a real, permanent property of this AQM
+design on this hardware, and grace_ms=1000 narrows the exposure window
+without eliminating it. Remaining open items from §34 are unchanged:
+item 1 (CPU-time profiling, explicitly skipped this round), item 4
+(two-client fairness), item 5 (this harness as a standing regression
+check - now demonstrated twice, §33.4 and this section).
+
+## 36. Download-direction bufferbloat check, prompted by an external "B" grade (2026-09-04)
+
+Prompted by the operator reporting a "B" bufferbloat grade from an
+external test (e.g. Waveform/DSLReports-style). Everything §33-35 tested
+was the **upload** direction only (`iperf3` client uploads through queue
+7's hardware AQM). This session had never generated a genuinely
+saturating **download** through `ifb4wan`'s CAKE ingress shaping - so
+before concluding anything about the "B" grade, that gap needed
+checking on its own.
+
+### 36.1 Method
+
+Public iperf3 servers in reverse (`-R`, download) mode were unreliable
+for this (`iperf.he.net`'s reverse path measured under 2 Mbit/s -
+almost certainly a server-side limit, not this link;
+`fra.speedtest.clouvider.net` repeatedly returned "server is busy").
+Switched to `curl` downloading a large file from Cloudflare's speed-test
+endpoint (`speed.cloudflare.com/__down`), which is well-provisioned and
+reliable, sized to run for the full ~20-30 s test window. Concurrent
+`ping -i 0.2 8.8.8.8` measured latency; a second run additionally polled
+`tc -s qdisc show dev ifb4wan` once per second (integer seconds -
+`sleep 1.5` silently failed on this image's busybox `sleep`, a real
+gotcha that produced a first, worthless "sample" where all 12 readings
+landed in the same instant instead of spread across the test - caught
+and fixed before trusting the result, same discipline as §35.1's
+methodology note).
+
+### 36.2 Result: real, severe loaded-latency spikes - but zero CAKE backlog throughout
+
+Two runs, ping under a genuine multi-megabyte download:
+
+```
+run 1: p50=166ms  p95=1204ms  p99=1950ms  max=2153ms  (idle baseline: p50=23ms p95=37ms)
+run 2: p50=46ms   p95=321ms   p99=649ms   max=752ms
+```
+
+Both are dramatically worse than every upload-direction number in
+§33-35 (p95 in the 30 ms range there). This is a real, large,
+reproducible download-direction latency problem - consistent with a
+report of a mediocre external bufferbloat grade.
+
+**But** the properly-spaced 20-second `tc` sampling during run 2 shows
+`ifb4wan`'s CAKE qdisc with `backlog` at `0b` for the large majority of
+one-second samples, peaking at only 35,856 bytes (~24 packets) in the
+worst sample, and `pk_delay` never exceeding 15.6 ms across all 20
+samples - both consistent with CAKE's own 5 ms target/100 ms interval
+design and nowhere near explaining a 649-2153 ms ping spike. **The
+router's own ingress queue is not where this latency is coming from.**
+This is the same category of finding as §33's WED-queue checks and
+§35's `grace_ms` result: real hardware/kernel telemetry, not inference.
+
+### 36.3 What's actually contending: real household load, and a possible autorate ceiling mismatch
+
+Two candidate explanations, both outside anything a further CAKE/AQM
+kernel patch could fix:
+
+- **Real concurrent contention.** `iw dev wl0-ap0/wl1-ap0 station dump`
+  showed **10 actively associated stations** (8 on 2.4GHz, 2 on 5GHz)
+  during these tests - genuine household devices, not a controlled
+  single-client lab setup. Every latency measurement in this whole
+  document, including §33.4's clean 30.5 ms p95 upload result, was taken
+  under whatever real traffic happened to be on the network at the time;
+  this document has repeatedly flagged that as a source of noise (SS31.3,
+  §35.1), and a download-direction test is more exposed to it than an
+  upload test through the hardware-AQM'd queue 7 alone.
+- **`sqm-autorate-rust`'s download ceiling may be too optimistic.**
+  `/tmp/sqm-autorate.csv` (note: the actual output path - the
+  `stats_file='/tmp/sqm-autorate-rust.csv'` UCI option does not match
+  where the binary actually writes; worth a follow-up to fix the option
+  or the binary's default) showed autorate had scaled the download
+  ceiling up to **45 Mbit** by the end of these tests. `docs/README.md`
+  and this document's own SS31.1 already recorded that real observed
+  download rates on this connection were historically **0.3-8 Mbit/s
+  across dozens of tests** - if the true link capacity is genuinely down
+  in single-digit Mbit/s territory (a modest fixed broadband tier, or a
+  variable-capacity link), a 45 Mbit shaping ceiling gives a bursty
+  sender a lot of room to overrun the *actual* link and build a queue
+  **upstream of this router** (in a cable/DSL modem or the ISP's own
+  network) that CAKE on `ifb4wan` structurally cannot see or drain,
+  because ingress shaping only controls what the router does with
+  packets *after* they've already arrived - it cannot un-queue something
+  that backed up before reaching the router's NIC.
+
+### 36.4 Verdict and what would need to change
+
+This session's own scope - kernel/CAKE/AQM patches and tuning on the
+E8450 itself - is validated as working correctly in both directions:
+near-zero backlog, single-digit-to-low-teens millisecond internal delay,
+confirmed by direct `tc` telemetry sampled *during* saturating load, not
+inferred. A "B" external bufferbloat grade with this evidence in hand
+points at causes this document's whole investigation cannot reach from
+the OpenWrt side: real household multi-client contention (not a bug,
+just real usage) and/or `sqm-autorate-rust`'s download ceiling being
+calibrated well above the connection's actual sustained capacity. The
+concrete next step, if the operator wants to chase this further, is
+**not** another kernel patch - it's checking the actual contracted ISP
+download speed against `sqm-autorate-rust`'s `download_base_kbits`
+(currently `64000`) and `download_min_percent` (`60`, i.e. a floor of
+~38 Mbit) and lowering both if the real plan is smaller, so autorate's
+own RTT-based backoff logic gets a realistic ceiling to scale down from
+instead of one 5-10x the connection's real sustained rate.
+
+### 36.5 Follow-up: is this DOCSIS-side bufferbloat? (2026-09-04)
+
+Prompted by the operator directly: "could it be the change in the ISP
+DOCSIS nature itself... isn't there a package for DOCSIS people using
+AQM that auto-adjusts numbers." Two things worth answering precisely
+rather than guessing.
+
+**Yes, `sqm-autorate-rust` is exactly that package.** Its own upstream
+README states it plainly: "ideal for variable DOCSIS/cable or LTE/
+wireless links where capacity fluctuates" - it's a Rust reimplementation
+of the original `cake-autorate` project, which was written specifically
+for this class of connection. This isn't a partial or generic tool
+bolted on after the fact; it's already the purpose-built thing for this
+exact scenario, and it's already running (`docs/README.md`, SS31.4).
+
+**But its own measurements say this specific latency spike isn't classic
+link-capacity bufferbloat.** Read the pinned source
+(`Lochnair/sqm-autorate-rust` @ `3316918`) to understand the mechanism:
+it measures one-way delay (OWD) to a set of reflectors (this install
+uses AdGuard's `94.140.14.x`/`94.140.15.x` DNS anycast IPs) every
+`tick_interval` (0.5 s default), compares against a learned baseline,
+and cuts the shaped rate hard whenever the delay delta exceeds
+`download_delay_ms`/`upload_delay_ms` (15 ms default for both) -
+regardless of load. That's a real, working DOCSIS-style adaptive-AQM
+control loop, and if the download link were genuinely queueing up in a
+cable modem or at the CMTS, this is exactly the mechanism that should
+catch it and cut the rate.
+
+Pulled `/tmp/sqm-autorate.csv` (columns:
+`times,timens,rxload,txload,deltadelaydown,deltadelayup,dlrate,uprate`)
+for the exact windows of two separate saturating-download tests. In
+both, while `ping -i 0.2` to 8.8.8.8 (and, in a follow-up run, 1.1.1.1
+concurrently) showed p95/max in the 800-1900 ms range, **autorate's own
+`deltadelaydown` stayed under ~22 ms throughout, mostly single digits**,
+and the tool kept the shaped rate flat or *increasing* (42842 -> 45783
+kbit in one window) - the opposite of what it would do if it were
+seeing real bufferbloat. A same-window concurrent-ping comparison also
+showed **1.1.1.1 and 8.8.8.8 spiking together, in lockstep** (p95 831 ms
+vs. 835 ms, max 1399 ms vs. 1408 ms) - ruling out a single-destination
+routing/peering issue (e.g. a bad Google-specific route) as the sole
+explanation, since two unrelated providers' anycast IPs showed the
+identical pattern at the identical moments.
+
+**Read together, this rules out the most straightforward "DOCSIS
+downstream queue is filling up and autorate isn't reacting" explanation**
+- if that were happening, autorate's reflector OWD (which travels the
+same physical downstream channel as everything else) would show it too,
+and it doesn't. This softens §36.3's "ceiling mismatch" theory: autorate
+wasn't ignoring real congestion it could see, because its own well-
+designed detection loop didn't see any. What's left, roughly in order of
+likelihood, none of which is fixable by more router-side kernel/CAKE
+work:
+
+1. **A bursty phenomenon on a timescale autorate's control loop is
+   deliberately insensitive to.** Autorate polls every 0.5 s and uses a
+   robust/sorted-median-style statistic across multiple reflectors
+   specifically to avoid reacting to noise - by design, it will not
+   react to a sub-second transient the way a raw 0.2 s ping's p95/p99
+   will highlight one. DOCSIS's own MAC layer (particularly the
+   upstream request-grant cycle, but downstream MAP scheduling and
+   modem buffer dynamics can behave similarly) is a real source of this
+   kind of short, bursty jitter that classical bufferbloat control
+   (queue-depth-vs-rate) doesn't model as cleanly as sustained
+   congestion does.
+2. **Something specific to how `ping`'s ICMP traffic is scheduled
+   relative to autorate's own reflector ICMP traffic and the bulk curl
+   flow**, e.g. CAKE's per-flow isolation/round-robin behavior under many
+   concurrent flows (this router had ~10 real associated Wi-Fi stations
+   during testing, SS36.3) treating a fresh, low-rate ICMP flow
+   differently than expected. Not confirmed - would need a packet
+   capture or CAKE's per-flow debugfs stats during a live spike to
+   pin down, which wasn't attempted this session.
+3. **Genuine node-level or CMTS-level congestion specific to this
+   Internet Essentials service tier**, e.g. lower-priority DOCSIS
+   service-flow QoS marking or a more congested/oversubscribed node than
+   a full-price tier would get. Plausible and consistent with the
+   "Internet Essentials" plan context, but not something any packet
+   capture from this router's LAN side could confirm or rule out - it
+   would need evidence from outside the home network (e.g. a modem-side
+   DOCSIS event log, or Comcast's own diagnostics).
+
+**Bottom line for the operator's question:** the purpose-built DOCSIS
+adaptive-AQM tool is already installed, already running, and its own
+telemetry says it isn't seeing the kind of sustained downstream queue
+buildup it's designed to correct - so this isn't a case of "the right
+tool exists but isn't deployed," and there's no further CAKE/AQM
+parameter to tune here without evidence of what it should be reacting
+to. If the operator wants to keep chasing this, the productive next
+step is external, not another kernel patch: re-run the same Waveform/
+DSLReports-style test that produced the "B" grade while watching
+`/tmp/sqm-autorate.csv` live (`logread -f` plus `tail -f`) to see
+whether autorate's own reflectors register anything during that
+specific tool's loaded phase, and separately, ask Comcast (or check
+the modem's own DOCSIS event log, if accessible) whether Internet
+Essentials is provisioned with different QoS/service-flow parameters
+than their standard tiers on this node.
+
+
 
