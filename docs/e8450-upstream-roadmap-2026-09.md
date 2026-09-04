@@ -10,7 +10,8 @@ process history; every item worth carrying forward is repeated here.
 ## Baseline as of 2026-09-04
 
 - Kernel `6.12.94`; live/flashed build `r33075-4dfd876771`, confirmed booted
-  and reachable on the router.
+  and reachable on the router. Nine stable point releases behind current
+  upstream (`6.12.103`) — see Task 1.
 - mt76 source pin: `openwrt/mt76` master `6d1c6a75` (`6d1c6a758a4c0a690ee56cb849387dfa262fdb17`,
   2026-08-04).
 - Local kernel/target patches (`target/linux/mediatek/patches-6.12/`):
@@ -37,7 +38,106 @@ process history; every item worth carrying forward is repeated here.
   Do not reopen this without UART/firmware access — confirmed twice,
   independently, not fixable from host driver source.
 
-## Task 1: mt76 upstream pin bump evaluation (`6d1c6a75` → current)
+## Task 1: Linux kernel point-release bump `6.12.94` → `6.12.103`
+
+The live pin is nine stable point releases behind (`6.12.103` is current
+upstream as of this session). Point releases are pre-reviewed backports —
+lower risk than a mainline pin bump, and the standard way OpenWrt consumes
+this class of fix. Audited every driver subsystem this board actually uses
+against the real range (`git.kernel.org` linux-stable, `id=v6.12.94..v6.12.103`,
+one query per driver path this board's config enables) instead of trusting
+the changelog summary.
+
+**Must drop on bump — exact duplicates of local hand-backports:**
+
+- `912-mtk-ecc-stop-on-idle-timeout.patch` — upstream `16f7ec8d5dc1` landed
+  in 6.12-stable as `623059b19c66` (2026-08-03). Byte-identical diff.
+- `911-pcie-mediatek-fix-fts-num-l0.patch` — upstream `282305d7e9c0` landed
+  in 6.12-stable as `1a292d551b02` (2026-07-24). Byte-identical diff.
+
+**New, real, relevant fixes not yet in this tree:**
+
+`drivers/pci/controller/pcie-mediatek.c` (our exact MT7915 PCIe host
+controller) — one dependent series, 6 commits:
+
+- `ce52e494a755` — fixes an IRQ domain leak when a PCIe port fails to
+  enable (`Cc: stable@vger.kernel.org # 5.10`; `Fixes:` tag names the
+  MT7622 support commit directly).
+- `1ed324b45c78` — fixes MSI message address computation: the driver used
+  `virt_to_phys()` on an ioremapped register base, which is architecturally
+  wrong. The fix's own comment: "MT2712/MT7622 only support 32-bit MSI
+  addresses" — a real correctness bug in MSI IRQ delivery on our exact SoC.
+- `ca1a8df853f7` — trivial buffer-size fix, `Stable-dep-of` prerequisite for
+  the MSI fix above.
+- `bbc21aa10f83`, `ba45c91a8c74`, `09b0115a86f9`, `a44c473ba778` — refactors
+  in the same code region (quirks bitmap, MSI parent-domain API, TPVPERL
+  delay macro, `dev_fwnode()`). Part of the same dependent series; not
+  independently cherry-pickable.
+
+`drivers/net/ethernet/mediatek/mtk_ppe.c` (our exact PPE):
+
+- `5466a4e2d22f` — fixes an rhashtable leak in `mtk_ppe_init()`'s error
+  paths (`dmam_alloc_coherent`/`devm_kzalloc` failure skip the existing
+  cleanup label). Probe-time only, minimal leak, but a real correctness fix
+  in code this fork has heavily modified (cache-lock, etc.).
+
+`drivers/net/dsa/mt7530.c` + `mt7530-mdio.c` (our exact MT7531 switch —
+genuinely new territory; the switch driver was never previously audited by
+this project):
+
+- `96e0f5184af6` — MT7531 indirect PHY-register polling silently returns 0
+  (success) on a failed bus read instead of propagating the error, so a bus
+  glitch hands phylib garbage PHY register data. Fixed by switching to
+  `regmap_read_poll_timeout()`, which does propagate read errors.
+- `93d46870c544` — the MDIO regmap backend truncates `bus->read()`'s
+  negative errno into a `u16`, turning e.g. `-ETIMEDOUT` into `0xff92` and
+  treating it as valid register data — which then gets read-modify-written
+  back to the switch on the next write. Same author/series as the above
+  (Daniel Golle, 2026-07-28); both are real reliability fixes for the exact
+  switch chip on this board (`mediatek,mt7531`).
+
+**Confirmed applicable but behavior-neutral for this SoC:**
+
+- `mtk_eth_soc`'s named-IRQ support (`407503ba0533` + 2 dependents) is
+  MT7988-oriented; it falls back to the existing index-based IRQ lookup
+  unchanged for boards without named IRQs in DT (ours). Safe, no behavior
+  change here.
+- `mtk_wed`'s `wed_amsdu_show()` index fix is WED **3.0**-only (AMSDU
+  offload, MT7988-family) — doesn't touch the WED-v1 path this board uses.
+  Harmless either way.
+
+**Confirmed out of scope, correctly excluded:**
+
+- Every `net: airoha:` commit under `drivers/net/ethernet/mediatek/` — a
+  different MediaTek-adjacent chip line (EN7581/AN7583) hosted in the same
+  driver directory. Not this board.
+- `mtk_wed: fix loading WO firmware for MT7986` — wrong SoC.
+
+**Zero changes in this window** (checked, nothing to report): `drivers/mtd/nand/spi/`,
+`spi-mtk-snfi.c`, `spi-mt65xx.c`, `spi-mtk-nor.c`, `mtk_wdt.c`,
+`thermal/mediatek/auxadc_thermal.c`, `cpufreq/mediatek-cpufreq.c`,
+`hw_random/mtk-rng.c`, `soc/mediatek/mtk-pmic-wrap.c`,
+`pmdomain/mediatek/mtk-scpsys.c`, `net/pcs/pcs-mtk-lynxi.c`,
+`phy/mediatek/phy-mtk-tphy.c`, `pwm/pwm-mediatek.c`,
+`regulator/mt6380-regulator.c`, `pinctrl/mediatek/pinctrl-mt7622.c`.
+
+Take the point-release bump as a whole — the officially blessed way to
+consume this exact class of fix — rather than hand-cherry-picking commits
+out of the dependent PCIe series:
+
+- [ ] Bump the kernel hash/version pin from `6.12.94` to `6.12.103`.
+- [ ] Drop local patches `911` and `912` — upstream now carries them;
+  reapplying would fail (already-applied) or double-apply.
+- [ ] Rebuild; verify the remaining local patches (`913`-`917`,
+  `999-wed-13`/`14`, `999-ppe-14`, `qos-01`..`17`, etc.) still apply cleanly.
+  Expect at most trivial context drift — none of them touch
+  `pcie-mediatek.c`, `mt7530*.c`, or `mtk_ppe.c` in the affected regions.
+- [ ] Full boot + this doc's per-image test checklist before accepting. MSI
+  address computation is the one path that actually changed *behavior* (not
+  just cleanup/error-propagation) — pay particular attention to PCIe
+  interrupt delivery and MT7915 stability, not just link presence.
+
+## Task 2: mt76 upstream pin bump evaluation (`6d1c6a75` → current)
 
 One month since the last bump — due for a look, following the same
 methodology Priority 2 of the old roadmap already established: evaluate
@@ -77,7 +177,7 @@ Remaining work:
   behavior) used for every prior pin move — do not assume a source bump is
   behavior-neutral.
 
-## Task 2: WED-20 — shorten WED busy-poll timeout during SER
+## Task 3: WED-20 — shorten WED busy-poll timeout during SER
 
 Vendor patch [`999-wed-20`](https://raw.githubusercontent.com/mediatek/mtk-openwrt-feeds/main/25.12/files/target/linux/mediatek/patches-6.12/999-wed-20-refactor-check-wed-module-busy-time.patch)
 changes `mtk_wed_poll_busy()` from a 1.5 s maximum wait to 100 ms. The
@@ -92,7 +192,7 @@ moot.
 - [ ] A/B WED-20 under heavy bidirectional 5 GHz traffic.
 - [ ] Reject if it increases false busy/reset failures.
 
-## Task 3: Power-save buffering validation
+## Task 4: Power-save buffering validation
 
 The hardware-managed TIM/PS buffering series (`9a46d8d21d2a`, `9e613fb007f5`,
 `f8b59ca3be7b`) has shipped since the June refresh but was never validated
@@ -105,7 +205,7 @@ deliberately tested.
 - [ ] Test with multiple stations and with one nonresponsive sleeping
   station.
 
-## Task 4: Remaining physical acceptance tests
+## Task 5: Remaining physical acceptance tests
 
 Carried forward unchanged from the old roadmap's Priority 1 acceptance —
 these need an operator physically present, not something a remote session
@@ -116,13 +216,13 @@ can drive:
 - [ ] AWG UDP session survives a WAN renewal/renumber.
 - [ ] AWG UDP session survives a Wi-Fi roam.
 
-## Task 5 (optional, low priority): `schedutil` vs `ondemand` A/B
+## Task 6 (optional, low priority): `schedutil` vs `ondemand` A/B
 
 Runtime governor tuning experiment, not a source backport. Never run.
 Current governor is `ondemand`. Worth a controlled A/B under CAKE + PPE
 load if there's ever a CPU-bound symptom to chase; not otherwise urgent.
 
-## Task 6 (deferred, long-term): kernel 6.18 migration
+## Task 7 (deferred, long-term): kernel 6.18 migration
 
 - [ ] Start a separate kernel migration branch to OpenWrt's current
   Mediatek kernel baseline (6.18):
