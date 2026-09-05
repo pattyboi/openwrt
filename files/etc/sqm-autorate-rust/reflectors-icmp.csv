@@ -1,0 +1,11 @@
+reflector_ip,ip_version,description
+1.1.1.1,4,Cloudflare
+1.0.0.1,4,Cloudflare
+8.8.8.8,4,Google
+8.8.4.4,4,Google
+9.9.9.9,4,Quad9
+149.112.112.112,4,Quad9
+208.67.222.222,4,OpenDNS
+208.67.220.220,4,OpenDNS
+94.140.14.14,4,AdGuard
+94.140.15.15,4,AdGuard
