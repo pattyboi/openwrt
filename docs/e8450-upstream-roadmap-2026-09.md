@@ -221,45 +221,46 @@ Completed steps:
 
 Original plan (superseded by the above, kept for reference):
 
-## Task 2: mt76 upstream pin bump evaluation (`6d1c6a75` → current)
+## Task 2: mt76 upstream pin bump evaluation (`6d1c6a75` → current) — DONE (2026-09-06)
 
-One month since the last bump — due for a look, following the same
-methodology Priority 2 of the old roadmap already established: evaluate
-current HEAD, remove local patches already upstreamed instead of
-duplicating, require a full build + Wi-Fi regression pass before accepting.
+Corrects this task's own prior entry: the "unknown, likely 150-250+ total"
+estimate below was wrong — it came from paginating the commits HTML page
+instead of asking for an authoritative range. `GET
+/repos/openwrt/mt76/compare/6d1c6a758a4c0a690ee56cb849387dfa262fdb17...master`
+returns the exact count: **11 commits total**, `ahead_by: 11`, `behind_by: 0`.
+That's the complete window; there was never a second page to pull.
 
-Today's session pulled the first ~40 commits of the `2026-08-04`→`2026-09-04`
-window (out of an unknown, likely 150-250+, total — GitHub reported far more
-than one page). Sample composition: the large majority target chip families
-this router doesn't have (**mt7996, mt7925, mt7921, mt76x02**) — consistent
-with this fork's established finding that upstream mt76 churn skews toward
-newer silicon. Candidates actually relevant to this board's mt7615/mt7915
-hardware, found so far:
+All 11, triaged by hardware relevance (this board: MT7622 SoC, MT7615
+2.4 GHz, MT7915 5 GHz — no mt7921/mt7925/mt7996/mt76x02 silicon):
 
-- `be5ce79` — mt7615: don't tear down BSS/STA state for monitor vifs.
-  Touches the 2.4 GHz driver, but scoped to monitor-vif teardown, which this
-  deployment doesn't use in normal AP operation. Likely low value.
-- `a57185c` — mt7915: disable RX NAPI when removing the device. Touches the
-  5 GHz driver, but only fires on the module-remove path, which the
-  project's own hard-lock rules forbid at runtime (never PCI unbind/rebind
-  or runtime-reload MT7915). Likely low value on this deployment.
 - `0898393` — mt76 core: use ALTX queue for packets to disassociated
-  stations. Generic TX-path change, not chip-specific; plausibly relevant,
-  needs a closer read before a verdict.
+  stations. Generic TX-path (`tx.c`) + `mt7915/main.c`. **Already applied**
+  as local patch `903-mt76-use-altx-queue-for-disassociated-stations.patch`
+  (byte-identical backport, confirmed by diffing the patch body against the
+  upstream commit).
+- `be5ce79` — mt7615: don't tear down BSS/STA state for monitor vifs.
+  Touches `mt7615/main.c`, scoped to monitor-vif teardown, which this
+  deployment doesn't use in normal AP operation (no monitor vif is ever
+  created). Confirmed low value — not ported.
+- `a57185c` — mt7915: disable RX NAPI when removing the device. Touches
+  `mt7915/init.c` + `mt7915/main.c`, only fires on the module-remove path,
+  which this project's own hard-lock rules forbid at runtime (never PCI
+  unbind/rebind or runtime-reload MT7915). Confirmed low value on this
+  deployment — not ported.
+- `62c038a`, `4d82c99` — mt7921/mt7925 suspend/resume lock-inversion fixes.
+  Out of scope: neither chip is present on this board.
+- `0789c43` — mt76x02 TX-status rate-index validation. Out of scope: this
+  board has no mt76x02 silicon.
+- `bfb044b`, `a6e5a07` — mt7925/mt7921 FIF_FCSFAIL handling. Out of scope.
+- `5772439` — mt7925 MLO teardown. Out of scope.
+- `bd49f06`, `d73f612` — mt7996 struct-layout and TWT fixes. Out of scope:
+  this board has no mt7996 silicon.
 
-Remaining work:
-
-- [ ] Pull the rest of the commit window (only a first partial page was
-  fetched this session).
-- [ ] Filter to mt7615/mt7915/generic-mt76-core commits only; discard
-  mt7996/mt7925/mt7921/mt76x02/mt7986+-only changes as out of scope for this
-  hardware, matching the existing "Explicitly excluded" precedent.
-- [ ] Cross-check the filtered list against `901`/`902` for redundancy or
-  conflict.
-- [ ] If a bump is warranted: rebuild, then require the same full Wi-Fi
-  regression pass (routed/bridged offload, 5 GHz association, SER survival
-  behavior) used for every prior pin move — do not assume a source bump is
-  behavior-neutral.
+Net result: the mt76 driver pin (`6d1c6a75`, 2026-08-04) has nothing left to
+pull for this hardware. The one generic core fix is already in via `903`;
+the two mt7615/mt7915-touching fixes are real but scoped to code paths this
+deployment doesn't exercise. **No pin bump needed** — do not reopen without
+a new upstream commit actually touching mt7615/mt7915/generic mt76 core.
 
 ## Task 3: WED-20 — shorten WED busy-poll timeout during SER
 
@@ -317,114 +318,165 @@ load if there's ever a CPU-bound symptom to chase; not otherwise urgent.
 - [ ] Revalidate boot, NAND/UBI, WED attach, PPE offload, bridge flowtable,
   QDMA controls, Wi-Fi, and rollback.
 
-## Task 8: mtk-openwrt-feeds/immortalwrt 2026-09 audit — apply real findings
+## Task 8: mtk-openwrt-feeds/immortalwrt 2026-09 audit — apply real findings — DONE (2026-09-06)
 
-Full investigation: [`e8450-mtk-feeds-audit-2026-09.md`](e8450-mtk-feeds-audit-2026-09.md).
+Full investigation, every patch adaptation, every live-test result, and
+the AQM/CAKE verification: [`e8450-mtk-feeds-audit-2026-09.md`](e8450-mtk-feeds-audit-2026-09.md).
 `immortalwrt/immortalwrt` produced no action items (stock-upstream MT7622
 coverage only). `mtk-openwrt-feeds` produced five verified-applicable
-findings not yet in this tree and two A/B candidates.
+findings and two A/B candidates; all seven now have a final disposition.
 
-- [x] **Ported and build-verified** (not yet flashed): `999-ppe-13`
-  (multicast PPE entries get the wrong CDMA CPU reason), `999-eth-53`
-  (MDIO busy-wait race gives false timeouts), `999-dsa-06` (MT7531
-  VLAN deletion doesn't override the FID). All three verified against
-  a truly clean `target/linux/clean` + `target/linux/prepare` (no
-  `.rej`, no unexpected fuzz) and a full `target/linux/compile`
-  (`mtk_ppe.o`/`mtk_eth_soc.o`/`mt7530.o` all rebuilt clean).
-  `999-eth-53` needed adaptation beyond the vendor diff: its
-  `<linux/iopoll.h>` include had to move to the tail of the include
-  block (after `<net/page_pool/helpers.h>`) rather than right after
-  `<linux/of_net.h>` like the vendor's own patch, because several
-  already-applied local/backport patches (`999-qos-01` among them)
-  also insert headers immediately after `of_net.h` later in the
-  series - a real ordering conflict, not a vendor-diff error.
-- [x] **Flashed and smoke-tested** (`r33090-48c2d25d89`, together with
-  `999-ppe-93` below): clean boot, WED v1 attached, both radios up,
-  flow offload 1/1, AQM active, no panic/oops/BUG/SER/timeout in
-  dmesg. `999-ppe-13`/`999-eth-53`/`999-dsa-06` have no dedicated
-  functional test yet (no observed mDNS-multicast/MDIO-timeout/
-  VLAN-cycling incident either way) - passive monitoring only so far.
-- [x] **Ported, build-verified, flashed, and live-tested**: PPE
-  hardware-offload bypass via conntrack mark `0x99` (vendor
-  `999-ppe-36`; filed locally as `999-ppe-93` since this fork already
-  has an unrelated, self-invented `999-ppe-36` - PPPQ QoS
-  default-enable - predating this port). Built a runtime toggle,
-  `scripts/e8450/ppe-offload-bypass.sh` (adds/removes a standalone
-  `e8450_ppe_bypass` nftables table, forward hook priority -1, so it
-  runs before fw4's own forward chain and its `flow add @ft` -
-  touches nothing in fw4's own generated ruleset).
-
-  **Real methodological finding, worth recording for any future
-  session testing PPE offload state:** `/proc/net/nf_conntrack`'s
-  `[OFFLOAD]`/`[HW_OFFLOAD]` flag is generic Linux `nf_flowtable`
-  software-fastpath status - it does **not** mean MediaTek's PPE
-  hardware specifically accepted the flow. The only ground truth for
-  actual PPE binding is `/sys/kernel/debug/ppe0/entries`
-  (`BND`/`UNB`/absent). Confirmed live: a real, actively-growing,
-  ct-mark-`0x99`-tagged download (`speed.cloudflare.com`, single
-  identified 5-tuple, tracked over 5 polls) showed `[HW_OFFLOAD]
-  mark=153` in conntrack throughout, yet **never appeared in
-  `ppe0/entries` at all** (neither `BND` nor `UNB`) - consistent with
-  `mtk_flow_offload_replace()` returning `-EOPNOTSUPP` before the FOE
-  table entry is ever allocated, i.e. the patch working as intended.
-  A second question came up (fair pushback, not something to wave
-  away with inference): router-wide `BND` count sat at 0 for most of
-  the post-flash session with `trigger_count`/`unbind_total` climbing
-  continuously, which looked like it could be a regression in
-  `999-qos-06`'s eviction behavior introduced by this batch. Resolved
-  with an actual controlled A/B, not a historical-rate comparison:
-  temporarily moved all four new patches out of
-  `target/linux/mediatek/patches-6.12/`, rebuilt, reflashed
-  (`r33091-8290771b44`, same commit, patches absent from the build),
-  and measured the identical metrics under the same real household
-  load a few minutes later. Result: **`BND=0` on the reverted kernel
-  too, and `trigger_count`/`unbind_total` were completely static
-  (48/132, unchanged across four 5-second samples)** - the AQM wasn't
-  triggering at all at that moment, patches present or not. Confirms
-  the low `BND` count reflects real, currently-light household queue-7
-  traffic, not anything introduced by `999-ppe-13`/`999-eth-53`/
-  `999-dsa-06`/`999-ppe-93`. Restored the four patches (`git status`
-  confirmed byte-identical to the committed versions) and reflashed
-  back to the intended batch (`r33091-8290771b44` again, this time
-  with all four patches actually present - confirmed via
-  `MTK_PPE_EXCEPTION_TAG` grep on the rebuilt source). Clean boot both
-  times, no dmesg regressions either side of the A/B. Router left
-  clean afterward - `ppe-offload-bypass.sh unmark` and
-  `nft list table inet e8450_ppe_bypass` both confirmed empty.
-- [ ] Test the ct-mark-`0x99` bypass against the open download-shaping
-  question in `e8450-download-shaping-handoff.md`: mark the test
-  client's known bulk flow, confirm it stays off PPE hardware offload,
-  check whether CAKE now sees and shapes it.
-- [ ] Decide on `613-netfilter-optional-tcp-window-check` with the named
-  tradeoff (weakens one conntrack sanity check; standard MediaTek fix for
-  offload-eviction/conntrack-window desync) in mind.
-- [x] **Ported, built, flashed, and hardware A/B tested**: `999-eth-17`
-  (NAPI poll weight 64→256) — adapted for this fork's non-RSS/HWLRO
-  `mtk_probe()`. Built the full sysupgrade image
-  (`r33087-10b027e38a`), flashed live via `sysupgrade -c`, clean boot
-  (WED v1 attached, both radios up, flow offload 1/1, no panic/oops/
-  BUG/SER/timeout in dmesg). Ran
-  `scripts/e8450/saturating-load-harness.sh` (3 reps, iperf3 upload +
-  concurrent ping) back-to-back against the pre-flash baseline, same
-  session, same real household-traffic conditions:
-
-  | | sent (Mbit) | avg (ms) | p50 | p95 | p99 | max | loss |
-  |---|---:|---:|---:|---:|---:|---:|---:|
-  | baseline (r33085-48d5d245d1) | 3.29 | 34.5 | 30.9 | 48.0 | 104.2* | 164.9* | 0.35% |
-  | post-`eth-17` (r33087-10b027e38a) | 4.47 | 32.9 | 31.4 | 45.3 | 49.7 | 55.3 | 0.35% |
-
-  (*baseline p99/max dominated by one rep-3 outlier, p99=214ms/max=391ms
-  — a single real-traffic spike, not reproduced in any other rep either
-  side.) **No latency regression**: p50 flat within noise (30.9→31.4),
-  p95 and p99 both slightly lower post-patch once the one baseline
-  outlier is set aside, loss identical (0.35% both sides, same single
-  dropped ping in rep 2 of both runs). Throughput +36% (3.29→4.47
-  Mbit sent). Sample is small (3×~19s reps per side, real household
-  traffic in the loop per this project's own documented noise caveat)
-  — treat as "no regression, mild throughput gain," not a
-  large-effect-size result. **Adopted.**
+- [x] `999-ppe-13`/`999-eth-53`/`999-dsa-06` (multicast PPE CDMA reason,
+  MDIO busy-wait race, MT7531 VLAN FID) — ported, build-verified,
+  flashed and smoke-tested clean (`r33090-48c2d25d89`); no dedicated
+  multicast/MDIO/VLAN-cycling functional test yet, no incident
+  observed either way.
+- [x] `999-ppe-93` (PPE hardware-offload bypass via `ct mark 0x99`,
+  vendor `999-ppe-36`) — ported, flashed, live-tested: mechanism
+  confirmed (a marked flow never reaches `ppe0/entries`), and a
+  controlled A/B disproved an initial concern that it regressed
+  `999-qos-06`'s AQM eviction rate (it didn't — the low `BND` count was
+  real light household load, reproduced identically with the patches
+  absent). Runtime toggle: `scripts/e8450/ppe-offload-bypass.sh`.
+- [x] AQM/CAKE interaction directly re-verified against this new
+  conntrack control (2026-09-06): a controlled marked/unmarked
+  download comparison shows CAKE actively queueing the flow in both
+  cases with no behavioral difference, and `qdma_aqm` kept triggering
+  normally throughout (no regression). Closes the wired-client side of
+  the open download-shaping question; the WLAN-specific side stays
+  open pending a physical 5 GHz client — see
+  [`e8450-download-shaping-handoff.md`](e8450-download-shaping-handoff.md).
+- [x] `613-netfilter-optional-tcp-window-check` — decided **not
+  adopted** (2026-09-06): live evidence found no measurable
+  conntrack-invalid signal across 60 real AQM eviction events in a
+  60-second window, so the named tradeoff (weakens a conntrack sanity
+  check) isn't currently justified.
+- [x] `999-eth-17` (NAPI poll weight 64→256) — ported, flashed
+  (`r33087-10b027e38a`), hardware A/B tested against the saturating-load
+  harness: no latency regression, +36% upload throughput. **Adopted.**
 - [ ] `999-wdt-01` (watchdog timeout overflow clamp): no action needed
   unless a future config requests a non-default watchdog timeout.
+
+## Task 9: mac80211 backports pin bump audit (`v6.18.26` → `v7.2`) — DONE, no further ports (2026-09-06)
+
+The mt76 driver pin (Task 2) is exhausted for this hardware. The other real
+lever for "further mac80211 improvements" is the `mac80211` package itself
+(`package/kernel/mac80211/Makefile`, `PKG_VERSION:=6.18.26`) — the actual
+`net/mac80211`/`net/wireless` core, pulled from `openwrt/backports`. Per
+that project's own README, a `backports-vX.Y.Z` release is generated
+straight from Linux kernel tag `vX.Y.Z`'s `net/mac80211`+`net/wireless`
+trees. Our pin (`backports-v6.18.26`, published 2026-05-02) is three
+releases behind the current `backports-v7.2` (published 2026-08-21) —
+roughly 4-5 months of upstream `net/mac80211` development, not a small gap.
+
+**Confirmed by direct tarball diff** (downloaded both
+`backports-6.18.26.tar.zst` and `backports-7.2.tar.zst`, diffed
+`net/mac80211/` directly — not inferred from kernel.org commit logs):
+58 of ~64 files in `net/mac80211/` changed. Several are large:
+`cfg.c` (1535 diff lines), `rx.c` (1424), `util.c` (753), `iface.c` (595),
+`sta_info.c` (632), `tx.c` (532), `vht.c` (486). New files: `ap.c`, `nan.c`,
+`uhr.c`. This is a much bigger surface than the mt76 driver audit (11
+commits, 15 files) — it needs the same per-hunk discipline as Task 1, not a
+blind bump, and is not something to rush through in one pass.
+
+**Whole files confirmed dead weight for this hardware** (feature areas this
+deployment never exercises — plain dual-band AP, no mesh point, no IBSS/OCB,
+no S1G sub-1GHz radio, no NAN, no EHT/WiFi-7/MLO client): `mesh.c`,
+`mesh_hwmp.c`, `mesh_pathtbl.c`, `mesh_plink.c`, `mesh_sync.c`, `s1g.c`,
+`nan.c`, `ibss.c`, `ocb.c`, `eht.c`, `tdls.c`, `tests/*`. Skip these
+entirely in the per-hunk pass below.
+
+**One fix already ported and build-verified this session** (small,
+precisely scoped, directly closes a gap in this doc's own open Task 4):
+
+- [x] `sta_ps_start()` in `rx.c` never called `sta_info_recalc_tim()` after
+  recording newly-buffered TIDs — a station entering power save with
+  already-buffered per-TXQ traffic never gets its TIM bit set unless some
+  *later* frame arrives, so it can doze indefinitely on top of a non-empty
+  queue. Upstream commit `a007a384c9eb` (landed 2026-07-21, after our
+  2026-05-02 pin). Confirmed missing by diffing `sta_ps_start()` in both
+  tarballs directly (not just the commit message). Ported as
+  `package/kernel/mac80211/patches/subsys/377-mac80211-recalc-tim-on-ps-start.patch`.
+  **Build-verified**: `make package/mac80211/{clean,prepare} V=s` applies
+  it cleanly (`Hunk #1 succeeded at 1612 (offset -1 lines)`, zero rejects),
+  and the resulting extracted source
+  (`build_dir/.../mac80211-regular/backports-6.18.26/net/mac80211/rx.c`)
+  was inspected directly and contains `sta_info_recalc_tim(sta);` at the
+  end of `sta_ps_start()`. Not yet compiled into a full image or flashed —
+  that step, plus the Task 4 sleeping-client regression test, is still
+  open. This is exactly the class of bug Task 4's power-save validation
+  was written to catch — a real, likely-live cause worth checking for
+  during that test.
+
+File-by-file pass, completed this session (real diffs, not commit-message
+guesses — every finding below is from `diff -u` against both extracted
+`backports-*.tar.zst` releases):
+
+- [x] `agg-tx.c`/`agg-rx.c` — the `2f067f5a450e` "tid_tx use-after-free"
+  candidate is real in the diff, but it's a bug the *new* S1G NDP-BlockAck
+  feature introduces in itself (`tid_tx->ndp` read after
+  `ieee80211_remove_tid_tx()` frees it) and fixes in the same breath. We
+  don't carry the S1G/NDP-BA feature, so the bug it fixes doesn't exist in
+  our tree. Both files are otherwise 100% S1G-NDP-BA plumbing + an
+  `mgmt->u.action.u.addba_req` → `mgmt->u.action.addba_req` struct-flatten
+  tied to a wider `ieee80211.h` change. **Not applicable, nothing to port.**
+- [x] `rx.c` remainder — read in full (1424 diff lines). Three cross-cutting
+  refactors account for nearly all of it: (1) `RX_DROP` → 40+ distinct
+  `RX_DROP_U_*` reasons (new SKB-drop-reason tracing infra, mechanical
+  rename with no behavior change), (2) the same `u.action.u.X` →
+  `u.action.X` struct-flatten from agg-tx/rx.c, (3) S1G/NAN_DATA handling
+  and `u64_stats_add()/u64_stats_inc()` per-CPU stat API conversion. None of
+  these are separable single-hunk fixes — pulling any one requires the
+  matching `ieee80211.h`/drop-reason-enum/`u64_stats_t` infra across the
+  whole tree. The Zhao Li bounds-validation items flagged from the
+  commit-log scan turned out to be inside this same renamed/refactored code,
+  not standalone. **No further ports beyond the TIM fix already shipped.**
+- [x] `cfg.c` (1535 diff lines) — grepped specifically for
+  `aql|airtime|atf|weight`: zero matches. No AQL/ATF-touching changes at
+  all, so **no conflict with local patches `372`-`374`, nothing to port**.
+  Diff is NAN/NPCA/UHR config-plane growth, confirmed irrelevant.
+- [x] `sta_info.c`/`.h`, `key.c`, `wpa.c`, `status.c`, `rate.c`,
+  `rc80211_minstrel_ht.c`, `iface.c`, `main.c`, `util.c`, `chan.c`,
+  `driver-ops.c`, `vht.c`, `he.c`, `ht.c` — all read (content diff, blank
+  lines/copyright bumps stripped). Consistent pattern across every one:
+  Wi-Fi Aware/NAN capability plumbing ("NDI station using NMI station
+  capabilities" appears in `ht.c`/`vht.c`/`he.c`), a channel-context
+  iterator rewrite (`chan.c`), an MU-MIMO-group `BSS_CHANGED_MU_GROUPS`
+  refactor (`main.c`/`driver-ops.c`), and pervasive `kzalloc()`/`kmalloc()`
+  → `kzalloc_obj()`/`kzalloc_flex()`/`kmalloc_obj()` conversions (new
+  type-safe allocation macros introduced kernel-wide in this window). No
+  isolable bug fix independent of that infra in any of these files.
+  **Nothing safely portable.**
+- [x] `net/wireless/` (cfg80211) — 29 files differ. Spot-checked the
+  regulatory (`reg.c`) and scanning (`scan.c`) paths specifically since
+  those are always-on for any AP: same `kzalloc_obj`/`kzalloc_flex`
+  conversion throughout, S1G/NAN regulatory-domain branches, and one real
+  MBSSID-element bounds-check hardening in `scan.c` — but it's written
+  against the new `kzalloc_flex` allocator and sits next to
+  `mbssid_elem`/`next_mbssid` variables implying more surrounding MBSSID
+  parsing rework not visible in this hunk alone. Not a clean isolated pull.
+  The 22 `wext-*.c` "changed" files are copyright-year bumps only (verified
+  by diff-line count: 5 lines each, all comment). **Nothing safely
+  portable.**
+
+**Conclusion:** across the full `v6.18.26` → `v7.2` window, the
+`sta_ps_start()` TIM fix (already shipped as patch `377`) is the only
+change that is both applicable to this deployment and cleanly separable
+from the surrounding NAN/S1G/MLO/UHR feature wave and its supporting
+infra (`kzalloc_obj`/`kzalloc_flex`, `u64_stats_t`, drop-reason enums,
+`u.action.u.X` struct flatten). Everything else would require adopting
+that whole infra wave to get a handful of unverified secondary benefits
+(MBSSID bounds hardening, MU-MIMO group correctness) — that's a full
+backports pin bump decision (with the NAN/S1G/MLO/UHR surface this
+deployment doesn't use coming along for the ride), not a "pull the
+applicable fixes" pass. **Do not attempt further piecemeal ports from this
+window; the next real move here is an explicit pin-bump decision, not more
+cherry-picking.**
+
+Still open, unchanged from before: build the full image with patch `377`
+included and run the standard regression pass (routed/bridged offload,
+5 GHz association, SER survival, power-save with a real sleeping client
+per Task 4) before flashing. **Not flashed yet, per instruction.**
 
 ## Explicitly excluded — do not reopen without new evidence
 

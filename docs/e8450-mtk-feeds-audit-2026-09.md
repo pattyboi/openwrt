@@ -144,12 +144,68 @@ file (`mtk_flow_set_output_device()`). Verified against a clean
 `MTK_PPE_EXCEPTION_TAG` check confirmed present in the built source).
 
 **Update (2026-09-05): flashed, live-tested, mechanism confirmed
-working.** Full detail and the real methodology finding
-(`/proc/net/nf_conntrack`'s `[OFFLOAD]`/`[HW_OFFLOAD]` flag is generic
-netfilter software-fastpath status, *not* proof of MediaTek PPE
-hardware binding - only `/sys/kernel/debug/ppe0/entries` is ground
-truth) in `e8450-upstream-roadmap-2026-09.md` Task 8. Runtime toggle:
-`scripts/e8450/ppe-offload-bypass.sh`.
+working.** `/proc/net/nf_conntrack`'s `[OFFLOAD]`/`[HW_OFFLOAD]` flag is
+generic netfilter software-fastpath status, *not* proof of MediaTek PPE
+hardware binding — only `/sys/kernel/debug/ppe0/entries` is ground
+truth (a real methodology finding, worth recording for any future
+session testing PPE offload state). Confirmed live: a real,
+actively-growing, ct-mark-`0x99`-tagged download
+(`speed.cloudflare.com`, single identified 5-tuple, tracked over 5
+polls) showed `[HW_OFFLOAD] mark=153` in conntrack throughout, yet
+**never appeared in `ppe0/entries` at all** (neither `BND` nor `UNB`) —
+consistent with `mtk_flow_offload_replace()` returning `-EOPNOTSUPP`
+before the FOE entry is ever allocated, i.e. the patch working as
+intended. Runtime toggle: `scripts/e8450/ppe-offload-bypass.sh`.
+
+A fair pushback came up during the same session: post-flash
+router-wide PPE `BND` count sat at 0 for most of the session with
+`qdma_aqm` `trigger_count`/`unbind_total` climbing continuously, which
+looked like it could be a regression in `999-qos-06`'s eviction
+behavior from this batch (`999-ppe-13`/`999-eth-53`/`999-dsa-06`
+together with this patch), not just "the AQM doing its job" as first
+claimed from a historical-rate comparison alone. Resolved with an
+actual controlled A/B, not more inference: moved all four patches out
+of `target/linux/mediatek/patches-6.12/`, rebuilt, reflashed
+(`r33091-8290771b44`, patches absent), and measured the identical
+`BND`/`trigger_count`/`unbind_total` metrics a few minutes later under
+the same real household load. Result: `BND=0` on the reverted kernel
+too, and `trigger_count`/`unbind_total` were completely static (48/132,
+unchanged across four 5-second samples) — the AQM wasn't triggering at
+all at that moment, patches present or not. Confirmed the low `BND`
+count reflects real, currently-light household queue-7 traffic, not
+anything these four patches introduced. Restored the four patches
+(`git status` confirmed byte-identical to the committed versions) and
+reflashed back to the intended batch, this time with all four patches
+present (confirmed via `MTK_PPE_EXCEPTION_TAG` grep on the rebuilt
+source). Clean boot both sides of the A/B, no dmesg regressions either
+way.
+
+**Update (2026-09-06): AQM/CAKE interaction directly verified, no
+regression from the new conntrack control.** Closes the open "mark the
+test client's known bulk flow, confirm it stays off PPE hardware
+offload, check whether CAKE now sees and shapes it" item, using this
+project's own wired-workstation methodology (192.168.1.6 — no 5 GHz
+client was associated at test time; the WLAN-specific side of this
+question stays open, see `e8450-download-shaping-handoff.md`). Ran a
+controlled saturating download (`speed.cloudflare.com`, pinned local
+port, polled every 2 s) twice against the live `r33091-8290771b44`
+image: once unmarked, once with `ppe-offload-bypass.sh mark
+192.168.1.6` active. Both runs: the flow stayed `UNB` in
+`ppe0/entries` for its entire duration (this specific 5-tuple never
+reached hardware binding either way, under real concurrent household
+queue-7 load), and `tc -s qdisc show dev ifb4wan` showed real, active,
+comparable backlog throughout (unmarked: 180432b→10-28Kb, 7-120
+packets queued; marked: 36204b→1.5-27Kb, 1-24 packets queued) — CAKE is
+demonstrably seeing and queueing this download in both cases, and the
+bypass table introduces no observable change to that behavior. Router
+left clean afterward (`ppe-offload-bypass.sh unmark` confirmed, `nft
+list table inet e8450_ppe_bypass` empty). Separately confirmed the AQM
+itself kept triggering normally throughout this whole test session
+(`qdma_aqm` `trigger_count`/`unbind_total` climbed from 4763/12718 to
+4924/13177 across the test window) and `dmesg` stayed clean
+(no oops/panic/BUG/SER/timeout) — the new conntrack-mark control adds a
+working scalpel next to the existing reactive AQM eviction, without
+degrading it.
 
 ### 5. `613-netfilter-optional-tcp-window-check`
 
@@ -172,6 +228,26 @@ this enabled specifically for offload compatibility), but it should be
 named, not silently accepted.
 
 Source: `613-netfilter-optional-tcp-window-check.patch`.
+
+**Update (2026-09-06): decided — not adopted.** Checked for the actual
+problem this patch targets before accepting its tradeoff, rather than
+porting on plausibility alone. Live evidence against the running
+`r33091-8290771b44` image: sampled `/proc/net/stat/nf_conntrack`'s
+per-CPU `invalid` counter (the field `tcp_in_window()` failures land
+in) against `qdma_aqm`'s `unbind_total` (real PPE hardware→software
+eviction events, `999-qos-06`'s own path) over a clean 60-second
+window with ordinary household TCP+UDP traffic (conntrack table
+confirmed carrying real, growing, hardware-offloaded TCP flows,
+`[HW_OFFLOAD] mark=7` observed live). Result: 60 real evictions
+(`unbind_total` 12718→12778) against an `invalid` delta of only **2**
+(summed across both CPUs) in the same window — the eviction path is
+not measurably producing conntrack window-check failures on this
+deployment right now. Given no observed instance of the problem this
+patch fixes, and a real, named tradeoff (removes a sanity check against
+off-path TCP sequence/window injection), the correct call is not to
+carry it. Revisit only with concrete evidence (a `dmesg` conntrack-drop
+log, or a TCP retransmit/reset spike coinciding with an AQM eviction
+event) — not on plausibility alone.
 
 ## Worth a controlled A/B, not a blind port
 
@@ -211,8 +287,7 @@ traffic spike not reproduced elsewhere.) No latency regression (p50
 flat within noise, p95/p99 slightly lower once the outlier is set
 aside, identical 0.35% loss both sides), throughput +36%. Small sample
 (3×~19s reps/side) — real signal is "no regression, mild throughput
-gain," not a large effect size. Full detail:
-`e8450-upstream-roadmap-2026-09.md` Task 8.
+gain," not a large effect size.
 
 ### 7. `999-wdt-01`: watchdog timeout register overflow clamp
 
@@ -333,18 +408,22 @@ mode), `999-trng-01`. Revisit if a specific need arises.
 
 ## Suggested next steps
 
-- [ ] Backport and hardware-test `999-ppe-13`, `999-eth-53`, `999-dsa-06`
-  together as one low-risk correctness batch (no interaction between
-  them — different files/functions).
-- [ ] Evaluate `999-ppe-36` against the open download-shaping question in
-  `e8450-download-shaping-handoff.md`: mark the test client's known bulk
-  flow with `ct mark set 0x99`, confirm it stays off PPE hardware
-  offload, and check whether CAKE now sees and shapes it.
-- [ ] Decide on `613-netfilter-optional-tcp-window-check` with the named
-  tradeoff in mind; if adopted, verify it actually reduces or eliminates
-  any drops/resets observed immediately after an AQM eviction event.
-- [ ] A/B `999-eth-17` (NAPI weight 256) against the existing
-  saturating-load latency harness before adopting — do not assume
-  throughput-only benefit.
+- [x] Backport and hardware-test `999-ppe-13`, `999-eth-53`, `999-dsa-06`
+  together as one low-risk correctness batch — flashed
+  (`r33090-48c2d25d89`/`r33091-8290771b44`), clean boot both times;
+  no dedicated multicast/MDIO/VLAN-cycling functional test yet
+  (passive monitoring only, no incident observed).
+- [x] Evaluate `999-ppe-36` (`999-ppe-93` in this tree) against the
+  open download-shaping question: mechanism confirmed (§4) and the
+  AQM/CAKE interaction directly verified with no regression (§4,
+  2026-09-06 update) for the wired-client case; the WLAN-specific case
+  stays open pending a physical 5 GHz client, see
+  `e8450-download-shaping-handoff.md`.
+- [x] Decide on `613-netfilter-optional-tcp-window-check` — **not
+  adopted** (§5, 2026-09-06 update): live evidence found no measurable
+  conntrack-invalid signal across 60 real AQM eviction events, so the
+  named tradeoff isn't currently justified.
+- [x] A/B `999-eth-17` (NAPI weight 256) — tested, adopted (§6): no
+  latency regression, +36% upload throughput.
 - [ ] `999-wdt-01`: no action needed unless a future config requests a
   custom (non-default) watchdog timeout.

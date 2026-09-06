@@ -217,6 +217,23 @@ workstation every prior test used:
 Success metric: a yes/no answer with hardware telemetry, not inference —
 matching this project's own evidentiary standard throughout §1-38.
 
+**Update (2026-09-06): wired-client side closed, using the ct-mark-0x99
+bypass (`999-ppe-93`) instead of the blunt `flow_offloading_hw` toggle —
+see `e8450-mtk-feeds-audit-2026-09.md` §4.** No 5 GHz client was
+associated at test time, so the wifi-specific half of Phase 0 below
+remains genuinely open and still needs a physical operator with the
+S23. What *was* tested: a controlled marked/unmarked saturating
+download to the wired workstation (192.168.1.6) showed `tc -s qdisc
+show dev ifb4wan` actively queueing real, comparable backlog in both
+cases, and the test flow never reached `ppe0/entries` `BND` in either
+case under real concurrent household queue-7 load — i.e. for this
+client class, CAKE demonstrably sees and shapes the download, and the
+new conntrack-mark control changes nothing about that. This is a
+narrower, per-flow instrument than the `flow_offloading_hw=0/1`
+global toggle Phase 0 originally proposed, and doesn't require
+disabling hardware offload router-wide to use — worth preferring for
+the eventual WLAN test too.
+
 ### Phase 1 — selective offload rule (only if Phase 0 confirms a gap)
 nftables: add flowtable offload rules that exclude wlan egress
 (`oifname != "wl0-ap0"` and `!= "wl1-ap0"` on the `flow add @ft` rules —

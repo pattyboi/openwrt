@@ -30,7 +30,7 @@ built from the raw register map up.
 | 2.4 GHz radio | MT7615/WMAC, SoC-integrated, own WPDMA ring — **no WED path**, always PPE + software forwarding |
 | Switch | MT7531 DSA, 4× LAN + 1× WAN |
 
-## Current milestone — as of 2026-09-05
+## Current milestone — as of 2026-09-06
 
 | | |
 |---|---|
@@ -39,7 +39,7 @@ built from the raw register map up.
 | Radio config | 5 GHz ch157 (UNII-3, non-DFS) / 2.4 GHz ch6, both radios at **30 dBm — the US legal ceiling**, factory-eeprom calibration raised and documented (reversible) |
 | QoS/AQM | Production HQoS+AQM profile live: hardware leaky-bucket WAN shaping (`q7`/`q8`) + software occupancy-driven eviction, byte-accurate, flow-aware, `grace_ms=1000` |
 | Bufferbloat control | `sqm-autorate-rust` (adaptive CAKE rate controller) deployed with a local upstream-overshoot bug found and patched same-day |
-| Open work | One precisely-scoped, non-urgent question remains: does a real Wi-Fi client's PPE-hardware-offloaded download bypass CAKE shaping the same way it's proven to bypass the WAN-egress queue shaper. Everything needed to answer it (harness, telemetry points) exists; the test itself is deliberately deferred. See [`docs/e8450-download-shaping-handoff.md`](docs/e8450-download-shaping-handoff.md). |
+| Open work | Wired-client side of the offload-vs-CAKE question closed 2026-09-06 (a controlled ct-mark-0x99 marked/unmarked download comparison shows CAKE actively queueing either way, no regression from the new conntrack control). One precisely-scoped question remains: does a real **Wi-Fi** client's PPE-hardware-offloaded download bypass CAKE shaping — needs a physical operator with an associated 5 GHz client. See [`docs/e8450-download-shaping-handoff.md`](docs/e8450-download-shaping-handoff.md). |
 | Hardware capability audits | **Closed.** QDMA (every register with a plausible shaping role), WED (entire 815-line register file), and PSE (per-port buffer thresholds) have all been exhaustively read from source and confirmed either already-in-use or definitively inert on this silicon — with live register readback proof, not just source inference. |
 
 ## What's different from stock OpenWrt
