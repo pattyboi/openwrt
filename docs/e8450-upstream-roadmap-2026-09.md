@@ -338,18 +338,47 @@ findings not yet in this tree and two A/B candidates.
   already-applied local/backport patches (`999-qos-01` among them)
   also insert headers immediately after `of_net.h` later in the
   series - a real ordering conflict, not a vendor-diff error.
-- [ ] Flash and hardware-test the `999-ppe-13`/`999-eth-53`/`999-dsa-06`
-  batch (mDNS/multicast traffic observation for ppe-13, MT7531
-  MDIO/switch reliability for eth-53, VLAN add/delete cycling for
-  dsa-06) before calling it done.
-- [x] **Ported and build-verified** (not yet flashed): PPE hardware-
-  offload bypass via conntrack mark `0x99` (vendor `999-ppe-36`; filed
-  locally as `999-ppe-93` since this fork already has an unrelated,
-  self-invented `999-ppe-36` - PPPQ QoS default-enable - predating this
-  port). Verified against a clean `target/linux/clean` +
-  `target/linux/prepare` and a full `target/linux/compile`
-  (`mtk_ppe_offload.o` rebuilt clean, `MTK_PPE_EXCEPTION_TAG` check
-  confirmed present in the built source).
+- [x] **Flashed and smoke-tested** (`r33090-48c2d25d89`, together with
+  `999-ppe-93` below): clean boot, WED v1 attached, both radios up,
+  flow offload 1/1, AQM active, no panic/oops/BUG/SER/timeout in
+  dmesg. `999-ppe-13`/`999-eth-53`/`999-dsa-06` have no dedicated
+  functional test yet (no observed mDNS-multicast/MDIO-timeout/
+  VLAN-cycling incident either way) - passive monitoring only so far.
+- [x] **Ported, build-verified, flashed, and live-tested**: PPE
+  hardware-offload bypass via conntrack mark `0x99` (vendor
+  `999-ppe-36`; filed locally as `999-ppe-93` since this fork already
+  has an unrelated, self-invented `999-ppe-36` - PPPQ QoS
+  default-enable - predating this port). Built a runtime toggle,
+  `scripts/e8450/ppe-offload-bypass.sh` (adds/removes a standalone
+  `e8450_ppe_bypass` nftables table, forward hook priority -1, so it
+  runs before fw4's own forward chain and its `flow add @ft` -
+  touches nothing in fw4's own generated ruleset).
+
+  **Real methodological finding, worth recording for any future
+  session testing PPE offload state:** `/proc/net/nf_conntrack`'s
+  `[OFFLOAD]`/`[HW_OFFLOAD]` flag is generic Linux `nf_flowtable`
+  software-fastpath status - it does **not** mean MediaTek's PPE
+  hardware specifically accepted the flow. The only ground truth for
+  actual PPE binding is `/sys/kernel/debug/ppe0/entries`
+  (`BND`/`UNB`/absent). Confirmed live: a real, actively-growing,
+  ct-mark-`0x99`-tagged download (`speed.cloudflare.com`, single
+  identified 5-tuple, tracked over 5 polls) showed `[HW_OFFLOAD]
+  mark=153` in conntrack throughout, yet **never appeared in
+  `ppe0/entries` at all** (neither `BND` nor `UNB`) - consistent with
+  `mtk_flow_offload_replace()` returning `-EOPNOTSUPP` before the FOE
+  table entry is ever allocated, i.e. the patch working as intended.
+  A second, broader control test (comparing marked vs. unmarked
+  household traffic generally) was inconclusive on its own: this
+  router's `999-qos-06` AQM is aggressively evicting almost everything
+  under current real multi-device load (`BND` count observed at 0 for
+  most of the session, briefly 1 or 6, `trigger_count`/`unbind_total`
+  advancing continuously) - not a regression, just this fork's AQM
+  doing its job, but it makes "does a flow ever reach `BND`" a noisy
+  signal router-wide right now. The single clean, unambiguous
+  before/after per-flow result above is the one to trust.
+
+  Router left clean afterward (`ppe-offload-bypass.sh unmark`
+  confirmed - `nft list table inet e8450_ppe_bypass` empty).
 - [ ] Test the ct-mark-`0x99` bypass against the open download-shaping
   question in `e8450-download-shaping-handoff.md`: mark the test
   client's known bulk flow, confirm it stays off PPE hardware offload,

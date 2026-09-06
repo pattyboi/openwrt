@@ -143,6 +143,14 @@ file (`mtk_flow_set_output_device()`). Verified against a clean
 `target/linux/compile` (`mtk_ppe_offload.o` rebuilt clean,
 `MTK_PPE_EXCEPTION_TAG` check confirmed present in the built source).
 
+**Update (2026-09-05): flashed, live-tested, mechanism confirmed
+working.** Full detail and the real methodology finding
+(`/proc/net/nf_conntrack`'s `[OFFLOAD]`/`[HW_OFFLOAD]` flag is generic
+netfilter software-fastpath status, *not* proof of MediaTek PPE
+hardware binding - only `/sys/kernel/debug/ppe0/entries` is ground
+truth) in `e8450-upstream-roadmap-2026-09.md` Task 8. Runtime toggle:
+`scripts/e8450/ppe-offload-bypass.sh`.
+
 ### 5. `613-netfilter-optional-tcp-window-check`
 
 Adds `nf_conntrack_tcp_no_window_check` (vendor default: **on**), which

@@ -34,7 +34,7 @@ built from the raw register map up.
 
 | | |
 |---|---|
-| Kernel | Linux 6.12.103, revision `r33087-10b027e38a`, live-flashed and hardware-verified |
+| Kernel | Linux 6.12.103, revision `r33090-48c2d25d89`, live-flashed and hardware-verified |
 | Local patch count | 41 (`target/linux/mediatek/patches-6.12/999-*.patch`) + 2 mt76-specific + 3 custom packages |
 | Radio config | 5 GHz ch157 (UNII-3, non-DFS) / 2.4 GHz ch6, both radios at **30 dBm — the US legal ceiling**, factory-eeprom calibration raised and documented (reversible) |
 | QoS/AQM | Production HQoS+AQM profile live: hardware leaky-bucket WAN shaping (`q7`/`q8`) + software occupancy-driven eviction, byte-accurate, flow-aware, `grace_ms=1000` |
@@ -98,20 +98,20 @@ Full writeup, every register offset, every measurement:
 | `999-ppe-10` | Fix a typo disabling the MIB cache |
 | `999-ppe-11` | Dispatch short packets (e.g. ACKs) to a high-priority path |
 | `999-ppe-12` (×2) | TCP/UDP flow aging-out tuning; DSCP-learning core for conntrack |
-| `999-ppe-13` | Removes a multicast IB2 bit that gave the CDMA an incorrect PPE CPU reason on multicast packets (mDNS/SSDP/IGMP traffic) — build-verified, not yet flashed. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
+| `999-ppe-13` | Removes a multicast IB2 bit that gave the CDMA an incorrect PPE CPU reason on multicast packets (mDNS/SSDP/IGMP traffic) — flashed and smoke-tested clean; no dedicated multicast-traffic test yet. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
 | `999-ppe-14` | PPE cache preserved-line lock (hot flow-table entries stay cache-resident) |
 | `999-ppe-17` | DSCP-learning flow-offload propagation |
 | `999-ppe-36` | Enable PPPQ QoS mode by default on NETSYSv1 |
 | `999-ppe-89`, `999-ppe-90`, `999-ppe-91` | Flow-offload core plumbing, bridging support, a memory-leak fix |
 | `999-ppe-92` | Seeded xxh32 tuple hashing for the flow table |
-| `999-ppe-93` | PPE hardware-offload bypass via `ct mark 0x99` (vendor `999-ppe-36`, renumbered locally to avoid colliding with this fork's own pre-existing `999-ppe-36`) — build-verified, not yet flashed. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
+| `999-ppe-93` | PPE hardware-offload bypass via `ct mark 0x99` (vendor `999-ppe-36`, renumbered locally to avoid colliding with this fork's own pre-existing `999-ppe-36`) — flashed and live-tested: a marked flow is confirmed absent from `ppe0/entries` (never hardware-bound) while `/proc/net/nf_conntrack`'s `[HW_OFFLOAD]` flag alone does not indicate real PPE binding (a real methodology finding, see the doc). Runtime toggle: [`scripts/e8450/ppe-offload-bypass.sh`](scripts/e8450/ppe-offload-bypass.sh). See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
 | `999-zz-mtk_ppe-prefetch-flow-lookup` | Prefetch on the flow-table hot lookup path |
 
 ### DSA / MT7531 switch
 
 | Patch | Purpose |
 |---|---|
-| `999-dsa-06` | Fixes `mt7530_hw_vlan_del()` to set `FID(FID_BRIDGED)` on a VLAN entry that still has member ports after a deletion, matching the FID the `_add()` path already sets — build-verified, not yet flashed. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
+| `999-dsa-06` | Fixes `mt7530_hw_vlan_del()` to set `FID(FID_BRIDGED)` on a VLAN entry that still has member ports after a deletion, matching the FID the `_add()` path already sets — flashed and smoke-tested clean; no dedicated VLAN-cycling test yet. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
 
 ### Hashing
 
@@ -131,7 +131,7 @@ Full writeup, every register offset, every measurement:
 | Patch | Purpose |
 |---|---|
 | `999-eth-07` | Fix a panic on `napi_enable` |
-| `999-eth-53` | Fixes a `mtk_mdio_busy_wait()` race that could report a false MDIO timeout on a hardware access that actually succeeded — build-verified, not yet flashed. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
+| `999-eth-53` | Fixes a `mtk_mdio_busy_wait()` race that could report a false MDIO timeout on a hardware access that actually succeeded — flashed and smoke-tested clean; no dedicated MDIO-stress test yet. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
 | `999-eth-17` | NAPI poll weight 64→256 (ported from `mtk-openwrt-feeds`) — flashed and A/B tested against the saturating-load harness: no latency regression (p50/p95 flat-to-slightly-better), +36% upload throughput. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
 | `999-eth-91` | RX DMA ring size 1024 |
 | `999-hwrng-mtk...` | Device-context correctness + resume-error handling for the hardware RNG |
