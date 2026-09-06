@@ -1,7 +1,9 @@
 # E8450 AQM v2 — design (2026-09-06)
 
-Status: **implemented and build-verified (2026-09-06); not yet flashed
-or hardware-tested.** Scopes the next AQM iteration now
+Status: **implemented, build-verified, flashed, and hardware-tested
+(2026-09-06).** Phase C/A always-on; Phase B (`hold_ms`) confirmed
+working live but shipped **opt-in, default off** pending a larger A/B
+— see §10. Scopes the next AQM iteration now
 that `999-ppe-93` (PPE hardware-offload bypass via `ct mark`) is live in
 this tree. Every claim below is grounded in this fork's own patched source
 (`target/linux/mediatek/patches-6.12/999-qos-*`, `999-ppe-93`) and the
@@ -424,10 +426,87 @@ project's own methodology exists to catch:
   kernel alone never silently activates unvalidated new behavior.
   Matches §7's stated rollout caution exactly.
 
-Not yet done: flashing and the hardware validation §7 specifies
-(re-offload-latency measurement, the live `ct mark set 7/8` HQoS
-save/restore check, and `holds_active` capacity behavior under real
-saturating load) — a deliberate stop here per this project's own
-precedent of separating build-verification from live-hardware
-validation as distinct, separately-recorded steps for changes this
-novel (no peer driver precedent, per §3).
+Flashed and hardware-validated the same session — see §10.
+
+## 10. Hardware validation (2026-09-06)
+
+Built the full sysupgrade image (all three patches present) and
+flashed live via `sysupgrade -c` (config preserved). Clean boot: both
+radios up, flow offload `1/1`, `dmesg` free of oops/panic/BUG/SER/
+timeout/lockdep warnings throughout the entire session. The persisted
+boot config (`package/qdma-shaper/files/qdma-shaper.init`) only ever
+writes the original 5 positional args (`queue poll_ms byte_thresh
+batch grace_ms`) to `qdma_aqm`, so `hold_ms` lands on its compiled-in
+`0` (disabled) fallback on every real boot without any config change -
+confirmed live: `enabled=1 ... grace_ms=1000 hold_ms=0` immediately
+after the fresh boot, before this session touched the debugfs node at
+all.
+
+**Phase A/qos-18 (always-on, no toggle):** no observable regression.
+`trigger_count`/`unbind_total` climbed normally under real household
+load from the first minute of boot, matching pre-existing baseline
+behavior.
+
+**Phase B/qos-19 (`hold_ms`, opt-in):** enabled live via debugfs
+(`enable 7 100 0 4 1000 <hold_ms>`) for testing, matching this
+project's own established live-tuning methodology.
+
+- **End-to-end mechanism confirmed on real traffic.** Set `hold_ms=5000`
+  and watched `holds_active`/`holds_released` under real household
+  load for 60s: `holds_active` fluctuated 4-8 (never near the 64 cap),
+  `holds_released` climbed continuously in step with `unbind_total`
+  (both ended around 65-80) - the hold table populates and drains
+  continuously, not stuck or leaking.
+- **Save/restore correctness confirmed on a controlled, fully-traced
+  flow** (this project's own wired-workstation methodology,
+  `192.168.1.6`, `iperf3` against `fra.speedtest.clouvider.net`, exact
+  local port identified via `ss`, polled every 1s against
+  `/proc/net/nf_conntrack` with `hold_ms=3000`): `mark=7` (this tree's
+  default WAN-bulk classification, `files/etc/nftables.d/30-queue-mark.nft`)
+  →`mark=153` (held) for several seconds while `bytes=` kept climbing
+  continuously (917377→2206553, i.e. genuinely still transferring on
+  the software path, not stalled) → `mark=7` again, correctly restored,
+  not corrupted or left at `153`. The same flow cycled through this
+  transition multiple times over a 20s saturating upload as real
+  congestion recurred - `bytes=` never stopped climbing across any
+  transition (3330521→4062113 monotonic through multiple hold/release
+  boundaries), i.e. no connection disruption from the mark churn
+  itself. This was §8's top-listed open risk (permanently losing a
+  flow's HQoS classification on release) - directly disproven on real
+  hardware, not just by code inspection.
+- **A real, unresolved signal: more TCP retransmits with `hold_ms`
+  active.** A same-length (20s), same-server `iperf3` A/B: `hold_ms=0`
+  (Phase A only) → 411 retransmits, 8.23 Mbit/s sent, 17 triggers/36
+  unbinds in-window; `hold_ms=3000` → 965 retransmits, 7.26 Mbit/s
+  sent. This project's own docs already document that a hardware→
+  software eviction transition has an inherent TCP retransmit cost
+  (`netsys-qos-port-investigation.md`'s "389 vs 7 retransmits" note);
+  the open question `hold_ms` raises is whether holding a flow off
+  hardware for multiple seconds at a time changes that cost
+  meaningfully versus the immediate-re-eligibility v1 behavior. One
+  A/B pair under real, noisy household traffic (this project's own
+  repeatedly-documented confounder) is **not** enough to call this a
+  confirmed regression or dismiss it - it's the concrete reason
+  `hold_ms` ships at `0` (disabled) rather than defaulting on. **Do
+  not enable `hold_ms` in the persisted boot config
+  (`package/qdma-shaper/files/qdma-shaper.init`/`qdma-shaper.config`)
+  without a larger, cleaner, multi-rep A/B (matching the rigor of the
+  original `grace_ms` tuning A/B, `netsys-qos-port-investigation.md`
+  §35) resolving this one way or the other first.**
+- **Hold-table capacity**: never observed above single digits
+  (`holds_active` peaked at 8) against the 64-entry cap under real
+  current household load - §8's capacity-sizing risk stays open in
+  principle (a genuinely worse congestion event could exercise it
+  further) but isn't a concern at today's measured load.
+
+Router left in its safe default state after testing:
+`grace_ms=1000 hold_ms=0` (Phase A active, Phase B present but
+dormant, matching the persisted boot config exactly - reflashing or
+rebooting reproduces this state without any manual step).
+
+**Net verdict:** Phase A ships as an unconditional correctness fix.
+Phase B's mechanism is proven correct (save/restore, no connection
+disruption, no leaks) but its retransmit-cost tradeoff needs a real
+A/B before recommending a production `hold_ms` value - tracked as
+follow-up work, not blocking this patch set's adoption at the current
+(disabled) default.

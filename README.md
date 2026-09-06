@@ -34,8 +34,8 @@ built from the raw register map up.
 
 | | |
 |---|---|
-| Kernel | Linux 6.12.103, revision `r33091-8290771b44`, live-flashed and hardware-verified |
-| Local patch count | 44 (`target/linux/mediatek/patches-6.12/999-*.patch`) + 2 mt76-specific + 3 custom packages — 3 of the 44 (AQM v2 + a defensive clamp) are build-verified but not yet flashed to the running image |
+| Kernel | Linux 6.12.103, revision `r33092+2-12141b5981`, live-flashed and hardware-verified |
+| Local patch count | 44 (`target/linux/mediatek/patches-6.12/999-*.patch`) + 2 mt76-specific + 3 custom packages — all 44 flashed and live; the 3 newest (AQM v2 + a defensive clamp) hardware-tested 2026-09-06, one knob (`hold_ms`) shipped disabled by default pending a larger retransmit A/B, see [`docs/e8450-aqm-v2-design.md`](docs/e8450-aqm-v2-design.md) §10 |
 | Radio config | 5 GHz ch157 (UNII-3, non-DFS) / 2.4 GHz ch6, both radios at **30 dBm — the US legal ceiling**, factory-eeprom calibration raised and documented (reversible) |
 | QoS/AQM | Production HQoS+AQM profile live: hardware leaky-bucket WAN shaping (`q7`/`q8`) + software occupancy-driven eviction, byte-accurate, flow-aware, `grace_ms=1000` |
 | Bufferbloat control | `sqm-autorate-rust` (adaptive CAKE rate controller) deployed with a local upstream-overshoot bug found and patched same-day |
@@ -86,7 +86,7 @@ are linked per group below; this table is the map.
 | `999-qos-13` | Flow-aware eviction — targets the actual congesting flow via the PPE's own hardware byte counters, not arbitrary walk order |
 | `999-qos-14`, `999-qos-15`, `999-qos-16` | AQM eviction-path code-quality pass: dedup, drop a doubled lock-guarded walk, fix a latent overflow |
 | `999-qos-17` | Read-only PSE per-port buffer-threshold debugfs — closes the "is there a usable PSE queue-depth register" question with live readback (answer: no, never initialized on this chip) |
-| `999-qos-18`, `999-qos-19` | AQM v2: syncs the generic `flow_offload_teardown()` on eviction instead of only clearing the PPE hardware entry, and a congestion-aware ct-mark hold/release table (`hold_ms`, opt-in) so an evicted flow's re-offload timing is an AQM decision, not nf_flowtable's generic 30s idle GC — build-verified 2026-09-06, not yet flashed. See [`docs/e8450-aqm-v2-design.md`](docs/e8450-aqm-v2-design.md) |
+| `999-qos-18`, `999-qos-19` | AQM v2: syncs the generic `flow_offload_teardown()` on eviction instead of only clearing the PPE hardware entry, and a congestion-aware ct-mark hold/release table (`hold_ms`, opt-in — save/restore correctness confirmed live on a controlled saturating upload) so an evicted flow's re-offload timing is an AQM decision, not nf_flowtable's generic 30s idle GC — flashed and hardware-tested 2026-09-06; `hold_ms` ships disabled by default pending a larger retransmit A/B (a same-length A/B showed more retransmits with it active, one noisy sample, not conclusive). See [`docs/e8450-aqm-v2-design.md`](docs/e8450-aqm-v2-design.md) |
 
 Full writeup, every register offset, every measurement:
 [`docs/netsys-qos-port-investigation.md`](docs/netsys-qos-port-investigation.md).
@@ -106,7 +106,7 @@ Full writeup, every register offset, every measurement:
 | `999-ppe-89`, `999-ppe-90`, `999-ppe-91` | Flow-offload core plumbing, bridging support, a memory-leak fix |
 | `999-ppe-92` | Seeded xxh32 tuple hashing for the flow table |
 | `999-ppe-93` | PPE hardware-offload bypass via `ct mark 0x99` (vendor `999-ppe-36`, renumbered locally to avoid colliding with this fork's own pre-existing `999-ppe-36`) — flashed and live-tested: a marked flow is confirmed absent from `ppe0/entries` (never hardware-bound) while `/proc/net/nf_conntrack`'s `[HW_OFFLOAD]` flag alone does not indicate real PPE binding (a real methodology finding, see the doc). Runtime toggle: [`scripts/e8450/ppe-offload-bypass.sh`](scripts/e8450/ppe-offload-bypass.sh). See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
-| `999-ppe-94` | Defensive queue-range clamp in `mtk_foe_entry_set_queue()` (was silent `FIELD_PREP()` truncation) — build-verified 2026-09-06. See [`docs/e8450-aqm-v2-design.md`](docs/e8450-aqm-v2-design.md) §5 |
+| `999-ppe-94` | Defensive queue-range clamp in `mtk_foe_entry_set_queue()` (was silent `FIELD_PREP()` truncation) — flashed 2026-09-06, `WARN_ON_ONCE` never fired under real traffic (expected: unreachable today, see the doc). See [`docs/e8450-aqm-v2-design.md`](docs/e8450-aqm-v2-design.md) §5 |
 | `999-zz-mtk_ppe-prefetch-flow-lookup` | Prefetch on the flow-table hot lookup path |
 
 ### DSA / MT7531 switch
