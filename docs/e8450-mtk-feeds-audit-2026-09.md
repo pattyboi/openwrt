@@ -55,6 +55,13 @@ audit.
 
 Source: `999-ppe-13-mtk_ppe-delete-ib2-mcast-bit-from-ppe-entry.patch`.
 
+**Update (2026-09-05): ported, build-verified, not yet flashed.**
+Ported unmodified as
+`target/linux/mediatek/patches-6.12/999-ppe-13-mtk_ppe-delete-ib2-mcast-bit-from-ppe-entry.patch`.
+Verified against a clean `target/linux/clean` + `target/linux/prepare`
+(no `.rej`) and a full `target/linux/compile` (`mtk_ppe.o` rebuilt
+clean, multicast-bit code confirmed removed from the built source).
+
 ### 2. `999-eth-53`: MDIO busy-wait race gives false timeouts
 
 `mtk_mdio_busy_wait()` polls `PHY_IAC_ACCESS` in a loop, checking
@@ -68,6 +75,21 @@ internal MDIO bus.
 
 Source: `999-eth-53-mtk_eth_soc-fix-spurious-mdio-timeout.patch`.
 
+**Update (2026-09-05): ported (adapted), build-verified, not yet
+flashed.** Ported as
+`target/linux/mediatek/patches-6.12/999-eth-53-mtk_eth_soc-fix-spurious-mdio-timeout.patch`.
+Needed one adaptation beyond the vendor diff: the vendor's hunk
+inserts `<linux/iopoll.h>` right after `<linux/of_net.h>`, but at the
+point this patch applies (before `999-qos-01`, alphabetically later),
+several already-applied local/backport patches insert their own
+headers at that exact same boundary — a real ordering conflict caught
+by a full `target/linux/clean` + `target/linux/prepare`, not assumed.
+Moved the include to the tail of the block
+(after `<net/page_pool/helpers.h>`), a confirmed-stable anchor. Full
+`target/linux/compile` passed (`mtk_eth_soc.o` rebuilt clean,
+`read_poll_timeout(mtk_r32, ...)` confirmed present in the built
+source).
+
 ### 3. `999-dsa-06`: MT7531 VLAN deletion doesn't override the FID
 
 `mt7530_hw_vlan_del()`, when a VLAN entry still has member ports after one
@@ -77,6 +99,14 @@ this board's 4-port LAN/WAN switch uses. Real correctness bug in
 bridge/VLAN table maintenance, not chip-version-gated.
 
 Source: `999-dsa-06-fix-mt7531-vlan-del-to-override-fid.patch`.
+
+**Update (2026-09-05): ported, build-verified, not yet flashed.**
+Ported unmodified as
+`target/linux/mediatek/patches-6.12/999-dsa-06-fix-mt7531-vlan-del-to-override-fid.patch`.
+Verified against a clean `target/linux/clean` + `target/linux/prepare`
+(no `.rej`) and a full `target/linux/compile` (`mt7530.o` rebuilt
+clean, `FID(FID_BRIDGED)` confirmed present in the built
+`mt7530_hw_vlan_del()`).
 
 ### 4. `999-ppe-36`: PPE hardware-offload bypass via conntrack mark `0x99`
 

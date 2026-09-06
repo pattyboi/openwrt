@@ -1,0 +1,30 @@
+From: MediaTek vendor feed <noreply@example.invalid>
+Subject: [PATCH] net: dsa: fix VLAN deletion to override the FID
+
+Port of MediaTek vendor patch 999-dsa-06 (mtk-openwrt-feeds,
+25.12/files/target/linux/mediatek/patches-6.12), unmodified - applies
+cleanly to this tree's drivers/net/dsa/mt7530.c, no chip-version gate.
+
+Fix mt7530_hw_vlan_del() to explicitly set FID(FID_BRIDGED) when
+updating a VLAN entry that still has port members after deletion.
+mt7530_hw_vlan_add() already sets FID(FID_BRIDGED) on the same VAWD1
+register format (see the sibling call a few lines up in this file);
+mt7530_hw_vlan_del() omitting it left a stale/undefined FID hardware
+group behind a partial VLAN-member deletion on the exact MT7531 DSA
+switch this board uses (4x LAN + 1x WAN).
+
+See docs/e8450-mtk-feeds-audit-2026-09.md S3.
+
+Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
+---
+--- a/drivers/net/dsa/mt7530.c
++++ b/drivers/net/dsa/mt7530.c
+@@ -1742,7 +1742,7 @@ mt7530_hw_vlan_del(struct mt7530_priv *
+ 
+ 	if (new_members) {
+ 		val = IVL_MAC | VTAG_EN | PORT_MEM(new_members) |
+-		      VLAN_VALID;
++		      FID(FID_BRIDGED) | VLAN_VALID;
+ 		mt7530_write(priv, MT7530_VAWD1, val);
+ 	} else {
+ 		mt7530_write(priv, MT7530_VAWD1, 0);

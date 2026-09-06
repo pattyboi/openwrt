@@ -324,10 +324,24 @@ Full investigation: [`e8450-mtk-feeds-audit-2026-09.md`](e8450-mtk-feeds-audit-2
 coverage only). `mtk-openwrt-feeds` produced five verified-applicable
 findings not yet in this tree and two A/B candidates.
 
-- [ ] Backport and hardware-test as one batch (no interaction between
-  them): `999-ppe-13` (multicast PPE entries get the wrong CDMA CPU
-  reason), `999-eth-53` (MDIO busy-wait race gives false timeouts),
-  `999-dsa-06` (MT7531 VLAN deletion doesn't override the FID).
+- [x] **Ported and build-verified** (not yet flashed): `999-ppe-13`
+  (multicast PPE entries get the wrong CDMA CPU reason), `999-eth-53`
+  (MDIO busy-wait race gives false timeouts), `999-dsa-06` (MT7531
+  VLAN deletion doesn't override the FID). All three verified against
+  a truly clean `target/linux/clean` + `target/linux/prepare` (no
+  `.rej`, no unexpected fuzz) and a full `target/linux/compile`
+  (`mtk_ppe.o`/`mtk_eth_soc.o`/`mt7530.o` all rebuilt clean).
+  `999-eth-53` needed adaptation beyond the vendor diff: its
+  `<linux/iopoll.h>` include had to move to the tail of the include
+  block (after `<net/page_pool/helpers.h>`) rather than right after
+  `<linux/of_net.h>` like the vendor's own patch, because several
+  already-applied local/backport patches (`999-qos-01` among them)
+  also insert headers immediately after `of_net.h` later in the
+  series - a real ordering conflict, not a vendor-diff error.
+- [ ] Flash and hardware-test the `999-ppe-13`/`999-eth-53`/`999-dsa-06`
+  batch (mDNS/multicast traffic observation for ppe-13, MT7531
+  MDIO/switch reliability for eth-53, VLAN add/delete cycling for
+  dsa-06) before calling it done.
 - [ ] Evaluate `999-ppe-36` (PPE hardware-offload bypass via conntrack
   mark `0x99`) against the open download-shaping question in
   `e8450-download-shaping-handoff.md`.
