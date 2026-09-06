@@ -602,3 +602,54 @@ whether `hold_ms`'s designed benefit (fewer, more deliberate hardware
 transitions under sustained pressure) shows up as a measurable latency
 or fairness improvement once the mechanism is actually under load
 heavy enough to matter.
+
+### 11.4 Follow-up executed same day: heavier, multi-flow congestion
+
+§11.3's own stated follow-up (test under load closer to saturating
+multiple flows at once) run immediately after: `iperf3 -P 4` (4
+parallel TCP streams in one saturating upload) instead of a single
+stream, 3 valid reps per side (one discarded rep per side re-run,
+matching the harness's own discard/retry convention), same server/
+session/ping methodology otherwise.
+
+| metric | `hold_ms=0` (mean±stdev, n=3) | `hold_ms=3000` (mean±stdev, n=3) | delta |
+|---|---:|---:|---:|
+| sent (Mbit) | 8.8±0.0 | 8.5±0.4 | −3.2% |
+| retransmits | 1759±216 | 1991±53 | +13.2% |
+| avg latency (ms) | 27.2±0.5 | 27.1±0.8 | −0.4% |
+| p95 (ms) | 31.5±0.6 | 31.2±1.1 | −1.0% |
+| p99 (ms) | 36.8±6.1 | 37.6±5.7 | +2.2% |
+| max (ms) | 48.4±25.2 | 41.1±5.2 | −15.1%, and **far tighter spread** |
+
+Small samples (n=3/side, matching this session's time budget, not a
+full statistical study) — read directionally, not as a confirmed
+result. Two observations worth carrying forward rather than
+overclaiming:
+
+- **Retransmits scale with `hold_ms`** under this heavier load (+13.2%,
+  now larger than `hold_ms=3000`'s own stdev, unlike §11.1's
+  single-stream result which stayed within noise) - the cost §10
+  originally flagged is real at heavier congestion, just not at this
+  household's lighter single-flow load. Consistent with the mechanism
+  working as designed: holding more flows off hardware for longer
+  under heavier congestion means more of them pay the hardware→
+  software transition's inherent retransmit cost
+  (`netsys-qos-port-investigation.md`'s "389 vs 7 retransmits" note),
+  applied to a larger fraction of the load.
+- **Worst-case latency (`max`) was both lower and dramatically more
+  consistent with `hold_ms=3000`** (41.1±5.2 ms vs 48.4±25.2 ms, one
+  `hold_ms=0` rep hit 77.5 ms). `p95` and `avg` stayed flat either way.
+  This is the textbook AQM tradeoff shape - trading a measurable
+  retransmit-rate cost for tighter, lower tail latency - and if it
+  holds up under a larger sample, is the first evidence of `hold_ms`'s
+  *intended* benefit actually showing up in a metric, not just "no
+  regression."
+
+**Still not enough to change the shipped default.** Two real tradeoffs
+now both have *some* evidence (retransmit cost real at heavier load;
+possible tail-latency benefit at heavier load), pointing in opposite
+directions, both from n=3 samples. Recommend this as the next concrete
+piece of follow-up work: a larger (8-10 rep), multi-stream A/B
+specifically, to determine whether the tail-latency benefit is real
+and outweighs the retransmit cost for this household's actual usage
+pattern, before touching `qdma-shaper.init`'s persisted default.
