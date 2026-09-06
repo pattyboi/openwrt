@@ -317,6 +317,28 @@ load if there's ever a CPU-bound symptom to chase; not otherwise urgent.
 - [ ] Revalidate boot, NAND/UBI, WED attach, PPE offload, bridge flowtable,
   QDMA controls, Wi-Fi, and rollback.
 
+## Task 8: mtk-openwrt-feeds/immortalwrt 2026-09 audit — apply real findings
+
+Full investigation: [`e8450-mtk-feeds-audit-2026-09.md`](e8450-mtk-feeds-audit-2026-09.md).
+`immortalwrt/immortalwrt` produced no action items (stock-upstream MT7622
+coverage only). `mtk-openwrt-feeds` produced five verified-applicable
+findings not yet in this tree and two A/B candidates.
+
+- [ ] Backport and hardware-test as one batch (no interaction between
+  them): `999-ppe-13` (multicast PPE entries get the wrong CDMA CPU
+  reason), `999-eth-53` (MDIO busy-wait race gives false timeouts),
+  `999-dsa-06` (MT7531 VLAN deletion doesn't override the FID).
+- [ ] Evaluate `999-ppe-36` (PPE hardware-offload bypass via conntrack
+  mark `0x99`) against the open download-shaping question in
+  `e8450-download-shaping-handoff.md`.
+- [ ] Decide on `613-netfilter-optional-tcp-window-check` with the named
+  tradeoff (weakens one conntrack sanity check; standard MediaTek fix for
+  offload-eviction/conntrack-window desync) in mind.
+- [ ] A/B `999-eth-17` (NAPI poll weight 64→256) against the existing
+  saturating-load latency harness before adopting.
+- [ ] `999-wdt-01` (watchdog timeout overflow clamp): no action needed
+  unless a future config requests a non-default watchdog timeout.
+
 ## Explicitly excluded — do not reopen without new evidence
 
 Carried forward from the prior roadmap, all still correct:
