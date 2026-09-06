@@ -1,0 +1,352 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: AQM v2 phase B: ct-mark hold/release
+
+docs/e8450-aqm-v2-design.md SS4.3/SS4.4. qos-18 synced nf_flowtable's own
+bookkeeping with each eviction, but left the actual "how long does an
+evicted flow stay off PPE hardware" question exactly where v1 left it:
+governed by nf_flowtable's congestion-blind 30s idle GC
+(NF_FLOW_TIMEOUT), not by the AQM. This patch closes that gap using the
+declarative refuse-to-bind primitive 999-ppe-93 already ships
+(ct->mark == MTK_PPE_EXCEPTION_TAG in mtk_flow_offload_replace()):
+
+- mtk_qdma_aqm_flow_hold(): right after mtk_qdma_aqm_flow_teardown()
+  tears a flow down, mark its conntrack entry with the exception tag so
+  the next flow_offload_add() attempt for the same flow is refused,
+  bounded by a new MTK_QDMA_AQM_MAX_HOLD (64) -entry hold table (same
+  cap qos-13/15's own top-N candidate array already uses). Saves the
+  flow's pre-hold mark first and takes an explicit reference on its
+  struct nf_conn (refcount_inc(&ct->ct_general.use), the identical
+  pattern flow_offload_alloc() itself uses in nf_flow_table_core.c) so
+  the mark can be safely restored later, well outside the RCU walk that
+  made touching flow/ct safe at hold time in the first place.
+- mtk_qdma_aqm_hold_gc(): releases every hold whose new hold_ms
+  cooldown has elapsed - restores the saved mark (so this never
+  clobbers an unrelated HQoS priority mark set by
+  files/etc/nftables.d/30-queue-mark.nft; see the design doc SS5 for why
+  ct_mark's value space is already fully claimed by that existing
+  scheme and a save/restore, not a dedicated bit, is the correct fix
+  here) and drops the reference. Runs once per mtk_qdma_aqm_work() poll
+  tick.
+- mtk_qdma_aqm_hold_flush(): releases every currently-held flow
+  immediately regardless of hold_ms, called from both the "disable" and
+  "enable" debugfs writes. Necessary because mtk_qdma_aqm_work() stops
+  rescheduling itself entirely once disabled (qos-06's original
+  behavior, unchanged) - without this, any flow held at the moment of a
+  "disable" write would stay marked (and its struct nf_conn reference
+  pinned) forever, since nothing would ever run mtk_qdma_aqm_hold_gc()
+  again. "disable" is this whole mechanism's documented runtime
+  rollback path; it must not leave the router in a worse state than
+  before.
+
+New debugfs knob (qdma_aqm write, 7th positional arg after grace_ms):
+hold_ms, range 0-60000, default 0. hold_ms == 0 disables the entire
+hold mechanism at runtime and reverts exactly to qos-06 through
+qos-18's mtk_foe_entry_clear()+flow_offload_teardown()-only eviction -
+deliberately the fallback default for both the compile-time sscanf
+default and any existing "enable <queue> ..." caller that predates this
+patch and doesn't yet know about the new argument, so this ships
+opt-in, not default-on, until hardware-validated (design doc SS7 Phase
+B). New read-only fields: holds_active (current hold-table occupancy)
+and holds_released (lifetime release count, this phase's analogue of
+qos-06's own unbind_total).
+
+Locking: qdma_aqm_hold has its own spinlock, initialized alongside
+qdma_sch_lock in mtk_probe(), and is never held across
+qdma_sch_lock/ppe_lock in either direction - a genuine leaf lock. Every
+hold/gc/flush function drops it before calling nf_ct_put() (which can
+do real conntrack-destroy work on the final reference) rather than
+holding it across that call.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1373,6 +1373,7 @@
+  */
+ 
+ struct dentry;
++struct nf_conn;
+ 
+ struct mtk_eth {
+ 	struct device			*dev;
+@@ -1450,6 +1451,24 @@
+ 		u64		trigger_count;
+ 		u64		unbind_total;
+ 	} qdma_aqm;
++	/* qos-19 (AQM v2 phase B): ct-mark hold table, guarded by its own
++	 * lock - never held across qdma_sch_lock/ppe_lock (see
++	 * docs/e8450-aqm-v2-design.md SS6). hold_ms == 0 disables the whole
++	 * mechanism at runtime, reverting exactly to qos-06 through qos-18's
++	 * mtk_foe_entry_clear()+flow_offload_teardown()-only eviction.
++	 */
++#define MTK_QDMA_AQM_MAX_HOLD	64
++	struct {
++		spinlock_t	lock;
++		u32		hold_ms;
++		u64		released;	/* lifetime release count */
++		unsigned int	n_held;
++		struct {
++			struct nf_conn	*ct;
++			u32		saved_mark;
++			unsigned long	release_jiffies;
++		} held[MTK_QDMA_AQM_MAX_HOLD];
++	} qdma_aqm_hold;
+ 	struct delayed_work		aqm_work;
+ 	struct mtk_ppe			*ppe[3];
+ 	struct rhashtable		flow_table;
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -38,6 +38,7 @@
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <net/netfilter/nf_flow_table.h>
++#include <net/netfilter/nf_conntrack.h>
+ 
+ #include "mtk_eth_soc.h"
+ #include "mtk_wed.h"
+@@ -1484,7 +1485,9 @@
+  * through qos-17's pre-existing mtk_foe_entry_clear()-only behavior for
+  * that call, not a hard failure.
+  */
+-static void mtk_qdma_aqm_flow_teardown(struct mtk_flow_entry *entry)
++static void mtk_qdma_aqm_flow_hold(struct mtk_eth *eth, struct nf_conn *ct);
++
++static void mtk_qdma_aqm_flow_teardown(struct mtk_eth *eth, struct mtk_flow_entry *entry)
+ {
+ 	static void (*teardown_fn)(struct flow_offload *flow);
+ 	struct flow_offload_tuple *tuple = (void *)entry->cookie;
+@@ -1504,8 +1507,119 @@
+ 	flow = container_of(tuplehash, struct flow_offload, tuplehash[tuple->dir]);
+ 
+ 	teardown_fn(flow);
++	mtk_qdma_aqm_flow_hold(eth, flow->ct);
+ }
+ 
++/* qos-19 (AQM v2 phase B): after tearing a flow down via
++ * mtk_qdma_aqm_flow_teardown(), mark its conntrack entry so a future
++ * mtk_flow_offload_replace() attempt for the same flow is refused
++ * (999-ppe-93's MTK_PPE_EXCEPTION_TAG check) until the AQM itself
++ * decides to release it (mtk_qdma_aqm_hold_gc() below) - replacing v1's
++ * implicit reliance on nf_flowtable's congestion-blind 30s idle GC to
++ * eventually make an evicted flow offload-eligible again.
++ *
++ * Takes an explicit reference on @ct (the same refcount_inc() pattern
++ * flow_offload_alloc() itself uses, nf_flow_table_core.c) so it can be
++ * safely written back to at release time, well outside the RCU walk
++ * that made this call site's flow/ct access safe in the first place.
++ * Bounded by MTK_QDMA_AQM_MAX_HOLD concurrently-held flows; a hold
++ * table already at capacity, or hold_ms == 0 (the mechanism's runtime
++ * off switch), silently declines to hold - the flow stays evicted from
++ * hardware (mtk_foe_entry_clear() already ran) but is immediately
++ * re-offload-eligible again, i.e. exactly v1's behavior, not a new
++ * failure mode.
++ */
++static void mtk_qdma_aqm_flow_hold(struct mtk_eth *eth, struct nf_conn *ct)
++{
++	unsigned int idx;
++
++	if (!ct || !eth->qdma_aqm_hold.hold_ms)
++		return;
++
++	spin_lock_bh(&eth->qdma_aqm_hold.lock);
++
++	if (eth->qdma_aqm_hold.n_held >= MTK_QDMA_AQM_MAX_HOLD) {
++		spin_unlock_bh(&eth->qdma_aqm_hold.lock);
++		return;
++	}
++
++	idx = eth->qdma_aqm_hold.n_held++;
++	eth->qdma_aqm_hold.held[idx].ct = ct;
++	eth->qdma_aqm_hold.held[idx].saved_mark = ct->mark;
++	eth->qdma_aqm_hold.held[idx].release_jiffies =
++		jiffies + msecs_to_jiffies(eth->qdma_aqm_hold.hold_ms);
++
++	spin_unlock_bh(&eth->qdma_aqm_hold.lock);
++
++	refcount_inc(&ct->ct_general.use);
++	WRITE_ONCE(ct->mark, MTK_PPE_EXCEPTION_TAG);
++}
++
++/* Release every hold whose hold_ms has elapsed: restore the conntrack
++ * entry's pre-hold mark (so this doesn't clobber an unrelated HQoS
++ * priority mark set by files/etc/nftables.d/30-queue-mark.nft - see
++ * docs/e8450-aqm-v2-design.md SS5) and drop the reference taken in
++ * mtk_qdma_aqm_flow_hold(). Called once per mtk_qdma_aqm_work() poll
++ * tick; the table is normally empty or near-empty, so this is cheap.
++ */
++static void mtk_qdma_aqm_hold_gc(struct mtk_eth *eth)
++{
++	unsigned long now = jiffies;
++	unsigned int i = 0;
++
++	spin_lock_bh(&eth->qdma_aqm_hold.lock);
++
++	while (i < eth->qdma_aqm_hold.n_held) {
++		struct nf_conn *ct = eth->qdma_aqm_hold.held[i].ct;
++		u32 saved_mark = eth->qdma_aqm_hold.held[i].saved_mark;
++
++		if (time_before(now, eth->qdma_aqm_hold.held[i].release_jiffies)) {
++			i++;
++			continue;
++		}
++
++		/* swap-remove: keep the array dense without shifting */
++		eth->qdma_aqm_hold.held[i] =
++			eth->qdma_aqm_hold.held[--eth->qdma_aqm_hold.n_held];
++		eth->qdma_aqm_hold.released++;
++
++		spin_unlock_bh(&eth->qdma_aqm_hold.lock);
++		WRITE_ONCE(ct->mark, saved_mark);
++		nf_ct_put(ct);
++		spin_lock_bh(&eth->qdma_aqm_hold.lock);
++	}
++
++	spin_unlock_bh(&eth->qdma_aqm_hold.lock);
++}
++
++/* Immediately release every currently-held flow, regardless of
++ * hold_ms. Called on "disable" and before applying a fresh "enable"
++ * configuration, so a hold table from a prior configuration never
++ * outlives it - "disable" is this feature's documented runtime
++ * rollback path and must not leave any flow permanently stuck off PPE
++ * hardware.
++ */
++static void mtk_qdma_aqm_hold_flush(struct mtk_eth *eth)
++{
++	spin_lock_bh(&eth->qdma_aqm_hold.lock);
++
++	while (eth->qdma_aqm_hold.n_held) {
++		unsigned int i = eth->qdma_aqm_hold.n_held - 1;
++		struct nf_conn *ct = eth->qdma_aqm_hold.held[i].ct;
++		u32 saved_mark = eth->qdma_aqm_hold.held[i].saved_mark;
++
++		eth->qdma_aqm_hold.n_held--;
++		eth->qdma_aqm_hold.released++;
++
++		spin_unlock_bh(&eth->qdma_aqm_hold.lock);
++		WRITE_ONCE(ct->mark, saved_mark);
++		nf_ct_put(ct);
++		spin_lock_bh(&eth->qdma_aqm_hold.lock);
++	}
++
++	spin_unlock_bh(&eth->qdma_aqm_hold.lock);
++}
++
+ static unsigned int
+ mtk_qdma_aqm_unbind_queue(struct mtk_eth *eth, unsigned int queue,
+ 			  unsigned int max)
+@@ -1542,7 +1656,7 @@
+ 		 * (NF_FLOW_TIMEOUT) notices on its own - see qos-18's commit
+ 		 * message for the full reasoning.
+ 		 */
+-		mtk_qdma_aqm_flow_teardown(entry);
++		mtk_qdma_aqm_flow_teardown(eth, entry);
+ 
+ 		/* mtk_foe_entry_clear() takes ppe_lock (BH spinlock).
+ 		 * Calling under the RCU read lock from rhashtable_walk is valid;
+@@ -1569,6 +1683,12 @@
+ 	unsigned int cleared;
+ 	bool trigger;
+ 
++	/* Independent of qdma_sch_lock/enabled below: release any holds
++	 * whose hold_ms has elapsed on every tick, including the final
++	 * tick after a "disable" write (which stops further rescheduling).
++	 */
++	mtk_qdma_aqm_hold_gc(eth);
++
+ 	spin_lock_bh(&eth->qdma_sch_lock);
+ 
+ 	if (!eth->qdma_aqm.enabled) {
+@@ -1650,8 +1770,9 @@
+ 	struct mtk_eth *eth = s->private;
+ 	bool enabled;
+ 	u8 queue;
+-	u32 poll_ms, byte_thresh, batch, grace_ms;
+-	u64 trigger_count, unbind_total;
++	u32 poll_ms, byte_thresh, batch, grace_ms, hold_ms;
++	u64 trigger_count, unbind_total, holds_released;
++	unsigned int holds_active;
+ 
+ 	spin_lock_bh(&eth->qdma_sch_lock);
+ 	enabled		= eth->qdma_aqm.enabled;
+@@ -1664,11 +1785,19 @@
+ 	unbind_total	= eth->qdma_aqm.unbind_total;
+ 	spin_unlock_bh(&eth->qdma_sch_lock);
+ 
++	spin_lock_bh(&eth->qdma_aqm_hold.lock);
++	hold_ms		= eth->qdma_aqm_hold.hold_ms;
++	holds_active	= eth->qdma_aqm_hold.n_held;
++	holds_released	= eth->qdma_aqm_hold.released;
++	spin_unlock_bh(&eth->qdma_aqm_hold.lock);
++
+ 	seq_printf(s,
+-		   "enabled=%u queue=%u poll_ms=%u byte_thresh=%u batch=%u grace_ms=%u trigger_count=%llu unbind_total=%llu\n",
+-		   enabled, queue, poll_ms, byte_thresh, batch, grace_ms,
++		   "enabled=%u queue=%u poll_ms=%u byte_thresh=%u batch=%u grace_ms=%u hold_ms=%u trigger_count=%llu unbind_total=%llu holds_active=%u holds_released=%llu\n",
++		   enabled, queue, poll_ms, byte_thresh, batch, grace_ms, hold_ms,
+ 		   (unsigned long long)trigger_count,
+-		   (unsigned long long)unbind_total);
++		   (unsigned long long)unbind_total,
++		   holds_active,
++		   (unsigned long long)holds_released);
+ 	return 0;
+ }
+ 
+@@ -1683,7 +1812,7 @@
+ 	struct seq_file *s = file->private_data;
+ 	struct mtk_eth *eth = s->private;
+ 	unsigned long long q, poll_ms = 100, thresh = 0, batch = 4,
+-			   grace_ms = 3000;
++			   grace_ms = 3000, hold_ms = 0;
+ 	char buf[80], cmd[10], extra;
+ 	int nargs;
+ 
+@@ -1702,20 +1831,37 @@
+ 		spin_lock_bh(&eth->qdma_sch_lock);
+ 		eth->qdma_aqm.enabled = false;
+ 		spin_unlock_bh(&eth->qdma_sch_lock);
++		/* Runtime rollback path: never leave a flow permanently
++		 * stuck off PPE hardware just because the AQM itself was
++		 * switched off - see mtk_qdma_aqm_hold_flush()'s comment.
++		 */
++		mtk_qdma_aqm_hold_flush(eth);
+ 		return count;
+ 	}
+ 
+ 	if (strcmp(cmd, "enable"))
+ 		return -EINVAL;
+ 
+-	nargs = sscanf(buf, "%9s %llu %llu %llu %llu %llu %c",
+-		       cmd, &q, &poll_ms, &thresh, &batch, &grace_ms, &extra);
++	nargs = sscanf(buf, "%9s %llu %llu %llu %llu %llu %llu %c",
++		       cmd, &q, &poll_ms, &thresh, &batch, &grace_ms,
++		       &hold_ms, &extra);
+ 	if (nargs < 2 || q >= MTK_QDMA_NUM_QUEUES ||
+ 	    poll_ms < 10 || poll_ms > 10000 ||
+ 	    batch < 1 || batch > 64 ||
+-	    grace_ms < 100 || grace_ms > 60000)
++	    grace_ms < 100 || grace_ms > 60000 ||
++	    hold_ms > 60000)
+ 		return -EINVAL;
+ 
++	/* A hold table from a prior configuration (different queue/thresholds,
++	 * or hold_ms about to change) must not outlive this reconfiguration -
++	 * same reasoning as the "disable" path above.
++	 */
++	mtk_qdma_aqm_hold_flush(eth);
++
++	spin_lock_bh(&eth->qdma_aqm_hold.lock);
++	eth->qdma_aqm_hold.hold_ms = (u32)hold_ms;
++	spin_unlock_bh(&eth->qdma_aqm_hold.lock);
++
+ 	spin_lock_bh(&eth->qdma_sch_lock);
+ 	eth->qdma_aqm.queue		= (u8)q;
+ 	eth->qdma_aqm.poll_ms		= (u32)poll_ms;
+@@ -6555,6 +6701,7 @@
+ 	spin_lock_init(&eth->rx_irq_lock);
+ 	spin_lock_init(&eth->dim_lock);
+ 	spin_lock_init(&eth->qdma_sch_lock);
++	spin_lock_init(&eth->qdma_aqm_hold.lock);
+ 
+ 	eth->rx_dim.mode = DIM_CQ_PERIOD_MODE_START_FROM_EQE;
+ 	INIT_WORK(&eth->rx_dim.work, mtk_dim_rx);

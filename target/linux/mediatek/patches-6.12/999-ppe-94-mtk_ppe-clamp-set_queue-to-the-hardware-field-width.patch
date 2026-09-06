@@ -1,0 +1,59 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_ppe: clamp set_queue to the hardware field width
+
+mtk_foe_entry_set_queue() writes its @queue argument straight into a
+FIELD_PREP() call against a 4-bit (v1: MTK_FOE_IB2_QID, GENMASK(3,0),
+queues 0-15) or 7-bit (v2/v3: MTK_FOE_IB2_QID_V2, GENMASK(6,0), 0-127)
+hardware bitfield, with no range check anywhere in the call chain.
+FIELD_PREP() silently truncates an oversized value to the field width
+instead of rejecting it (e.g. queue=153 on this board's v1 4-bit field
+becomes 153 & 0xF = 9) - a silent wrong-queue write, not a crash, but a
+real correctness hazard for any future caller that derives @queue from
+data this driver doesn't otherwise validate (this fork's own
+qos_toggle==2 ct-mark-based explicit queue select in
+mtk_flow_set_output_device(), mtk_ppe_offload.c, reads a raw 16-bit
+slice of a userspace-writable conntrack mark as a literal queue number).
+
+Not currently reachable in this tree: 999-ppe-93's ct mark ==
+MTK_PPE_EXCEPTION_TAG (0x99) check in mtk_flow_offload_replace() runs
+unconditionally before mtk_flow_set_output_device() is ever called, so
+that specific value never reaches this function today. But that safety
+is purely a property of call order in a different function, not
+anything mtk_foe_entry_set_queue() itself enforces - a future refactor
+of mtk_flow_offload_replace(), or any other call path that ever derives
+a queue number from unchecked conntrack-mark data, would silently
+reintroduce it. Defensive fix, independent of any AQM v2 work: clamp
+@queue to the hardware field's actual representable range before
+FIELD_PREP(), and WARN_ON_ONCE (fires at most once per boot) if that
+clamp ever actually changes the value, so an out-of-range caller is
+visible in dmesg instead of silently mis-routed.
+
+No behavior change for any legitimate caller: every existing call site
+in this tree passes a queue number already known to be in range (either
+a literal QDMA queue 0-15, or DSCP-derived, or read back from a prior
+mtk_foe_entry_ib2() encode/decode round trip).
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.c
+@@ -634,12 +634,19 @@
+ 			    unsigned int queue)
+ {
+ 	u32 *ib2 = mtk_foe_entry_ib2(eth, entry);
++	unsigned int max_queue;
+ 
+ 	if (mtk_is_netsys_v2_or_greater(eth)) {
++		max_queue = FIELD_MAX(MTK_FOE_IB2_QID_V2);
++		if (WARN_ON_ONCE(queue > max_queue))
++			queue = max_queue;
+ 		*ib2 &= ~MTK_FOE_IB2_QID_V2;
+ 		*ib2 |= FIELD_PREP(MTK_FOE_IB2_QID_V2, queue);
+ 		*ib2 |= MTK_FOE_IB2_PSE_QOS_V2;
+ 	} else {
++		max_queue = FIELD_MAX(MTK_FOE_IB2_QID);
++		if (WARN_ON_ONCE(queue > max_queue))
++			queue = max_queue;
+ 		*ib2 &= ~MTK_FOE_IB2_QID;
+ 		*ib2 |= FIELD_PREP(MTK_FOE_IB2_QID, queue);
+ 		*ib2 |= MTK_FOE_IB2_PSE_QOS;

@@ -1,0 +1,175 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: AQM eviction: sync generic flow_offload teardown
+
+AQM v2 phase A (docs/e8450-aqm-v2-design.md). qos-06's eviction
+(mtk_qdma_aqm_unbind_queue()) calls mtk_foe_entry_clear() directly on
+the PPE hardware FOE entry, entirely bypassing the generic kernel
+flowtable (net/netfilter/nf_flow_table_core.c) the flow's
+struct flow_offload object lives in. That object's own bookkeeping -
+NF_FLOW_HW, IPS_OFFLOAD_BIT on the conntrack entry, flow->timeout -
+is left completely untouched: nf_flowtable keeps believing the flow is
+still actively, currently hardware-offloaded.
+
+Traced the real consequence in the generic flowtable source, not
+inferred: nf_flow_table.h defines NF_FLOW_TIMEOUT as 30*HZ, and
+nf_flow_table_core.c's gc_work runs every HZ but only tears a flow down
+once nf_flow_has_expired() is true - 30s of apparent inactivity. Nothing
+about qos-06's own grace_ms or the live rate/drop trigger state feeds
+into that decision. Once that 30s generic timer (not the AQM) finally
+tears the zombie flow down and a fresh packet re-triggers
+flow_offload_add(), the flow is immediately hardware-offload-eligible
+again with no relationship to whether the WAN queue is still congested.
+
+Fix: call the same flow_offload_teardown() every other teardown path in
+the kernel already uses (net/sched/act_ct.c is the only other non-core
+caller; no in-tree hardware-offload driver does this today - surveyed
+bnxt_tc.c, mlx5 en_tc.c/tc_ct.c, nfp flower offload.c/conntrack.c,
+sfc tc*.c, mlxsw, ocelot_net.c, and others, none call back into
+flow_offload_teardown()/flow_offload_lookup() to request their own
+flow's removal). This immediately clears IPS_OFFLOAD_BIT and marks
+NF_FLOW_TEARDOWN, so nf_flowtable's own belief about this flow matches
+reality the instant qos-06 evicts it, instead of drifting for up to
+30s. The struct flow_offload is resolved from entry->cookie, which is
+exactly the tuple pointer nf_flow_table_offload.c hands the driver as
+flow_cls_offload->cookie ("cls_flow->cookie = (unsigned long)tuple") -
+the identical container_of() flow_offload_lookup() itself performs from
+a fresh rhashtable lookup, just recovered from the pointer already on
+hand instead of a second lookup.
+
+Deliberately NOT routed through the generic nf_flow_offload_del() async
+workqueue path (net/netfilter/nf_flow_table_offload.c): that symbol
+isn't exported for use outside net/netfilter/*.c, and even if it were,
+its own gc_work-driven dispatch would add up to ~1s of extra
+hardware-still-bound latency before the real FOE invalidate happens -
+exactly the delay this AQM exists to avoid. The synchronous
+mtk_foe_entry_clear() call stays exactly as it was; this patch only
+adds the generic-bookkeeping sync alongside it.
+
+Memory safety verified by tracing the actual free path, not assumed:
+flow_offload_free() (nf_flow_table_core.c) frees via kfree_rcu(). RCU
+grace periods are global, not per-rhashtable - holding rcu_read_lock()
+anywhere (which rhashtable_walk_start() already does for this walk)
+blocks any kfree_rcu()-scheduled reclaim everywhere, the identical
+guarantee nf_flow_offload_gc_step() itself relies on to dereference
+flow->ct directly from its own (different) rhashtable walk with no
+extra reference. flow_offload_teardown() itself takes no blocking locks
+(bitops and a WRITE_ONCE; verified by reading its body) and is
+idempotent, so it's safe to call from this BH/RCU context even against
+an already-torn-down flow.
+
+Build-verified the hard way: an initial version of this patch called
+flow_offload_teardown() directly and failed vmlinux link
+("undefined reference to `flow_offload_teardown'") - this tree's config
+has CONFIG_NET_MEDIATEK_SOC=y (vmlinux built-in) but
+CONFIG_NF_FLOW_TABLE=m (loadable module), so a direct call from this
+driver into that module's exported symbol can never link. Resolved with
+symbol_get()/EXPORT_SYMBOL_GPL dynamic lookup instead of a direct call -
+see the in-code comment on mtk_qdma_aqm_flow_teardown() for the full
+mechanism and its cached-pointer/module-reference lifetime. Recording
+this here because it's exactly the kind of constraint no amount of
+source reading catches without an actual compile.
+
+Not in scope here: this driver's own eth->flow_table bookkeeping entry
+(the mtk_flow_entry struct itself) still isn't freed by qos-06 - it's
+already skipped as inert via the existing entry->hash == 0xffff guard
+and only reclaimed later via mtk_flow_offload_destroy()'s own full
+teardown. Phase B (a following patch) adds the ct-mark hold/release
+state machine that makes the eviction actually stick instead of
+relying on the same 30s timer for re-offload eligibility; this patch
+only fixes the bookkeeping desync.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -36,6 +36,8 @@
+ #include <net/checksum.h>
+ #include <net/page_pool/helpers.h>
+ #include <linux/iopoll.h>
++#include <linux/module.h>
++#include <net/netfilter/nf_flow_table.h>
+ 
+ #include "mtk_eth_soc.h"
+ #include "mtk_wed.h"
+@@ -1444,6 +1446,66 @@
+  * the queue/score, which would cost a second ppe_lock'd stats read per
+  * candidate for a result pass 1 already computed.
+  */
++/* Resolve the generic struct flow_offload this FOE entry belongs to and
++ * tear it down through the same generic API path every other flow_offload
++ * teardown in the kernel uses.
++ *
++ * entry->cookie is exactly the tuple pointer nf_flow_table_offload.c hands
++ * the driver as flow_cls_offload->cookie (net/netfilter/nf_flow_table_offload.c:
++ * "cls_flow->cookie = (unsigned long)tuple") - the same pointer
++ * flow_offload_lookup() itself resolves via an identical container_of() from
++ * a fresh rhashtable lookup (net/netfilter/nf_flow_table_core.c). Recovering
++ * it here from the cookie we already stored avoids a second lookup.
++ *
++ * Safe to dereference without an extra reference: struct flow_offload is
++ * freed via kfree_rcu() (flow_offload_free(), nf_flow_table_core.c), and
++ * this is called from within the same RCU read-side critical section
++ * rhashtable_walk_start() already holds for eth->flow_table below - RCU
++ * grace periods are global, so no kfree_rcu()-scheduled free anywhere can
++ * complete while any reader (this one included) holds the read lock, the
++ * same guarantee nf_flow_offload_gc_step() itself relies on to dereference
++ * flow->ct directly from its own, different, rhashtable walk. Idempotent
++ * against an already-torn-down flow (flow_offload_teardown() just sets
++ * flags/clears a status bit; safe to call twice).
++ *
++ * flow_offload_teardown() lives in nf_flow_table.ko (CONFIG_NF_FLOW_TABLE=m
++ * in this tree's config), while this driver (CONFIG_NET_MEDIATEK_SOC=y) is
++ * linked into vmlinux - a direct call would fail at vmlinux link time
++ * (confirmed: "undefined reference to `flow_offload_teardown'" against a
++ * real build before this dynamic-lookup form was written). Resolve it via
++ * symbol_get() instead: an EXPORT_SYMBOL_GPL lookup by name against
++ * currently-loaded modules, cached after the first successful resolution
++ * (which also takes a permanent module reference on nf_flow_table,
++ * preventing it from ever being unloaded out from under the cached pointer -
++ * acceptable here since nf_flow_table is already a hard functional
++ * prerequisite for PPE hardware flow offload to work at all on this board).
++ * Graceful no-op if nf_flow_table isn't loaded yet (e.g. transiently early
++ * in boot, before fw4/nftables has loaded it) - falls back to exactly qos-06
++ * through qos-17's pre-existing mtk_foe_entry_clear()-only behavior for
++ * that call, not a hard failure.
++ */
++static void mtk_qdma_aqm_flow_teardown(struct mtk_flow_entry *entry)
++{
++	static void (*teardown_fn)(struct flow_offload *flow);
++	struct flow_offload_tuple *tuple = (void *)entry->cookie;
++	struct flow_offload_tuple_rhash *tuplehash;
++	struct flow_offload *flow;
++
++	if (!tuple)
++		return;
++
++	if (!teardown_fn) {
++		teardown_fn = symbol_get(flow_offload_teardown);
++		if (!teardown_fn)
++			return;
++	}
++
++	tuplehash = container_of(tuple, struct flow_offload_tuple_rhash, tuple);
++	flow = container_of(tuplehash, struct flow_offload, tuplehash[tuple->dir]);
++
++	teardown_fn(flow);
++}
++
+ static unsigned int
+ mtk_qdma_aqm_unbind_queue(struct mtk_eth *eth, unsigned int queue,
+ 			  unsigned int max)
+@@ -1474,6 +1536,14 @@
+ 		if (!mtk_qdma_aqm_hash_selected(top, n_top, entry->hash))
+ 			continue;
+ 
++		/* Sync the generic nf_flowtable's own bookkeeping (IPS_OFFLOAD_BIT,
++		 * NF_FLOW_TEARDOWN) with the hardware invalidate below, instead of
++		 * leaving it to drift until nf_flowtable's own 30s idle GC
++		 * (NF_FLOW_TIMEOUT) notices on its own - see qos-18's commit
++		 * message for the full reasoning.
++		 */
++		mtk_qdma_aqm_flow_teardown(entry);
++
+ 		/* mtk_foe_entry_clear() takes ppe_lock (BH spinlock).
+ 		 * Calling under the RCU read lock from rhashtable_walk is valid;
+ 		 * ppe_lock and RCU do not conflict.  The entry is RCU-protected
