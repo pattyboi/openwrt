@@ -1,0 +1,45 @@
+From: MediaTek vendor feed <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: change NAPI poll weight to 256
+
+Port of MediaTek vendor patch 999-eth-17 (mtk-openwrt-feeds,
+25.12/files/target/linux/mediatek/patches-6.12), adapted for this
+fork's mtk_probe(): the vendor source registers a per-RSS-ring/HW-LRO
+struct mtk_napi rx_napi[] array; this tree's NETSYSv1 baseline has no
+RSS/HWLRO NAPI array (RSS/HWLRO are not enabled on this board's SoC
+config) and calls netif_napi_add() exactly twice, for eth->tx_napi and
+the single eth->rx_napi. Same substantive change: NAPI poll weight
+64 (the netif_napi_add() default) -> 256, via netif_napi_add_weight().
+
+Vendor rationale, verbatim: "This parameter will strongly affect the
+peak throughput of the SW path." Applies unmodified to NETSYSv1 -
+mtk_eth_soc.c has no chip-version gate around NAPI registration.
+
+Not yet hardware-validated on this board; see
+docs/e8450-mtk-feeds-audit-2026-09.md ("worth a controlled A/B, not a
+blind port") for the tradeoff against this fork's own latency-focused
+AQM work (grace_ms tuned to 1000ms) before treating this as adopted.
+
+Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -37,6 +37,7 @@
+ #define MTK_DMA_SIZE(x)		(SZ_##x)
+ #define MTK_FQ_DMA_HEAD		32
+ #define MTK_FQ_DMA_LENGTH	2048
++#define MTK_NAPI_WEIGHT		256
+ #define MTK_RX_ETH_HLEN		(ETH_HLEN + ETH_FCS_LEN)
+ #define MTK_RX_HLEN		(NET_SKB_PAD + MTK_RX_ETH_HLEN + NET_IP_ALIGN)
+ #define MTK_DMA_DUMMY_DESC	0xffffffff
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -6705,8 +6705,8 @@ static int mtk_probe(struct platform_dev
+ 	eth->dummy_dev->threaded = 1;
+ 	strcpy(eth->dummy_dev->name, "mtk_eth");
+-	netif_napi_add(eth->dummy_dev, &eth->tx_napi, mtk_napi_tx);
+-	netif_napi_add(eth->dummy_dev, &eth->rx_napi, mtk_napi_rx);
++	netif_napi_add_weight(eth->dummy_dev, &eth->tx_napi, mtk_napi_tx, MTK_NAPI_WEIGHT);
++	netif_napi_add_weight(eth->dummy_dev, &eth->rx_napi, mtk_napi_rx, MTK_NAPI_WEIGHT);
+ 
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+ 		if (!eth->netdev[i])

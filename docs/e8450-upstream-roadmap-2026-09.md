@@ -334,8 +334,14 @@ findings not yet in this tree and two A/B candidates.
 - [ ] Decide on `613-netfilter-optional-tcp-window-check` with the named
   tradeoff (weakens one conntrack sanity check; standard MediaTek fix for
   offload-eviction/conntrack-window desync) in mind.
-- [ ] A/B `999-eth-17` (NAPI poll weight 64→256) against the existing
-  saturating-load latency harness before adopting.
+- [x] Ported and build-verified: `999-eth-17` (NAPI poll weight
+  64→256) — adapted for this fork's non-RSS/HWLRO `mtk_probe()`,
+  `target/linux/prepare` and a full `target/linux/compile` both passed
+  clean. Not yet flashed/hardware-tested.
+- [ ] A/B `999-eth-17` against the existing saturating-load latency
+  harness on real hardware before treating it as adopted (this fork's
+  AQM work targets p95 latency; a 4x larger NAPI budget trades fewer
+  softirq transitions for more work per cycle — confirm no regression).
 - [ ] `999-wdt-01` (watchdog timeout overflow clamp): no action needed
   unless a future config requests a non-default watchdog timeout.
 
