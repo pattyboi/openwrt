@@ -139,6 +139,27 @@ throughput-only benefit carries no latency cost on this board.
 
 Source: `999-eth-17-mtk_eth_soc-change-napi-poll-weight-to-256.patch`.
 
+**Update (2026-09-05): tested, adopted.** Ported as
+`target/linux/mediatek/patches-6.12/999-eth-17-mtk_eth_soc-change-napi-poll-weight-to-256.patch`,
+adapted for this fork's non-RSS/HWLRO `mtk_probe()` (two
+`netif_napi_add()` calls, not a `rx_napi[]` array). Built, flashed live
+(`r33087-10b027e38a`), clean boot. A/B'd against the pre-flash baseline
+with `scripts/e8450/saturating-load-harness.sh` (3 reps each side,
+same session, same real household-traffic conditions):
+
+| | sent (Mbit) | avg (ms) | p50 | p95 | p99 | max | loss |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 3.29 | 34.5 | 30.9 | 48.0 | 104.2* | 164.9* | 0.35% |
+| post-`eth-17` | 4.47 | 32.9 | 31.4 | 45.3 | 49.7 | 55.3 | 0.35% |
+
+(*baseline p99/max dominated by one rep-3 outlier — a single real-
+traffic spike not reproduced elsewhere.) No latency regression (p50
+flat within noise, p95/p99 slightly lower once the outlier is set
+aside, identical 0.35% loss both sides), throughput +36%. Small sample
+(3×~19s reps/side) — real signal is "no regression, mild throughput
+gain," not a large effect size. Full detail:
+`e8450-upstream-roadmap-2026-09.md` Task 8.
+
 ### 7. `999-wdt-01`: watchdog timeout register overflow clamp
 
 `mtk_wdt_set_timeout()` computes `WDT_LENGTH_TIMEOUT(timeout << 6)` with no

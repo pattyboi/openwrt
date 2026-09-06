@@ -334,14 +334,31 @@ findings not yet in this tree and two A/B candidates.
 - [ ] Decide on `613-netfilter-optional-tcp-window-check` with the named
   tradeoff (weakens one conntrack sanity check; standard MediaTek fix for
   offload-eviction/conntrack-window desync) in mind.
-- [x] Ported and build-verified: `999-eth-17` (NAPI poll weight
-  64→256) — adapted for this fork's non-RSS/HWLRO `mtk_probe()`,
-  `target/linux/prepare` and a full `target/linux/compile` both passed
-  clean. Not yet flashed/hardware-tested.
-- [ ] A/B `999-eth-17` against the existing saturating-load latency
-  harness on real hardware before treating it as adopted (this fork's
-  AQM work targets p95 latency; a 4x larger NAPI budget trades fewer
-  softirq transitions for more work per cycle — confirm no regression).
+- [x] **Ported, built, flashed, and hardware A/B tested**: `999-eth-17`
+  (NAPI poll weight 64→256) — adapted for this fork's non-RSS/HWLRO
+  `mtk_probe()`. Built the full sysupgrade image
+  (`r33087-10b027e38a`), flashed live via `sysupgrade -c`, clean boot
+  (WED v1 attached, both radios up, flow offload 1/1, no panic/oops/
+  BUG/SER/timeout in dmesg). Ran
+  `scripts/e8450/saturating-load-harness.sh` (3 reps, iperf3 upload +
+  concurrent ping) back-to-back against the pre-flash baseline, same
+  session, same real household-traffic conditions:
+
+  | | sent (Mbit) | avg (ms) | p50 | p95 | p99 | max | loss |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | baseline (r33085-48d5d245d1) | 3.29 | 34.5 | 30.9 | 48.0 | 104.2* | 164.9* | 0.35% |
+  | post-`eth-17` (r33087-10b027e38a) | 4.47 | 32.9 | 31.4 | 45.3 | 49.7 | 55.3 | 0.35% |
+
+  (*baseline p99/max dominated by one rep-3 outlier, p99=214ms/max=391ms
+  — a single real-traffic spike, not reproduced in any other rep either
+  side.) **No latency regression**: p50 flat within noise (30.9→31.4),
+  p95 and p99 both slightly lower post-patch once the one baseline
+  outlier is set aside, loss identical (0.35% both sides, same single
+  dropped ping in rep 2 of both runs). Throughput +36% (3.29→4.47
+  Mbit sent). Sample is small (3×~19s reps per side, real household
+  traffic in the loop per this project's own documented noise caveat)
+  — treat as "no regression, mild throughput gain," not a
+  large-effect-size result. **Adopted.**
 - [ ] `999-wdt-01` (watchdog timeout overflow clamp): no action needed
   unless a future config requests a non-default watchdog timeout.
 

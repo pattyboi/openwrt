@@ -30,11 +30,11 @@ built from the raw register map up.
 | 2.4 GHz radio | MT7615/WMAC, SoC-integrated, own WPDMA ring — **no WED path**, always PPE + software forwarding |
 | Switch | MT7531 DSA, 4× LAN + 1× WAN |
 
-## Current milestone — as of 2026-09-04
+## Current milestone — as of 2026-09-05
 
 | | |
 |---|---|
-| Kernel | Linux 6.12.94, revision `r33075-4dfd876771`, live-flashed and hardware-verified |
+| Kernel | Linux 6.12.103, revision `r33087-10b027e38a`, live-flashed and hardware-verified |
 | Local patch count | 37 (`target/linux/mediatek/patches-6.12/999-*.patch`) + 2 mt76-specific + 3 custom packages |
 | Radio config | 5 GHz ch157 (UNII-3, non-DFS) / 2.4 GHz ch6, both radios at **30 dBm — the US legal ceiling**, factory-eeprom calibration raised and documented (reversible) |
 | QoS/AQM | Production HQoS+AQM profile live: hardware leaky-bucket WAN shaping (`q7`/`q8`) + software occupancy-driven eviction, byte-accurate, flow-aware, `grace_ms=1000` |
@@ -123,7 +123,7 @@ Full writeup, every register offset, every measurement:
 | Patch | Purpose |
 |---|---|
 | `999-eth-07` | Fix a panic on `napi_enable` |
-| `999-eth-17` | NAPI poll weight 64→256 (ported from `mtk-openwrt-feeds`) — build-verified only, hardware A/B against the existing latency harness still pending. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
+| `999-eth-17` | NAPI poll weight 64→256 (ported from `mtk-openwrt-feeds`) — flashed and A/B tested against the saturating-load harness: no latency regression (p50/p95 flat-to-slightly-better), +36% upload throughput. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
 | `999-eth-91` | RX DMA ring size 1024 |
 | `999-hwrng-mtk...` | Device-context correctness + resume-error handling for the hardware RNG |
 
