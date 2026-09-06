@@ -34,7 +34,7 @@ built from the raw register map up.
 
 | | |
 |---|---|
-| Kernel | Linux 6.12.103, revision `r33090-48c2d25d89`, live-flashed and hardware-verified |
+| Kernel | Linux 6.12.103, revision `r33091-8290771b44`, live-flashed and hardware-verified |
 | Local patch count | 41 (`target/linux/mediatek/patches-6.12/999-*.patch`) + 2 mt76-specific + 3 custom packages |
 | Radio config | 5 GHz ch157 (UNII-3, non-DFS) / 2.4 GHz ch6, both radios at **30 dBm — the US legal ceiling**, factory-eeprom calibration raised and documented (reversible) |
 | QoS/AQM | Production HQoS+AQM profile live: hardware leaky-bucket WAN shaping (`q7`/`q8`) + software occupancy-driven eviction, byte-accurate, flow-aware, `grace_ms=1000` |

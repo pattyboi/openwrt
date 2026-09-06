@@ -367,18 +367,30 @@ findings not yet in this tree and two A/B candidates.
   `ppe0/entries` at all** (neither `BND` nor `UNB`) - consistent with
   `mtk_flow_offload_replace()` returning `-EOPNOTSUPP` before the FOE
   table entry is ever allocated, i.e. the patch working as intended.
-  A second, broader control test (comparing marked vs. unmarked
-  household traffic generally) was inconclusive on its own: this
-  router's `999-qos-06` AQM is aggressively evicting almost everything
-  under current real multi-device load (`BND` count observed at 0 for
-  most of the session, briefly 1 or 6, `trigger_count`/`unbind_total`
-  advancing continuously) - not a regression, just this fork's AQM
-  doing its job, but it makes "does a flow ever reach `BND`" a noisy
-  signal router-wide right now. The single clean, unambiguous
-  before/after per-flow result above is the one to trust.
-
-  Router left clean afterward (`ppe-offload-bypass.sh unmark`
-  confirmed - `nft list table inet e8450_ppe_bypass` empty).
+  A second question came up (fair pushback, not something to wave
+  away with inference): router-wide `BND` count sat at 0 for most of
+  the post-flash session with `trigger_count`/`unbind_total` climbing
+  continuously, which looked like it could be a regression in
+  `999-qos-06`'s eviction behavior introduced by this batch. Resolved
+  with an actual controlled A/B, not a historical-rate comparison:
+  temporarily moved all four new patches out of
+  `target/linux/mediatek/patches-6.12/`, rebuilt, reflashed
+  (`r33091-8290771b44`, same commit, patches absent from the build),
+  and measured the identical metrics under the same real household
+  load a few minutes later. Result: **`BND=0` on the reverted kernel
+  too, and `trigger_count`/`unbind_total` were completely static
+  (48/132, unchanged across four 5-second samples)** - the AQM wasn't
+  triggering at all at that moment, patches present or not. Confirms
+  the low `BND` count reflects real, currently-light household queue-7
+  traffic, not anything introduced by `999-ppe-13`/`999-eth-53`/
+  `999-dsa-06`/`999-ppe-93`. Restored the four patches (`git status`
+  confirmed byte-identical to the committed versions) and reflashed
+  back to the intended batch (`r33091-8290771b44` again, this time
+  with all four patches actually present - confirmed via
+  `MTK_PPE_EXCEPTION_TAG` grep on the rebuilt source). Clean boot both
+  times, no dmesg regressions either side of the A/B. Router left
+  clean afterward - `ppe-offload-bypass.sh unmark` and
+  `nft list table inet e8450_ppe_bypass` both confirmed empty.
 - [ ] Test the ct-mark-`0x99` bypass against the open download-shaping
   question in `e8450-download-shaping-handoff.md`: mark the test
   client's known bulk flow, confirm it stays off PPE hardware offload,
