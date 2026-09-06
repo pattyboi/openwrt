@@ -474,25 +474,10 @@ project's own established live-tuning methodology.
   itself. This was §8's top-listed open risk (permanently losing a
   flow's HQoS classification on release) - directly disproven on real
   hardware, not just by code inspection.
-- **A real, unresolved signal: more TCP retransmits with `hold_ms`
-  active.** A same-length (20s), same-server `iperf3` A/B: `hold_ms=0`
-  (Phase A only) → 411 retransmits, 8.23 Mbit/s sent, 17 triggers/36
-  unbinds in-window; `hold_ms=3000` → 965 retransmits, 7.26 Mbit/s
-  sent. This project's own docs already document that a hardware→
-  software eviction transition has an inherent TCP retransmit cost
-  (`netsys-qos-port-investigation.md`'s "389 vs 7 retransmits" note);
-  the open question `hold_ms` raises is whether holding a flow off
-  hardware for multiple seconds at a time changes that cost
-  meaningfully versus the immediate-re-eligibility v1 behavior. One
-  A/B pair under real, noisy household traffic (this project's own
-  repeatedly-documented confounder) is **not** enough to call this a
-  confirmed regression or dismiss it - it's the concrete reason
-  `hold_ms` ships at `0` (disabled) rather than defaulting on. **Do
-  not enable `hold_ms` in the persisted boot config
-  (`package/qdma-shaper/files/qdma-shaper.init`/`qdma-shaper.config`)
-  without a larger, cleaner, multi-rep A/B (matching the rigor of the
-  original `grace_ms` tuning A/B, `netsys-qos-port-investigation.md`
-  §35) resolving this one way or the other first.**
+- **A single-sample retransmit signal from this initial pass, revised
+  by a proper multi-rep A/B — see §11.** The original single-pair
+  comparison here (`hold_ms=0` → 411 retransmits vs `hold_ms=3000` →
+  965) is superseded; do not cite it as a standalone finding.
 - **Hold-table capacity**: never observed above single digits
   (`holds_active` peaked at 8) against the 64-entry cap under real
   current household load - §8's capacity-sizing risk stays open in
@@ -504,9 +489,116 @@ Router left in its safe default state after testing:
 dormant, matching the persisted boot config exactly - reflashing or
 rebooting reproduces this state without any manual step).
 
-**Net verdict:** Phase A ships as an unconditional correctness fix.
-Phase B's mechanism is proven correct (save/restore, no connection
-disruption, no leaks) but its retransmit-cost tradeoff needs a real
-A/B before recommending a production `hold_ms` value - tracked as
-follow-up work, not blocking this patch set's adoption at the current
-(disabled) default.
+**Net verdict as of this pass:** Phase A ships as an unconditional
+correctness fix. Phase B's mechanism is proven correct (save/restore,
+no connection disruption, no leaks); its cost/benefit tradeoff was
+re-examined with proper statistical rigor in §11 below, which
+supersedes this section's single-sample retransmit claim.
+
+## 11. Continued testing and refinement (2026-09-06, same day)
+
+Extended `scripts/e8450/saturating-load-harness.sh` to also report
+TCP retransmits from the `iperf3` JSON (`d['end']['sum_sent']['retransmits']`)
+- a durable, reusable improvement, not a one-off script, since the
+harness previously measured throughput and latency but not the metric
+§10's regression claim actually needed.
+
+### 11.1 Properly-powered A/B revises §10's retransmit claim
+
+Ran the harness 4 reps per side (`hold_ms=0` and `hold_ms=3000`, same
+20 s duration, same real household-traffic conditions, same session)
+instead of §10's single pair:
+
+| metric | `hold_ms=0` (mean±stdev, n=4) | `hold_ms=3000` (mean±stdev, n=4) | delta |
+|---|---:|---:|---:|
+| sent (Mbit) | 8.19±0.11 | 8.12±0.26 | −0.9% |
+| avg latency (ms) | 25.5±0.2 | 26.1±0.5 | +2.4% |
+| p95 (ms) | 30.1±0.5 | 31.1±0.6 | +3.3% |
+| p99 (ms) | 33.0±2.4 | 35.8±6.5 | +8.7%, dominated by one rep's 45.5 ms outlier |
+| retransmits | 460±123 | 505±89 | +9.8% |
+
+**The within-group standard deviation (89-123 retransmits, 2.4-6.5 ms
+for p99) is larger than the between-group mean delta (45 retransmits,
+2.9 ms for p99) on every metric.** §10's single-pair comparison (411
+vs 965 retransmits, a >2x difference) was an unlucky/lucky draw at
+n=1, not a representative effect - exactly the household-traffic-noise
+confounder this project's own docs have repeatedly flagged
+(`netsys-qos-port-investigation.md` SS31.3, SS35.1). **Revised finding:
+no statistically distinguishable throughput, latency, or retransmit
+cost from `hold_ms=3000` at this household's current traffic level.**
+
+### 11.2 Direct validation that `hold_ms` does what it's designed to do
+
+§10 validated save/restore correctness on a single flow but didn't
+directly confirm the mechanism actually changes how long a flow stays
+off hardware - the whole reason it exists. Two further checks, same
+wired-workstation methodology:
+
+- **`hold_ms=0` never marks at all**, confirmed unambiguously: polled
+  a tracked `iperf3` flow's `/proc/net/nf_conntrack` mark every 0.5 s
+  for a full 20 s saturating upload - **34/34 samples read `mark=7`**
+  (this tree's default WAN-bulk classification), never once `153`.
+  Matches `mtk_qdma_aqm_flow_hold()`'s own early-return
+  (`if (!eth->qdma_aqm_hold.hold_ms) return;`) exactly: `hold_ms=0` is
+  genuinely a full no-op for the hold mechanism, not merely a
+  short/instant hold, reverting cleanly to qos-06 through qos-18's
+  teardown-sync-only behavior.
+- **`hold_ms=3000` produces real, multi-second-plus hold episodes
+  under sustained congestion**, not brief blips: the same 0.5 s-poll
+  methodology against a genuinely saturating (real queue-7-congesting)
+  upload showed the flow's mark sitting at `7` for the first ~8.5 s
+  (pre-congestion ramp), then transitioning to `153` and **staying
+  there continuously for the rest of the observed ~13.5 s window** -
+  longer than a single 3000 ms hold, consistent with the flow being
+  re-marked on a fresh eviction almost immediately after each release
+  (this is a genuinely elephant/dominant flow under a synthetic
+  saturating load - exactly the scenario `hold_ms` targets) rather than
+  a stuck/leaked mark (the debugfs `holds_released` counter kept
+  climbing throughout the same session, ruling out a leak).
+- **A negative methodology result, worth recording so it isn't
+  re-attempted the same way**: tried to corroborate hold duration via
+  `ppe0/entries`' `BND`/`UNB` state instead of the conntrack mark,
+  polling once per second. Result was **not usable**: both `hold_ms=0`
+  and `hold_ms=3000` showed the same pattern - the tracked flow's
+  `ppe0/entries` row flickers `UNB` for a single ~1 s sample, then
+  reads `BND` again, regardless of `hold_ms`. Root cause (traced, not
+  guessed): `mtk_qdma_aqm_flow_teardown()`'s `flow_offload_teardown()`
+  call sets `NF_FLOW_TEARDOWN` on the generic `flow_offload` object
+  immediately; the *generic* `nf_flowtable` `gc_work` (1 Hz, unrelated
+  to this AQM's own `poll_ms`/`hold_ms`) then calls back into this
+  driver's own `mtk_flow_offload_destroy()` within about a second,
+  which fully removes the `mtk_flow_entry` from `eth->flow_table`
+  (`rhashtable_remove_fast()` + `kfree()`) - so the zombie stops being
+  *visible* in `ppe0/entries` well before `hold_ms` (if longer than
+  ~1 s) actually expires, even though the conntrack mark (the real
+  gate) is still correctly held. `ppe0/entries` visibility duration is
+  governed by the generic 1 Hz gc cadence, not by `hold_ms` - **the
+  conntrack mark, not `ppe0/entries`, is the correct ground truth for
+  validating `hold_ms` duration**, matching (and extending) this
+  project's own already-documented methodology finding that
+  `/proc/net/nf_conntrack`'s offload flags and `ppe0/entries` measure
+  different things (`e8450-mtk-feeds-audit-2026-09.md` §4).
+
+### 11.3 Revised net verdict
+
+Phase A/C ship as unconditional fixes (unchanged). Phase B's mechanism
+is now confirmed, on real hardware, to do exactly what it was designed
+to do (extend off-hardware duration under sustained congestion,
+correctly, with no data corruption, no leaks) **and** shows no
+statistically distinguishable throughput/latency/retransmit cost at
+`hold_ms=3000` under a properly-powered same-day A/B. This is
+materially stronger evidence than §10 had. It is **not** yet strong
+enough to recommend flipping the persisted boot default
+(`package/qdma-shaper.init`) to a nonzero `hold_ms`: this session's A/B
+used one synthetic single-flow saturating upload, not the genuinely
+heavier, multi-flow, sustained congestion scenario `hold_ms` is meant
+to help most, and this household's real background load stayed light
+enough throughout (`holds_active` peaked at 8 of the 64 cap) that the
+mechanism was never seriously stress-tested. Real remaining follow-up,
+not blocking anything currently shipped: a multi-rep A/B specifically
+during genuinely heavy real household congestion (or a multi-stream
+synthetic load closer to saturating multiple flows at once), to see
+whether `hold_ms`'s designed benefit (fewer, more deliberate hardware
+transitions under sustained pressure) shows up as a measurable latency
+or fairness improvement once the mechanism is actually under load
+heavy enough to matter.

@@ -47,12 +47,19 @@ try:
 except Exception:
     print(0)
 ")
+	retransmits=$(python3 -c "
+import json
+try:
+    d = json.load(open('$iperf_out'))
+    print(d['end']['sum_sent'].get('retransmits', 'NA'))
+except Exception:
+    print('NA')
+")
 	rm -f "$iperf_out"
-
-	python3 - "$ping_out" "$sent_bps" "$server" <<'PYEOF'
+	python3 - "$ping_out" "$sent_bps" "$server" "$retransmits" <<'PYEOF'
 import re, sys, statistics
 
-ping_out, sent_bps, server = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+ping_out, sent_bps, server, retransmits = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
 times = []
 transmitted = received = 0
 with open(ping_out) as f:
@@ -78,8 +85,8 @@ def pct(p):
 
 loss = 100.0 * (transmitted - received) / transmitted if transmitted else 100.0
 print(
-    "RESULT OK server=%s sent_mbit=%.2f avg=%.1f p50=%.1f p95=%.1f p99=%.1f max=%.1f loss=%.2f%% n=%d"
-    % (server, sent_bps / 1e6, statistics.mean(times), pct(50), pct(95), pct(99), max(times), loss, len(times))
+    "RESULT OK server=%s sent_mbit=%.2f avg=%.1f p50=%.1f p95=%.1f p99=%.1f max=%.1f loss=%.2f%% retransmits=%s n=%d"
+    % (server, sent_bps / 1e6, statistics.mean(times), pct(50), pct(95), pct(99), max(times), loss, retransmits, len(times))
 )
 PYEOF
 }
