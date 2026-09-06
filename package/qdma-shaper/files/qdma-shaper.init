@@ -77,20 +77,21 @@ clear_hqos() {
 }
 
 apply_aqm() {
-	local cfg="$1" enabled queue poll_ms byte_thresh batch grace_ms node
+	local cfg="$1" enabled queue poll_ms byte_thresh batch grace_ms hold_ms node
 	config_get_bool enabled "$cfg" enabled 0
 	config_get queue      "$cfg" queue       7
 	config_get poll_ms    "$cfg" poll_ms     100
 	config_get byte_thresh "$cfg" byte_thresh 0
 	config_get batch      "$cfg" batch       4
 	config_get grace_ms   "$cfg" grace_ms    3000
+	config_get hold_ms    "$cfg" hold_ms     0
 	[ "$enabled" = "1" ] || return 0
 	node="$(_aqm_node)" || {
 		logger -t qdma-shaper "qdma_aqm not found; skipping AQM enable"
 		return 0
 	}
-	echo "enable $queue $poll_ms $byte_thresh $batch $grace_ms" > "$node"
-	logger -t qdma-shaper "AQM enabled queue=$queue poll_ms=${poll_ms} grace_ms=${grace_ms}"
+	echo "enable $queue $poll_ms $byte_thresh $batch $grace_ms $hold_ms" > "$node"
+	logger -t qdma-shaper "AQM enabled queue=$queue poll_ms=${poll_ms} grace_ms=${grace_ms} hold_ms=${hold_ms}"
 }
 
 clear_aqm() {

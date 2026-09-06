@@ -6,10 +6,12 @@
 # configuration. Run from a LAN workstation behind the E8450 (this
 # project's convention: 192.168.1.6), not from the router itself.
 #
-# Usage: scripts/e8450/saturating-load-harness.sh [reps] [duration_s] [ping_target]
+# Usage: scripts/e8450/saturating-load-harness.sh [reps] [duration_s] [ping_target] [streams]
 #   reps          default 3
 #   duration_s    default 20 (iperf3 -t and ping sample count both derive from this)
 #   ping_target   default 8.8.8.8
+#   streams       default 1 (iperf3 -P N parallel streams — use >1 to test under
+#                 heavier multi-flow congestion instead of a single saturating flow)
 #
 # Primary server fra.speedtest.clouvider.net, falls back to iperf.he.net
 # on failure/"server is busy" (documented flakiness of the public server).
@@ -22,6 +24,7 @@ set -eu
 REPS="${1:-3}"
 DUR="${2:-20}"
 TARGET="${3:-8.8.8.8}"
+STREAMS="${4:-1}"
 SERVERS="fra.speedtest.clouvider.net iperf.he.net"
 
 run_one() {
@@ -29,7 +32,7 @@ run_one() {
 	iperf_out="$(mktemp)"
 	ping_out="$(mktemp)"
 
-	iperf3 -c "$server" -t "$DUR" -J >"$iperf_out" 2>&1 &
+	iperf3 -c "$server" -P "$STREAMS" -t "$DUR" -J >"$iperf_out" 2>&1 &
 	iperf_pid=$!
 
 	# give iperf3 a moment to ramp before sampling ping, matching the

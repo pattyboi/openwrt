@@ -1,11 +1,15 @@
 # E8450 AQM v2 — design (2026-09-06)
 
-Status: **implemented, build-verified, flashed, and hardware-tested
-(2026-09-06).** Phase C/A always-on; Phase B (`hold_ms`) confirmed
-working live but shipped **opt-in, default off** pending a larger A/B
-— see §10. Scopes the next AQM iteration now
-that `999-ppe-93` (PPE hardware-offload bypass via `ct mark`) is live in
-this tree. Every claim below is grounded in this fork's own patched source
+Status: **v2 shipped and closed out (2026-09-06).** All three phases
+implemented, build-verified, flashed, and hardware-tested. Phase B
+(`hold_ms`) **adopted as the production default** (`hold_ms=3000`,
+wired into `package/qdma-shaper/files/qdma-shaper.{init,config}`,
+confirmed activating correctly from a cold boot with zero manual
+intervention) after a properly-powered A/B found no measurable cost
+and a plausible tail-latency benefit — see §12. Scoped the next AQM
+iteration now that `999-ppe-93` (PPE hardware-offload bypass via
+`ct mark`) is live in this tree. Every claim below is grounded in this
+fork's own patched source
 (`target/linux/mediatek/patches-6.12/999-qos-*`, `999-ppe-93`) and the
 generic (unpatched) kernel source in
 `build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_mt7622/linux-6.12.103/`
@@ -653,3 +657,99 @@ piece of follow-up work: a larger (8-10 rep), multi-stream A/B
 specifically, to determine whether the tail-latency benefit is real
 and outweighs the retransmit cost for this household's actual usage
 pattern, before touching `qdma-shaper.init`'s persisted default.
+
+## 12. Wrap-up: the 8-rep multi-stream A/B and production adoption (2026-09-06)
+
+Executed §11.4's own recommended follow-up immediately: 8 valid reps
+per side (vs. §11.4's n=3) of the same 4-parallel-stream saturating
+upload, reusing `saturating-load-harness.sh`'s `[streams]` parameter
+added for exactly this (`./saturating-load-harness.sh 8 20 8.8.8.8 4`).
+
+| metric | `hold_ms=0` (n=8, outlier excluded, n=7) | `hold_ms=3000` (n=8) | delta |
+|---|---:|---:|---:|
+| sent (Mbit) | 8.6±0.7 | 9.0±0.4 | +5.0% |
+| avg latency (ms) | 27.7±1.0 | 26.8±1.0 | −3.2% |
+| p95 (ms) | 32.5±1.0 | 32.3±2.6 | −0.5% |
+| p99 (ms) | 39.9±6.0 | 37.8±5.3 | −5.2% |
+| retransmits | 1680±221 | 1655±220 | −1.5% |
+
+**With proper statistical power (n=7-8 per side, more than double
+§11.4's n=3), the retransmit-cost signal from §11.4 does not
+reproduce** - retransmits are now statistically flat (even very
+slightly lower with `hold_ms=3000`), not +13.2% worse. §11.4's n=3
+retransmit finding was itself still noise, same lesson as §11.1's
+original n=1 finding: this project's real-household-traffic A/Bs need
+real sample sizes before trusting a delta, even a delta that looks
+larger than one side's stdev at n=3.
+
+**One real severe congestion event occurred during the `hold_ms=0`
+leg** (one rep: avg 71.5 ms, p95 254 ms, p99 861 ms, max 1065 ms - a
+genuine real-world household-traffic spike, not a synthetic result)
+**and none occurred during the `hold_ms=3000` leg** (worst single-rep
+max across all 8 reps: 69.5 ms). This is mechanistically consistent
+with `hold_ms`'s whole design intent - §11.2 already showed `hold_ms=0`
+lets an evicted flow rebind to hardware within about a second, so a
+real burst of contending traffic can drive rapid rebind/re-evict
+cycling with no flow held back long enough to let the queue drain,
+whereas `hold_ms=3000` forces a meaningful stretch of real breathing
+room. **This is not proof** - one occurrence in 16 reps cannot rule out
+coincidental timing of unrelated household traffic independent of
+which config was active - but it is the most direct evidence yet of
+the intended benefit, and it points the same direction as the "flatter,
+lower `max`" finding in both §11.4 (n=3) and this section's own outlier
+case.
+
+### 12.1 Decision: adopt `hold_ms=3000` as the production default
+
+Across every A/B run this session (single-stream 4-rep, single-stream
+mark/duration validation, multi-stream 3-rep, multi-stream 8-rep):
+`hold_ms=3000` never showed a statistically distinguishable cost on
+throughput, `p95` latency, or (at proper sample size) retransmits, and
+repeatedly showed flatter/lower worst-case latency, including one
+direct observation of it apparently containing a real severe
+congestion event that `hold_ms=0` did not. Combined with §11.2's
+direct confirmation that the mechanism does what it's designed to do
+(genuine multi-second hold episodes under sustained congestion, clean
+save/restore, no leaks, no crashes across the full multi-hour test
+session), this clears the bar this project has consistently used for
+adopting a tuning change (`999-eth-17`'s NAPI-weight A/B, the
+`grace_ms` tuning in `netsys-qos-port-investigation.md` §35): real
+hardware evidence, no measured regression, a plausible and
+mechanistically-grounded benefit.
+
+**Wired into the persisted production config**, not just tested via
+debugfs:
+
+- `package/qdma-shaper/files/qdma-shaper.init`'s `apply_aqm()`: reads
+  a new `hold_ms` UCI option (`config_get hold_ms "$cfg" hold_ms 0` -
+  default `0`/disabled for any config predating this option, matching
+  qos-19's own compiled-in default) and appends it as the 6th
+  positional argument to the `enable` debugfs write.
+- `package/qdma-shaper/files/qdma-shaper.config`: `config aqm 'queue7'`
+  now carries `option hold_ms '3000'`.
+- Built the full image, flashed live via `sysupgrade -c`. **Verified
+  end-to-end from a genuine cold boot**, not just by re-reading the
+  source: `logread` shows `qdma-shaper: AQM enabled queue=7 poll_ms=100
+  grace_ms=1000 hold_ms=3000` at boot, `qdma_aqm` debugfs confirms
+  `hold_ms=3000` with `trigger_count`/`unbind_total`/`holds_released`
+  already nonzero within the first minute of uptime, zero manual
+  debugfs writes this boot. Clean boot otherwise: both radios up, flow
+  offload `1/1`, `dmesg` free of oops/panic/BUG/SER/timeout throughout.
+
+### 12.2 What's still open (real follow-up, not blocking)
+
+- The "one severe event during `hold_ms=0`" observation (§12) is
+  suggestive, not proven causal - a dedicated test that can reliably
+  *trigger* a comparable congestion burst on demand (rather than
+  waiting for real household traffic to happen to produce one) would
+  turn this into a real, repeatable A/B instead of an anecdote.
+- §8's hold-table capacity risk (64 entries) has still never been
+  exercised near its cap even under this session's heaviest 4-stream
+  test (`holds_active` stayed in single digits) - revisit if a future
+  session observes it approaching the cap under genuinely heavier
+  real-world congestion.
+- §8's already-in-flight-packet question for `flow_offload_teardown()`
+  remains unverified by a dedicated packet-capture-level test (this
+  session's evidence is all throughput/latency/retransmit-level, not a
+  packet trace) - no evidence of a problem found, but not the same as
+  a targeted check.
