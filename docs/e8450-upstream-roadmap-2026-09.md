@@ -342,9 +342,18 @@ findings not yet in this tree and two A/B candidates.
   batch (mDNS/multicast traffic observation for ppe-13, MT7531
   MDIO/switch reliability for eth-53, VLAN add/delete cycling for
   dsa-06) before calling it done.
-- [ ] Evaluate `999-ppe-36` (PPE hardware-offload bypass via conntrack
-  mark `0x99`) against the open download-shaping question in
-  `e8450-download-shaping-handoff.md`.
+- [x] **Ported and build-verified** (not yet flashed): PPE hardware-
+  offload bypass via conntrack mark `0x99` (vendor `999-ppe-36`; filed
+  locally as `999-ppe-93` since this fork already has an unrelated,
+  self-invented `999-ppe-36` - PPPQ QoS default-enable - predating this
+  port). Verified against a clean `target/linux/clean` +
+  `target/linux/prepare` and a full `target/linux/compile`
+  (`mtk_ppe_offload.o` rebuilt clean, `MTK_PPE_EXCEPTION_TAG` check
+  confirmed present in the built source).
+- [ ] Test the ct-mark-`0x99` bypass against the open download-shaping
+  question in `e8450-download-shaping-handoff.md`: mark the test
+  client's known bulk flow, confirm it stays off PPE hardware offload,
+  check whether CAKE now sees and shapes it.
 - [ ] Decide on `613-netfilter-optional-tcp-window-check` with the named
   tradeoff (weakens one conntrack sanity check; standard MediaTek fix for
   offload-eviction/conntrack-window desync) in mind.

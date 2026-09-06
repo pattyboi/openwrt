@@ -1,0 +1,54 @@
+From: MediaTek vendor feed <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_ppe: add binding bypass by ct mark 0x99
+
+Port of MediaTek vendor patch 999-ppe-36 (mtk-openwrt-feeds,
+25.12/files/target/linux/mediatek/patches-6.12). Filed locally as
+999-ppe-93, not 999-ppe-36: this fork already has an unrelated,
+self-invented local patch at that number
+(999-ppe-36-mtk-eth-enable-pppq-qos-by-default-for-netsysv1.patch,
+predating this port). Adapted for this
+tree's mtk_ppe.h: the vendor's hunk assumes mtk_ppe.h includes
+"mtk_eth_soc.h" and inserts MTK_PPE_EXCEPTION_TAG right after that
+include; this tree's mtk_ppe.h has a different header layout (no
+mtk_eth_soc.h include at that point), so the define is inserted before
+MTK_PPE_ENTRIES_SHIFT instead - same net effect, no functional change.
+The mtk_ppe_offload.c hunk (mtk_flow_offload_replace()) is unmodified;
+f->flow->ct is already an established access pattern in this exact
+file (see mtk_flow_set_output_device()).
+
+Without this patch, there is no way to prevent specific connections
+from being hardware-offloaded by the PPE.
+
+Users can mark 0x99 to conntrack entry to bypass PPE binding using
+`nft ... ct mark set 0x99`. No chip-version gate.
+
+Directly relevant to the open question in
+docs/e8450-download-shaping-handoff.md (does a WiFi client's
+PPE-hardware-offloaded download bypass CAKE shaping): marking a known
+flow's conntrack entry with 0x99 keeps it off PPE hardware offload
+permanently, giving a declarative test/mitigation instead of relying
+solely on the reactive occupancy-driven eviction in 999-qos-06. See
+docs/e8450-mtk-feeds-audit-2026-09.md S4.
+
+Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_ppe.h
++++ b/drivers/net/ethernet/mediatek/mtk_ppe.h
+@@ -8,6 +8,7 @@
+ #include <linux/bitfield.h>
+ #include <linux/rhashtable.h>
+ 
++#define MTK_PPE_EXCEPTION_TAG		0x99
+ #define MTK_PPE_ENTRIES_SHIFT		4
+ #define MTK_PPE_ENTRIES			(1024 << MTK_PPE_ENTRIES_SHIFT)
+ #define MTK_PPE_HASH_MASK		(MTK_PPE_ENTRIES - 1)
+--- a/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
+@@ -423,4 +423,7 @@ mtk_flow_offload_replace(struct mtk_eth
+ 	if (rhashtable_lookup(&eth->flow_table, &f->cookie, mtk_flow_ht_params))
+ 		return -EEXIST;
+ 
++	if (f->flow && f->flow->ct && f->flow->ct->mark == MTK_PPE_EXCEPTION_TAG)
++		return -EOPNOTSUPP;
++
+ 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META)) {

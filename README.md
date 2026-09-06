@@ -35,7 +35,7 @@ built from the raw register map up.
 | | |
 |---|---|
 | Kernel | Linux 6.12.103, revision `r33087-10b027e38a`, live-flashed and hardware-verified |
-| Local patch count | 40 (`target/linux/mediatek/patches-6.12/999-*.patch`) + 2 mt76-specific + 3 custom packages |
+| Local patch count | 41 (`target/linux/mediatek/patches-6.12/999-*.patch`) + 2 mt76-specific + 3 custom packages |
 | Radio config | 5 GHz ch157 (UNII-3, non-DFS) / 2.4 GHz ch6, both radios at **30 dBm — the US legal ceiling**, factory-eeprom calibration raised and documented (reversible) |
 | QoS/AQM | Production HQoS+AQM profile live: hardware leaky-bucket WAN shaping (`q7`/`q8`) + software occupancy-driven eviction, byte-accurate, flow-aware, `grace_ms=1000` |
 | Bufferbloat control | `sqm-autorate-rust` (adaptive CAKE rate controller) deployed with a local upstream-overshoot bug found and patched same-day |
@@ -104,6 +104,7 @@ Full writeup, every register offset, every measurement:
 | `999-ppe-36` | Enable PPPQ QoS mode by default on NETSYSv1 |
 | `999-ppe-89`, `999-ppe-90`, `999-ppe-91` | Flow-offload core plumbing, bridging support, a memory-leak fix |
 | `999-ppe-92` | Seeded xxh32 tuple hashing for the flow table |
+| `999-ppe-93` | PPE hardware-offload bypass via `ct mark 0x99` (vendor `999-ppe-36`, renumbered locally to avoid colliding with this fork's own pre-existing `999-ppe-36`) — build-verified, not yet flashed. See [`docs/e8450-mtk-feeds-audit-2026-09.md`](docs/e8450-mtk-feeds-audit-2026-09.md) |
 | `999-zz-mtk_ppe-prefetch-flow-lookup` | Prefetch on the flow-table hot lookup path |
 
 ### DSA / MT7531 switch

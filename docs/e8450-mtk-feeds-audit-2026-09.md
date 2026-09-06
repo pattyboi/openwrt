@@ -125,7 +125,23 @@ gives a declarative, direct answer — and a permanent mitigation for flows
 you already know you want shaped — instead of relying solely on the
 reactive eviction machinery.
 
-Source: `999-ppe-36-mtk_ppe-add-binding-bypass-by-ct-mark-0x99.patch`.
+Source: filed locally as `999-ppe-93-mtk_ppe-add-binding-bypass-by-ct-mark-0x99.patch`
+(not `999-ppe-36`: this fork already has an unrelated, self-invented
+patch at that number - PPPQ QoS default-enable for NETSYSv1 -
+predating this port).
+
+**Update (2026-09-05): ported (adapted), build-verified, not yet
+flashed.** `mtk_ppe.h`'s hunk needed adaptation: the vendor's context
+assumes `mtk_ppe.h` includes `"mtk_eth_soc.h"`, which this tree's
+`mtk_ppe.h` doesn't at that point (different header layout after this
+fork's own `mtk_ppe.h` restructuring) - inserted
+`MTK_PPE_EXCEPTION_TAG` before `MTK_PPE_ENTRIES_SHIFT` instead, same
+net effect. The `mtk_ppe_offload.c` hunk is unmodified;
+`f->flow->ct` is already an established access pattern in this exact
+file (`mtk_flow_set_output_device()`). Verified against a clean
+`target/linux/clean` + `target/linux/prepare` (no `.rej`) and a full
+`target/linux/compile` (`mtk_ppe_offload.o` rebuilt clean,
+`MTK_PPE_EXCEPTION_TAG` check confirmed present in the built source).
 
 ### 5. `613-netfilter-optional-tcp-window-check`
 
