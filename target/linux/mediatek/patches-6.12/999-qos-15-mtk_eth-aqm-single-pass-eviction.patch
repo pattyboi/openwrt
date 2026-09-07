@@ -13,7 +13,7 @@ matching entry just to re-derive the identical score and compare it
 against pass 1's cutoff before evicting.
 
 This is not a rare-path cost: qos-13's own on-hardware measurement
-(docs/netsys-qos-port-investigation.md SS29) saw 17 triggers in ~35 s
+(docs/research/qos-aqm-lab-notes.md SS29) saw 17 triggers in ~35 s
 under ordinary household load, so the doubled ppe_lock acquisition and
 doubled flow-table walk recur roughly every 2 s under real traffic.
 qos-13's design note also already flagged the resulting behavior as

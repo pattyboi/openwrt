@@ -1,118 +1,9 @@
-# NETSYS QoS and Hardware-Shaper Port Investigation
+# NETSYSv1 QoS/AQM lab notes
 
-## TL;DR
-
-MediaTek's own vendor SDK (both firmware generations) confirms NETSYSv1
-(MT7622) has **no hardware AQM** — the closest thing, an `HRED2` register
-and an `fc_th` depth threshold, are both dead on real hardware (write, read
-back, no effect). What NETSYSv1 *does* have in working hardware: per-queue
-leaky-bucket rate caps and WRR weights, arbitrated by exactly **one**
-functional scheduler — a second scheduler slot (`TX_SEL=1`) and hardware
-airtime fairness are both wired in the register map but confirmed
-non-enforcing on this chip (~15x over a configured cap in the dual-scheduler
-test). Built a software occupancy-driven AQM instead, using only what's real:
-
-```mermaid
-flowchart LR
-    subgraph HW["Hardware (real)"]
-        LB["Per-queue leaky bucket<br/>+ WRR weight<br/>(scheduler 0 only)"]
-        MIB["QTX_MIB_IF readout<br/>packets/drops/bytes<br/>(qos-05, qos-11)"]
-        PPE["Per-flow byte/idle<br/>accounting<br/>(mtk_foe_entry_get_stats)"]
-    end
-    subgraph SW["Software AQM (qos-06/12/13)"]
-        POLL["Poll MIB every 100ms"]
-        TRIG{"byte delta ><br/>50% of cap?<br/>(qos-12)"}
-        SCORE["Score bound flows:<br/>active > idle, then bytes<br/>(qos-13, CAKE-inspired)"]
-        EVICT["Evict top-batch flows'<br/>PPE binding"]
-    end
-    MIB --> POLL --> TRIG
-    TRIG -- "yes" --> SCORE
-    PPE --> SCORE
-    SCORE --> EVICT
-    EVICT -- "falls back to" --> CAKE["CAKE (software path)"]
-    CAKE -. "re-offload eligible" .-> LB
-    TRIG -- "no" --> POLL
-```
-
-Result: p95 latency under saturating load went from 196 ms (hardware
-offload, no AQM) to 22-34 ms (AQM active) — matching CAKE-only baseline
-while keeping hardware offload's CPU savings for everything AQM isn't
-actively defending against. Full status/production profile below; jump to
-§28-30 for the most recent hardware-capability findings and the AQM
-accuracy/targeting improvements. See `docs/README.md` for the repo-wide
-index.
-
-
-Status: COMPLETE through §38. The QoS investigation and production verdict
-are complete, and the hardware-capability question is closed: every
-plausible NETSYSv1 QDMA AQM/HQoS register has now been hardware-tested.
-qos-01 through qos-13 and the `qdma-shaper` backend/UCI package are
-implemented and hardware-validated on the live E8450. Phase B (§22.12)
-measured p95 196 ms → 33.8 ms (5.8×) at 98.5% cap. qos-07 (skb→mark queue
-steer) further reduces ICMP latency to **22 ms avg / 29 ms max** under full
-load — matching CAKE-only baseline. qos-08 adds SER robustness; qos-09
-probed the inert QDMA register gap, qos-10 adds DSCP/QID steering, qos-11
-adds a 64-bit per-queue byte counter, qos-12 makes the AQM trigger
-byte-accurate, and qos-13 makes AQM eviction flow-aware (targets the
-currently-active, highest-byte flow instead of arbitrary walk order,
-inspired by CAKE's bulk/sparse classification). §28 hardware-tested
-NETSYSv1's second scheduler (`TX_SEL=1`) and found it wired but
-non-enforcing (~15× over a configured cap) — no further hardware SQM/AQM
-capability exists to port from higher NETSYS levels or vendor firmware on
-this chip; see §28.5. §32 re-read the AQM eviction path itself for
-software-only optimizations now that the hardware door is closed: qos-14
-dedups a hand-copied PPE accessor, qos-15 removes a doubled `ppe_lock`+
-flow-table walk from every AQM trigger by reusing pass 1's eviction
-ranking in pass 2, and qos-16 fixes a latent `u32` overflow in the
-byte-threshold auto-compute. Built, flashed to the live E8450, and
-hardware-validated (§33): no dmesg regressions, AQM actively triggering/
-evicting, and a saturating-load p95 latency test (30.5 ms) landing
-squarely inside the already-good 22-34 ms band, not regressed toward the
-196 ms pre-AQM baseline. §35 followed up with a live `grace_ms`/`poll_ms`
-A/B trial: `grace_ms` dropped from 3000 to **1000 ms** (adopted as the
-new production default - consistently lower latency and, uniquely,
-zero packet loss across every rep), `poll_ms` stayed at 100 (tested,
-effect too small/inconsistent to justify changing). §34's remaining item
-1 (dedicated CPU-time profiling to quantify qos-15's savings) is still
-open. §37 checked `sqm-autorate-rust`'s `download_base_kbits`/
-`download_min_percent` against the confirmed contracted ISP plan
-(75/10 Mbps) and found, by reading the vendored source directly, that
-those options are not a rate ceiling at all - only a floor and a minor
-nudge term - so §36's "download ceiling calibrated above capacity"
-theory needed correcting: the real gap is the vendored tool's lack of
-any upper-bound clamp, confirmed live by watching the shaped rate swing
-from its 6 Mbit floor to 69.5 Mbit and back within one boot.
-**Reference HQoS stack:** `flow_offloading=1/hw=1`, persistent HQoS (`q7` bulk
-at 8300 kbps, `q8` priority), qos-06+qos-12+qos-13 byte-accurate
-flow-aware AQM on q7, and nftables ct-mark steering.
-The two-client fairness run and full DMA-conduit teardown test remain open.
-
-
-
-Target: Linksys E8450 (MT7622, NETSYSv1, WEDv1), OpenWrt 25.12, Linux 6.12.
-
-## Current live test milestone
-
-- Board: Linksys E8450, MT7622, NETSYSv1, WEDv1.
-- Kernel: `6.12.94`.
-- Image: `openwrt-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb`.
-- Active experiment: PPE preserved-cache-line lock plus WED-v1 SER gating and
-  the refreshed mt76 stack; this is not yet the production QoS verdict.
-- Flow offload is intentionally enabled `1/1` for PPE testing.
-- The first routed flow-churn pass retained WAN reachability, 0% router-ping
-  loss, equal WED TX CIDX/DIDX, and active PPE counters.
-- Full cache-lock acceptance remains open: long-duration churn, bridge/routed
-  IPv4/IPv6 comparison, throughput, latency, WAN-renumber, Wi-Fi roam, and
-  controlled SER.
-
-Remote-only continuation while the operator was away completed 40 routed IPv4
-and 40 routed IPv6 HTTPS flows. Four concurrent throttled 10 MiB downloads
-generated sustained routed traffic; the 90-second harness window ended while
-transfers were still progressing, so this is not a throughput benchmark.
-Afterward WAN and router reachability remained healthy, WED TX CIDX/DIDX stayed
-equal, and no new PPE/WED/SER/watchdog/oops/timeout messages appeared. The
-AWG PPE binding remained paired and active with counters at 11,625 inbound and
-31,068 outbound packets.
+> **Status: chronological research record.** For current behavior, supported
+> settings, and operational guidance, use the [ROM handbook](../README.md).
+> Entries below preserve the order in which hypotheses were tested; later
+> numbered sections supersede some earlier conclusions.
 
 ## 1. Goal
 
@@ -2999,7 +2890,7 @@ summarized in `docs/README.md`.
 Ran the same class of test this document's own history uses to judge AQM
 health (SS22.12, SS23.3): a saturating upload through queue 7 while
 measuring ping latency concurrently. From the same LAN workstation
-`netsys-qos-port-investigation.md` §21.5 already identifies as
+this log's §21.5 already identifies as
 192.168.1.6: `iperf3 -c fra.speedtest.clouvider.net -t 20` (the same
 public server used historically) concurrent with `ping -i 0.2 8.8.8.8`
 for 25 seconds.

@@ -1,9 +1,9 @@
 #!/bin/sh
 # E8450 factory-volume eeprom tool (MT7622 WMAC + MT7915 V1 layouts)
 #
-# Ground-truth offsets from .recall/router-probes/2026-09-04-factory-dump/
-# (EEPROM-MAP.md) and mt76 mt7915/mt7615 eeprom.h. Only ever edits a FILE
-# copy; flashing to the live volume is a separate, explicit step (see
+# Ground-truth offsets are documented in docs/research/eeprom-calibration.md
+# and verified against the mt76 headers. The tool only edits a FILE copy;
+# flashing to the live volume is a separate, explicit step (see
 # 'flash' output below). No checksums exist over these fields (verified:
 # mt76 reads none, u-boot boots patched volumes).
 #

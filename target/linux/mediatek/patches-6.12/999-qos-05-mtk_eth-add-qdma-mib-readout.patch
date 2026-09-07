@@ -1,7 +1,7 @@
 From: OpenWrt E8450 investigation <noreply@example.invalid>
 Subject: [PATCH] net: ethernet: mtk_eth_soc: add QDMA MIB readout and fc_th control
 
-Phase A of the AQM spike (see docs/netsys-qos-port-investigation.md section
+Phase A of the AQM spike (see docs/research/qos-aqm-lab-notes.md section
 22): expose the NETSYSv1 QDMA per-queue MIB counters and the global
 flow-control/RED threshold register so queue occupancy and hardware drops
 can be measured and the drop threshold can be tuned.

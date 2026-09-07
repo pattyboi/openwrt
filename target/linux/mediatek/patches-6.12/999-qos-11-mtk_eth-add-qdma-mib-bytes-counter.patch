@@ -4,7 +4,7 @@ Subject: [PATCH] net: ethernet: mtk_eth_soc: add QDMA per-queue byte counter
 qos-05's QTX_MIB_IF readout exposed per-queue packet count and drop
 count. The vendor's own 6.12 MIB readback additionally reads
 QTX_CFG+0x8/+0xc as a 64-bit per-queue byte counter while the same
-debug mode is active (docs/netsys-qos-port-investigation.md SS22.10,
+debug mode is active (docs/research/qos-aqm-lab-notes.md SS22.10,
 item 3). Add that read: qdma_regs now also reports mib_bytes=<n> per
 queue, and the qos-06 AQM work function reads it (unused for now;
 prerequisite for a future byte-accurate rate_thresh instead of the

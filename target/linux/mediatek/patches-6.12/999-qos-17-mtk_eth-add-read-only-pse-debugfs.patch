@@ -13,7 +13,7 @@ Read-only: no register writes, no queue changes, no WED operations.
 Used to test the WLAN-egress port-pairing hypothesis against live
 register readback before trusting any write. The result and the closed
 PSE hardware dead end are summarized in docs/README.md; the detailed
-chronology remains in docs/netsys-qos-port-investigation.md.
+chronology remains in docs/research/qos-aqm-lab-notes.md.
 
 ---
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c

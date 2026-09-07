@@ -1,6 +1,6 @@
 #!/bin/sh
-# Saturating-load latency harness, formalized from the methodology used
-# throughout docs/netsys-qos-port-investigation.md (SS22.12, SS23.3, SS33-35):
+# Saturating-load latency harness, formalized from the methodology in
+# docs/research/qos-aqm-lab-notes.md (SS22.12, SS23.3, SS33-35):
 # an iperf3 upload through the WAN egress (saturates queue 7's ~8300kbps
 # QDMA cap) concurrent with a fixed-interval ping, repeated 3x per
 # configuration. Run from a LAN workstation behind the E8450 (this

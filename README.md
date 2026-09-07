@@ -46,8 +46,11 @@ This fork combines both paths:
    hardware while congestion is still present.
 
 The result keeps PPE offload for ordinary traffic and invokes CAKE where it is
-useful. On the test connection, saturating-load p95 latency fell from 196 ms to
-roughly 22–34 ms.
+useful. In the initial controlled A/B, saturating-load p95 latency fell from
+196 ms to 33.8 ms while upload throughput retained 98.5%. A later hardened-AQM
+run measured 30.5 ms p95.
+
+![AQM loaded-latency and upload-throughput comparison](docs/assets/aqm-latency-throughput.svg)
 
 ### Adaptive CAKE rates
 
@@ -78,7 +81,9 @@ outage into a bounded one of about 65 seconds.
 - Non-DFS production channel selection and measured IRQ/radio tuning.
 
 EEPROM data is partly unit-specific. Never copy calibration bytes from this
-router to another unit. Use `scripts/e8450/eeprom.sh check` first.
+router to another unit. Use `scripts/e8450/eeprom.sh check` first; the
+[calibration evidence record](docs/research/eeprom-calibration.md) documents
+the tested offsets, measurements, and limitations.
 
 ## Feature status
 

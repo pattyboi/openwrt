@@ -6,6 +6,10 @@ path works, what can be configured safely, and why some patches remain local.
 It replaces the former collection of overlapping roadmaps, handoffs, design
 documents, and dated test summaries.
 
+> **Status: maintained handbook.** Update this file when shipped behavior or
+> production defaults change. Historical test chronology belongs in
+> [`research/`](research/).
+
 ## Contents
 
 - [Feature guide](#feature-guide)
@@ -16,6 +20,7 @@ documents, and dated test summaries.
 - [Backports and upstreaming](#backports-and-upstreaming)
 - [Patch map](#patch-map)
 - [Known limits and open work](#known-limits-and-open-work)
+- [Research and evidence](#research-and-evidence)
 - [Building and changing the ROM](#building-and-changing-the-rom)
 
 ## Feature guide
@@ -106,6 +111,28 @@ It is not a general Linux AQM implementation and it does not pretend NETSYSv1
 has capabilities it lacks. It is a board-specific bridge between QDMA, PPE,
 conntrack, and CAKE.
 
+![AQM loaded-latency and upload-throughput comparison](assets/aqm-latency-throughput.svg)
+
+The persisted `hold_ms=3000` decision was checked with a larger four-stream
+A/B after smaller runs proved too noisy:
+
+| Metric | No hold (n=7 after one excluded outlier) | 3,000 ms hold (n=8) |
+|---|---:|---:|
+| Sent rate | 8.6 ± 0.7 Mbit/s | 9.0 ± 0.4 Mbit/s |
+| Average latency | 27.7 ± 1.0 ms | 26.8 ± 1.0 ms |
+| p95 latency | 32.5 ± 1.0 ms | 32.3 ± 2.6 ms |
+| p99 latency | 39.9 ± 6.0 ms | 37.8 ± 5.3 ms |
+| Retransmits | 1,680 ± 221 | 1,655 ± 220 |
+
+![AQM hold-duration multi-stream A/B](assets/aqm-hold-ab.svg)
+
+Values are mean ± sample standard deviation. One no-hold run coincided with a
+severe household-traffic event (71.5 ms average, 254 ms p95, 1,065 ms maximum)
+and was excluded from that leg's aggregate before comparing like-for-like
+runs. No comparable event occurred in the hold leg, but one event is not proof
+of causality; it remains suggestive supporting evidence, not a plotted effect
+size.
+
 ### CAKE and adaptive rates
 
 CAKE remains the actual software queue discipline:
@@ -121,6 +148,8 @@ documented upper clamp in its rate controller; under light-delay samples it
 could increase to six or seven times the real connection capacity. The local
 one-line fix applies both the minimum and maximum bounds. A four-stream live
 download then held at the configured 10 Mbit/s ceiling with bounded backlog.
+
+![Autorate ceiling before and after the clamp fix](assets/autorate-ceiling.svg)
 
 Upload and download are not symmetric:
 
@@ -171,6 +200,19 @@ as a mitigation, not presented as a firmware fix.
   Ethernet and 5 GHz packet load.
 - mt76 skips transmit cleanup's lock and MMIO read when a queue is already
   empty.
+
+The NAPI A/B used three repeated saturating-load runs per side:
+
+| Configuration | Sent rate | Average latency | p95 | Loss |
+|---|---:|---:|---:|---:|
+| Weight 64 baseline | 3.29 Mbit/s | 34.5 ms | 48.0 ms | 0.35% |
+| Weight 256 | 4.47 Mbit/s | 32.9 ms | 45.3 ms | 0.35% |
+
+![NAPI weight 64 versus 256 A/B](assets/napi-weight-ab.svg)
+
+The baseline's p99/maximum contained one real-traffic outlier, so the claim is
+limited to higher measured throughput with no p95 or loss regression—not a
+general tail-latency improvement.
 
 ## How traffic moves through the router
 
@@ -242,6 +284,11 @@ Keep the invariants:
   inconsistent latency change;
 - `byte_thresh=0` means derive the threshold from the actual effective queue
   rate. It does not disable the threshold.
+
+The production grace period was also selected from a three-repetition grid.
+The chart includes p95, p99, maximum, and the number of runs with any loss:
+
+![AQM grace-period tuning results](assets/aqm-grace-tuning.svg)
 
 After changing UCI state on a router:
 
@@ -340,6 +387,11 @@ identical bytes.
 Changing the regulatory domain or requested `txpower` is not equivalent to
 changing the EEPROM ceiling. Both regulatory limits and calibrated limits
 apply, and neither authorizes operation above the local legal maximum.
+
+Measured signal changes are shown only for controlled comparisons. The
+far-field 2.4 GHz result was inconclusive and is deliberately absent:
+
+![Measured RSSI before and after EEPROM calibration](assets/radio-rssi.svg)
 
 ## Backports and upstreaming
 
@@ -470,17 +522,19 @@ and differentiated-load tests showed them inert on this silicon.
 - Treat a Linux 6.18 move as a separate migration, not a pile of opportunistic
   patch changes.
 
-### Evidence log
+### Research and evidence
 
-[`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md) is kept
-as the detailed chronological QoS/AQM lab record, including failed hypotheses,
-register experiments, measurements, and the latest timer re-check. It is
-evidence, not the recommended entry point; later numbered sections supersede
-some earlier hypotheses.
+Maintained behavior belongs in this handbook. Chronological experiments and
+raw hardware findings live under `research/` and may contain superseded
+hypotheses:
 
-`vendor-reference/` retains the small vendor patch samples needed to explain
-specific ports. It is reference material, not a patch queue applied directly
-to the build.
+| Record | Purpose |
+|---|---|
+| [`research/qos-aqm-lab-notes.md`](research/qos-aqm-lab-notes.md) | Detailed NETSYSv1 QoS/AQM chronology, failed hypotheses, register experiments, and measurements. Later numbered sections supersede some earlier ones. |
+| [`research/eeprom-calibration.md`](research/eeprom-calibration.md) | Consolidated EEPROM field map, controlled RSSI measurements, channel survey, safety boundary, and rollback evidence. |
+| `vendor-reference/` | Small vendor patch samples needed to explain specific ports; never applied directly as a patch queue. |
+
+Raw calibration images and captures remain in `.recall/router-probes/`.
 
 ## Building and changing the ROM
 
@@ -510,6 +564,19 @@ deliverable; build the final sysupgrade image.
 - Do not infer hardware binding from Linux flowtable state alone.
 - Delete experiment-only patches and controls after a negative result unless
   they are the minimal evidence needed to prevent the same dead end.
+
+### Regenerating measurement graphs
+
+The committed SVGs use no external charting dependency:
+
+```sh
+python3 scripts/docs/render-claim-graphs.py
+python3 scripts/docs/render-claim-graphs.py --check
+```
+
+Chart data lives beside its renderer in that script. Change a value only when
+the cited measurement record changes; keep sample sizes, excluded outliers,
+different test sessions, and inconclusive results visible.
 
 ### Flashing hazards
 
