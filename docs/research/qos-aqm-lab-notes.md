@@ -3632,9 +3632,8 @@ Prompted by "plan a final AQM v3 implementation/upgrade based on
 everything we know." Planning turned into measurement: reading the
 shipped patch series next to the live router's register and conntrack
 state surfaced four independent defects, three of them confirmed
-directly on hardware. The full plan is
-[`docs/e8450-aqm-v3-design.md`](../e8450-aqm-v3-design.md); this section
-records only the evidence.
+directly on hardware. This section records the pre-work evidence; the
+completed outcome and cutover are recorded in §41.
 
 All readings read-only against the production router (26 h uptime,
 `poll_ms=100 grace_ms=1000 hold_ms=3000`) except §40.2's `qos_toggle`
@@ -3942,3 +3941,23 @@ retransmits, p95 69.6-137 ms, and 260-267 ms maxima. Restoring
 
 Production state at the end of this session is the v3 cutover described
 above. The software controller is retired; CAKE is the only AQM.
+
+## 42. Post-v3 purge of exhausted diagnostics (2026-09-07)
+
+After the v3 result was committed, the remaining QDMA/PSE research-only
+patches were removed:
+
+- `999-qos-05`: the writable `fc_th` probe; §22.9 established that changing
+  the register did not alter drops or latency;
+- `999-qos-09`: the undocumented HRED register-gap dump; §22.10 found no
+  programmable depth-control path;
+- `999-qos-17`: the read-only PSE register dump; the PSE threshold mechanism
+  was not initialized on MT7622 and the data had no runtime consumer.
+
+These patches exposed inert state and were not used by `qdma-shaper`.
+Retaining writable dead controls increased kernel surface without preserving
+any production capability. The measurements remain in this chronology.
+
+The standalone v3 plan/outcome document was also removed after its final
+facts were incorporated into the maintained handbook and §41. `999-qos-20`
+was refreshed against the reduced patch stack and applies without fuzz.

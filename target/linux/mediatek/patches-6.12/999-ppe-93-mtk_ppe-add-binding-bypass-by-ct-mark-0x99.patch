@@ -24,8 +24,8 @@ Users can mark 0x99 to conntrack entry to bypass PPE binding using
 
 This provides the controlled comparison described in docs/README.md:
 marking a known flow's conntrack entry with 0x99 keeps it off PPE
-hardware offload, giving a declarative test or mitigation instead of
-relying solely on the reactive occupancy-driven eviction in 999-qos-06.
+hardware offload so the same workload can be compared on the hardware
+and software/CAKE paths without disabling offload router-wide.
 
 Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
 ---

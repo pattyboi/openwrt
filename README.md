@@ -50,8 +50,9 @@ MT7622 implements no per-queue counter (MediaTek gates that register block to
 newer NETSYS generations), so the controller was reading an unimplemented
 register window and firing on noise. A controlled A/B, four saturating upload
 reps per side, found identical throughput and identical latency at every
-percentile with and without it — and 364 versus 1 TCP retransmits. Details:
-[`docs/e8450-aqm-v3-design.md`](docs/e8450-aqm-v3-design.md).
+percentile with and without it — and 364 versus 1 TCP retransmits. Details are
+preserved in [`docs/research/qos-aqm-lab-notes.md`](docs/research/qos-aqm-lab-notes.md)
+§41.
 
 Removing the conntrack-mark queue policy at the same time fixed a large
 self-inflicted throughput loss. A conntrack mark belongs to a connection, not

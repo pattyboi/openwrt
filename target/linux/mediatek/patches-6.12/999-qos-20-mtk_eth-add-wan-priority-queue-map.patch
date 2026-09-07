@@ -80,7 +80,7 @@ Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
  	spinlock_t			qdma_sch_lock;
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
 +++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
-@@ -1131,6 +1131,67 @@
+@@ -1091,6 +1091,67 @@
  	.write	 = mtk_qos_toggle_write,
  };
  
@@ -148,15 +148,15 @@ Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
  static ssize_t mtk_qdma_sch_write(struct file *file, const char __user *ubuf,
  				  size_t count, loff_t *ppos)
  {
-@@ -1333,6 +1394,8 @@
+@@ -1218,6 +1279,8 @@
  						&mtk_qos_toggle_fops)) ||
  	     IS_ERR_OR_NULL(debugfs_create_file("qdma_sch", 0200, root, eth,
  						&mtk_qdma_sch_fops)) ||
 +	     IS_ERR_OR_NULL(debugfs_create_file("qos_prio_map", 0644, root,
 +						eth, &mtk_qos_prio_map_fops)) ||
  	     IS_ERR_OR_NULL(debugfs_create_file("qdma_txq", 0200, root, eth,
- 						&mtk_qdma_txq_fops)) ||
- 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_fc", 0200, root, eth,
+ 						&mtk_qdma_txq_fops))))
+ 		goto error;
 --- a/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
 +++ b/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
 @@ -345,12 +345,22 @@

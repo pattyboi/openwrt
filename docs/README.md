@@ -543,7 +543,7 @@ This map is by responsibility rather than chronology.
 
 | Area | Patch range | Purpose |
 |---|---|---|
-| QDMA diagnostics/control | `999-qos-01`–`05`, `09`, `17` | Register, rate, scheduler, fc_th, and PSE visibility |
+| QDMA diagnostics/control | `999-qos-01`–`04` | Register, rate, scheduler, and queue controls |
 | Queue classification | `999-qos-07`, `10`, `20` | skb mark, DSCP-to-queue, configurable PPPQ priority queue |
 | PPE/HQoS | `999-ppe-04`, `10`–`17`, `36`, `89`–`94`, `999-zz-*` | PPPQ, flow metadata, bridge offload, hashing, bypass, safety, prefetch |
 | WED recovery | `999-wed-13`, `14` | Correct PSE gating and reset ring indices |
@@ -551,11 +551,11 @@ This map is by responsibility rather than chronology.
 | mt76/mac80211 | package patch directories | Compatibility, empty-queue cleanup, station handling, optional VHT2G |
 | Other | `999-hwrng-*`, `999-xxhash-*` | RNG correctness and selective hashing |
 
-`999-qos-06`, `08`, `11`–`16`, `18` and `19` are gone. They implemented the
-software AQM controller and the per-queue MIB readout it polled; both were
-removed once the readout was shown to target a register MT7622 does not
-implement and the controller was measured to cost retransmits for no latency
-benefit. `999-qos-05` was reduced to the `fc_th` control it also carried.
+`999-qos-05`, `06`, `08`, `09`, and `11`–`19` are gone. The AQM controller
+and its invalid MIB readout were removed after hardware disproved the signal
+and the controller A/B showed retransmit harm without latency benefit. The
+remaining `fc_th`, HRED-gap, and PSE probes were then removed too: each had
+already established a closed hardware dead end and had no runtime consumer.
 
 The UCI/userspace side is:
 
@@ -621,7 +621,6 @@ hypotheses:
 
 | Record | Purpose |
 |---|---|
-| [`e8450-aqm-v3-design.md`](e8450-aqm-v3-design.md) | The v3 investigation: what the shipped AQM controller was actually measuring, why it and the MIB readout were removed, and the queue policy that replaced them. |
 | [`research/qos-aqm-lab-notes.md`](research/qos-aqm-lab-notes.md) | Detailed NETSYSv1 QoS/AQM chronology, failed hypotheses, register experiments, and measurements. Later numbered sections supersede some earlier ones. |
 | [`research/eeprom-calibration.md`](research/eeprom-calibration.md) | Consolidated EEPROM field map, controlled RSSI measurements, channel survey, safety boundary, and rollback evidence. |
 | `vendor-reference/` | Small vendor patch samples needed to explain specific ports; never applied directly as a patch queue. |
