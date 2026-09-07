@@ -207,10 +207,35 @@ write the complete copy with ubiupdatevol -> reboot -> verify iw/dmesg
 The untouched backup is the rollback source. Never substitute a backup from a
 different physical router.
 
+## Cross-check against an independent rebuild
+
+A community "emergency" factory image for this model
+([forum thread](https://forum.openwrt.org/t/belkin-rt3200-linksys-e8450-wifi-ax-discussion/94302/5108),
+built by grauerfuchs from MT76 driver documentation rather than a hardware
+dump) was byte-compared against the offsets above. Every non-MAC field
+matches: both chip IDs (`22 76`, `15 79`), the 2.4 GHz EEPROM version,
+`NIC_CONF_0`/`NIC_CONF_1`, `CALDATA_FLASH`, both rate-delta bytes, the
+external-PA target, the MT7915 DDIE FT version, `DO_PRE_CAL`, the Wi-Fi
+configuration octets at `0x190`, and all four target-power bytes on both
+bands (`0x26` at every one of `0x058/0x05e/0x064/0x06a` and
+`0x5352/0x535e/0x536a/0x5376`). Its MAC fields are zero-filled, matching
+that thread's stated caveat that the image carries no per-unit MAC data.
+Unused space there is `0xFF`-filled rather than the `0x00` seen in this
+unit's dump — a rebuild-tool difference, not a field-offset discrepancy.
+
+This is independent, driver-derived confirmation that the offset map is a
+model-wide EEPROM layout rather than an artifact of the one sampled unit
+here. It confirms layout, not per-unit target values — see below.
+
+The same thread also states the MT7622 2.4 GHz radio can run with no EEPROM
+present at all, but the MT7915 5 GHz radio cannot; consistent with this
+record's caution against altering the 5 GHz calibration region.
+
 ## Remaining uncertainty
 
-- A second E8450/RT3200 factory dump has not been compared, so per-model versus
-  per-unit target consistency is unknown.
+- A second E8450/RT3200 factory *dump* (as opposed to the independently
+  rebuilt image above) has not been compared, so per-unit target-value
+  consistency is unknown; only the field layout is now cross-checked.
 - Long-duration thermal behavior at the raised target lacks a dedicated soak
   test. TSSI remains active, but that is not a replacement for measurement.
 - No general 2.4 GHz far-field gain is claimed.
