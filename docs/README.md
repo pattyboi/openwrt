@@ -366,6 +366,10 @@ misleading during earlier work.
 - MT7915, PCIe, WED-v1 attached.
 - Production deployment uses a non-DFS channel after a local RF survey.
 - Background CAC cannot work: the board has no second 5 GHz PHY to perform it.
+- 160 MHz (HE160) was investigated and rejected: no DFS-free 160 MHz block
+  exists in the US 5 GHz table, and MT7915 has an unresolved real-world
+  throughput collapse at 160 MHz even where it negotiates. See the
+  [160 MHz record](research/160mhz-investigation.md).
 - Rate control and several aggregation/power decisions are firmware-owned and
   cannot be meaningfully tuned from the host driver.
 
@@ -506,7 +510,8 @@ Do not reopen these without new register-level evidence:
 - no enforcing `HRED2`/flow-control threshold path;
 - no initialized PSE per-port threshold mechanism;
 - no WED path for the integrated 2.4 GHz radio;
-- no background DFS CAC with one 5 GHz PHY.
+- no background DFS CAC with one 5 GHz PHY;
+- no HE160 (MT7915 throughput regression, no DFS-free US channel).
 
 The shared MediaTek headers expose some of these register names because newer
 SoCs implement them. Register presence is not capability proof. Live readback
