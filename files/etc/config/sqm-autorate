@@ -2,9 +2,9 @@ config network
 	option upload_interface 'wan'
 	option download_interface 'ifb4wan'
 	option upload_base_kbits '8300'
-	option download_base_kbits '10000'
+	option download_base_kbits '75000'
 	option upload_min_percent '60'
-	option download_min_percent '60'
+	option download_min_percent '20'
 
 config output
 	option log_level 'WARN'

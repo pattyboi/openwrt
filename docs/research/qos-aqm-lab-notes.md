@@ -3625,3 +3625,320 @@ tree (`grace_ms=1000`, `hold_ms=3000`, `batch=4`, queue caps/weights)
 was reconfirmed live, unchanged, and matching its documented,
 hardware-tested value - no drift found.
 
+
+## 40. AQM v3 pre-work: four defects found by reading the shipped code against live state (2026-09-07)
+
+Prompted by "plan a final AQM v3 implementation/upgrade based on
+everything we know." Planning turned into measurement: reading the
+shipped patch series next to the live router's register and conntrack
+state surfaced four independent defects, three of them confirmed
+directly on hardware. The full plan is
+[`docs/e8450-aqm-v3-design.md`](../e8450-aqm-v3-design.md); this section
+records only the evidence.
+
+All readings read-only against the production router (26 h uptime,
+`poll_ms=100 grace_ms=1000 hold_ms=3000`) except §40.2's `qos_toggle`
+A/B, which was restored immediately.
+
+### 40.1 The QDMA MIB counters are clear-on-read; the AQM's delta math is wrong
+
+```text
+queue=7, 1 s spacing:   mib_count=0  mib_bytes=0
+                        mib_count=9  mib_bytes=918
+                        mib_count=0  mib_bytes=0
+queue=7, back-to-back:  ten reads, all zero
+queue=5, back-to-back:  four reads, all zero
+```
+
+A cumulative counter on a 26 h-uptime router carrying real traffic
+cannot read 0, and cannot read 918 one second later. Confirmed by
+contradiction too: if the readout were simply broken and always zero,
+`delta_drop` and `delta_bytes` would both be 0 on every poll and the AQM
+could never fire - yet `trigger_count=14929` over 93,639 s. The
+controller's own 10 Hz poll drains the counter; a diagnostic read only
+catches the residue.
+
+So `cur_bytes` is already the per-interval count, and
+`delta = cur - prev` is meaningless. Worse, when offered load *falls*
+between polls the unsigned subtraction underflows to ~2^64, which is
+unconditionally `>= byte_thresh`: **the shipped rate trigger fires when
+q7's traffic decreases**, bounded only by `grace_ms`. When load rises
+toward saturation it under-triggers, reporting only the increment.
+`unbind_total=40566` over 26 h is ~26 evictions per minute - a
+misfiring detector, not a busy household.
+
+This is also, finally, an explanation for why §31.3, §35.2, §35.3 and
+the v2 design's §11-12 `hold_ms` work all came out as noise or
+near-noise: every one of those A/Bs was tuning a trigger that was not
+measuring congestion. Their measurements stand; their conclusions have
+to be re-derived after the arithmetic is fixed.
+
+### 40.2 `qos_toggle=1` puts the download direction on the capped bulk queue
+
+`mtk_flow_set_output_device()`'s `qos_toggle == 1` branch would honour a
+separate upload queue in `ct_mark` bits 16+, but only when
+`odev == eth->netdev[1]` (GDM2). The E8450's WAN is DSA port 4 behind
+`gmac0` (`wan: port@4`), so that test is never true on this board and
+both directions get `ct_mark & 0xffff` - and
+`30-queue-mark.nft` sets `ct mark 7` per *connection*.
+
+Live during a wired-client HTTPS download, `ppe0/bind`:
+
+```text
+01830 BND IPv6 5T orig=2606:4700:...:00da:443->2601:...:cc07:47628  ib2=007c0437  # download
+03e96 BND IPv6 5T orig=2601:...:cc07:47628->2606:4700:...:00da:443  ib2=007c0437  # upload
+```
+
+`ib2=0x007c0437` -> `MTK_FOE_IB2_QID`(3:0) = 7, `PSE_QOS`(4) = 1, on
+**both** directions. q7 is the capped bulk queue
+(`max_en=1 max_kbps=8300 weight=4`). Consequences: bulk download metered
+by an 8.3 Mbit/s bucket with no AQM on a 75 Mbit/s line; each download's
+own ACK stream sharing that bucket with bulk upload (the mechanism
+behind §38.2's 6-streams-slower-than-1 result); the AQM's q7 byte
+counter mixing both directions; and download-direction entries being
+evicted because the *upload* queue looked busy.
+
+Measured cost - 3 reps/side of a 14 s `speed.cloudflare.com/__down`
+fetch from the wired workstation, one debugfs write, state restored:
+
+| `qos_toggle` | download B/s | mean Mbit/s |
+|---|---|---:|
+| 1 (production) | 693,456 / 720,214 / 710,147 | 5.66 |
+| 2 (native PPPQ) | 978,250 / 924,653 / 985,462 | 7.70 |
+
+**+36 %**, non-overlapping ranges. n=3/side under live household load is
+directional - but the mechanism is confirmed from `ib2`, not inferred
+from the delta. Note that `qos_toggle=2`'s native mapping
+(`queue = 3 + dsa_port`) already sends WAN egress to q7 and LAN egress
+to q3-q6: the per-direction separation the production profile needs is
+the driver's default, and `qos_toggle=1` overrides it.
+
+Not captured: a bound WAN flow under `qos_toggle=2`, so which branch ran
+during that leg is unproven. Re-check before choosing the fix.
+
+### 40.3 The HQoS scheduler ceiling is a router-wide QDMA egress cap
+
+```text
+tx_sch_rate_value=0x80008df2   # sch0: MAX_WFQ|MAX_RATE_EN man=95 exp=2 -> 9500 kbit/s
+                               # sch1: MAX_WFQ only, unlimited
+queue=0..15                    # every queue reports scheduler=0
+```
+
+`mtk_qdma_v1_base_word()` never sets `MTK_QTX_SCH_TX_SEL` and the
+production `qdma_txq` writes pass `sch=0`, so all 16 queues sit on
+scheduler 0 - whose max-rate the profile sets to 9,500 kbit/s. That is
+an **aggregate ceiling over all QDMA egress**: every switch port, both
+directions, offloaded and software-forwarded alike. Mainline's default
+for this register is `MAX_WFQ` with `MAX_RATE_EN` clear, i.e. no ceiling.
+
+Never tested against LAN-side throughput - §28 only proved scheduler *1*
+inert. Prime suspect for the long-running "0.3-8 Mbit/s across dozens of
+tests" download observations (§31.1).
+
+Wi-Fi is unaffected: WED/WDMA flows take the `goto out` path before any
+queue assignment. Confirmed - three Wi-Fi-destined bound entries all read
+`ib2=...0460`: QID 0, `PSE_QOS=0`, `DEST_PORT=3` (WDMA). Which also means
+the AQM never sees the dominant download path, and neither does ingress
+CAKE.
+
+### 40.4 The v2 hold table leaks permanent holds
+
+`mtk_qdma_aqm_flow_hold()` does not dedupe by `struct nf_conn`. Because
+§40.2 puts both directions on q7, both can be evicted - in one trigger
+or across triggers, since `grace_ms=1000 < hold_ms=3000`. The second
+hold then saves `0x99` as its "pre-hold" mark and its release writes
+`0x99` back permanently.
+
+Three samples, 12 s apart, `hold_ms=3000`:
+
+```text
+T1: mark=153: sport=49438  sport=50080  sport=35346
+T2:                        sport=50080  sport=35346
+T3:           sport=49438  sport=50080  sport=35346
+    qdma_aqm: holds_active=4  (3 distinct tagged conntracks)
+    stuck flows still passing traffic: packets 2809 -> 2888 -> 2975
+```
+
+Two conntracks held the exception tag for the full 36 s window - twelve
+times `hold_ms` - and `holds_active` exceeded the distinct tagged count,
+the duplicate-hold signature.
+
+Why they never recover: `999-ppe-93` refuses *hardware* binding for
+`ct mark == 0x99`, but the flow stays in the **software** flowtable, so
+its packets take the ingress fast path and never re-enter the `forward`
+hook where `30-queue-mark.nft` would reset the mark to 7. Permanently
+barred from PPE, permanently stripped of the HQoS classification v2 set
+out to protect. No memory leak (each duplicate hold drops its own
+reference). The v2 design's §8 worry about hold-table *sizing* turns out
+to have been the wrong worry.
+
+### 40.5 Counter reset asymmetry
+
+`unbind_total=40566` but `holds_released=50093`. A release follows a
+hold, which follows an unbind, so released can never exceed unbinds. The
+`enable` write zeroes `trigger_count`/`unbind_total` but not
+`qdma_aqm_hold.released`, so any `service qdma-shaper reload`
+desynchronises them - which invalidates the ratio reasoning §32.6 did
+over these same counters.
+
+### 40.6 Production state after this session
+
+Unchanged. `qos_toggle` restored to 1 and verified; no UCI, no repo
+config, and no image change. The two stuck `mark=153` conntracks will
+clear on the next `service qdma-shaper reload` (`hold_flush`), and are
+left in place deliberately as reproducible evidence for P0-C.
+
+## 41. AQM v3 gates, cutover, and hardware validation (2026-09-07)
+
+This section supersedes §40.1's tentative clear-on-read interpretation and
+§40.6's pre-cutover state. The four v3 gates were completed before changing
+the image.
+
+### 41.1 Gate A: the NETSYSv1 queue MIB readout was invalid
+
+The vendor implementations use `QTX_MIB_IF` only on NETSYSv2 and newer. They
+do not assign a `qtx_mib_if` register to NETSYSv1. The local
+`mib_if = 0x1abc` value had no vendor or datasheet basis; it selected an
+unimplemented register rather than a clear-on-read counter.
+
+Hardware confirmed that conclusion. With the controller disabled, repeated
+samples were taken while queue 7 carried:
+
+- an idle link;
+- a 6.4 Mbit/s CAKE-limited upload;
+- an upload with queue 7 forced to 2,000 kbit/s, making the QDMA leaky bucket
+  the bottleneck.
+
+About 95% of the alleged packet/byte/drop samples were zero in every case.
+The occasional small values did not track traffic or the forced hardware
+bottleneck. There is no per-queue counter signal on MT7622 from which to
+derive rate, occupancy, or drops.
+
+Decision: delete the readout rather than replace one estimator with another.
+The remaining `fc_th` debugfs control is a separate, real register and stays
+as a diagnostic.
+
+### 41.2 Gates B and C: two independent caps explained the download loss
+
+Live `ppe0/bind` entries confirmed §40.2: under `qos_toggle=1` and
+`ct mark 7`, both the WAN-egress and LAN-egress directions had QID 7. The
+driver's upper-16-bit asymmetric mark path requires GDM2; the E8450 WAN is
+DSA port 4 behind gmac0, so that path cannot apply.
+
+The 9,500 kbit/s scheduler setting was a second cap. Every queue reports
+scheduler 0, so scheduler 0's maximum rate is an aggregate QDMA ceiling, not
+headroom for one WAN queue.
+
+Wired download, controlled matrix:
+
+| Queue policy | Scheduler-0 cap | Download |
+|---|---:|---:|
+| conntrack mark (`qos_toggle=1`) | 9,500 kbit/s | 5.69 Mbit/s |
+| conntrack mark (`qos_toggle=1`) | off | 5.92 Mbit/s |
+| native PPPQ (`qos_toggle=2`) | 9,500 kbit/s | 7.70 Mbit/s |
+| native PPPQ (`qos_toggle=2`) | off | **76.6 Mbit/s** |
+
+An eight-stream run with native PPPQ and no scheduler cap reached
+82.7 Mbit/s. Removing only one cap leaves the other binding; both defaults
+had to change together.
+
+### 41.3 Gate D: controller off won the A/B
+
+The decisive run used native PPPQ, no scheduler cap, hardware flow offload
+enabled, and a fixed CAKE rate. Four valid 20 s saturating-upload repetitions
+were collected per side.
+
+| State | Upload | Retransmits | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| controller on | 8.27 Mbit/s | 364 | 25.0 ms | 31.7 ms | 35.8 ms | 43.1 ms |
+| controller off | 8.26 Mbit/s | 1 | 25.2 ms | 31.6 ms | 36.7 ms | 44.4 ms |
+
+The controller changed neither throughput nor latency, while increasing TCP
+retransmits by two to three orders of magnitude. Its eviction path was not
+load-bearing. The duplicate-hold failure in §40.4 therefore did not warrant a
+local repair: deleting the controller removes the entire failure mode.
+
+### 41.4 Clean cutover
+
+Kernel:
+
+- deleted `999-qos-06`, `08`, `11`-`16`, `18`, and `19`;
+- replaced the former `999-qos-05` MIB patch with an `fc_th`-only patch;
+- re-anchored `999-qos-17` after removing its AQM context;
+- added `999-qos-20`, whose `qos_prio_map` remaps learned priority traffic
+  from a selected PPPQ port queue to a selected priority queue.
+
+Userspace:
+
+- `qdma-shaper` now sets `qos_toggle=2`, leaves
+  `scheduler_rate_kbps=0`, caps WAN queue 7 at 8,300 kbit/s, and maps
+  priority WAN traffic from q7 to q8;
+- the AQM UCI section and service control are gone;
+- nftables no longer writes queue IDs into `ct mark`; WMM-to-DSCP translation
+  and the software-path `meta mark 4` policy remain;
+- SQM and autorate download base changed from 10,000 to 75,000 kbit/s, with a
+  20% download minimum.
+
+The patch series applied without rejects. The touched kernel objects compiled
+without warnings, the full image built, and the image was flashed with
+`sysupgrade -c`. Because `-c` retained the old UCI, the live shaper/SQM
+configuration and nftables fragment were explicitly migrated after boot.
+
+### 41.5 Live validation
+
+Verified after the cold boot:
+
+```text
+qos_toggle=2
+qos_prio_map=7 8
+tx_sch_rate_value=0x80008000
+queue 7 effective_kbps=8300
+qdma_aqm: absent
+flow_offloading=1
+flow_offloading_hw=1
+```
+
+Both radios were up, CAKE was present on `wan` and `ifb4wan`, no conntrack
+remained on `mark=153`, and `dmesg` contained no Oops, BUG, WARNING, or call
+trace.
+
+Fresh bound entries demonstrated the directional split:
+
+```text
+etype=1000 qid=7  # WAN / DSA port 4 egress
+etype=0400 qid=5  # LAN / DSA port 2 egress
+```
+
+Entries bound before changing the toggle can retain an old QID until they age
+out and must be excluded from this check.
+
+The priority path was then exercised with an IPv4 upload using
+`TOS=0xb8` (EF). Its bound entry was:
+
+```text
+orig=192.168.1.6:58518->51.158.1.21:5202
+etype=1000 ib2=b87c0438 packets=9896 bytes=14490712
+```
+
+`etype=1000` is WAN egress, the high byte preserves EF, and the low nibble is
+QID 8. Ordinary WAN-egress flows remained on QID 7. This validates
+classification and the new q7-to-q8 remap end to end.
+
+Final wired measurements:
+
+- six-stream download: 66.1 Mbit/s, versus 5.7 Mbit/s before; loaded latency
+  avg 28.0 ms, p50 23.8, p95 49.0, p99 53.1, max 56.6;
+- four upload repetitions: 6.71-7.86 Mbit/s, one repetition with 10
+  retransmits and three with 1, p95 31.3-35.6 ms.
+
+The slightly lower upload mean occurred while the now-unthrottled household
+downloads contributed their ACK stream to the same physical uplink. Loaded
+latency did not regress.
+
+Negative control: with `qos_toggle=1` but no conntrack marks, the driver chose
+uncapped queue 0. Upload rose to 12.5-13.0 Mbit/s but incurred 1,278-1,766
+retransmits, p95 69.6-137 ms, and 260-267 ms maxima. Restoring
+`qos_toggle=2` restored the 8,300 kbit/s WAN bucket and the low-latency result.
+
+Production state at the end of this session is the v3 cutover described
+above. The software controller is retired; CAKE is the only AQM.

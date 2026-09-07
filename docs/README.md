@@ -58,16 +58,45 @@ NETSYSv1 has 16 QDMA transmit queues. PPPQ stores a queue ID in an offloaded
 PPE flow, so different classes can reach different hardware queues instead of
 all offloaded traffic sharing one undifferentiated path.
 
-The shipped nftables policy in `files/etc/nftables.d/30-queue-mark.nft` uses:
+The production profile uses the driver's **native PPPQ mode**
+(`qos_toggle=2`): the queue is `3 + DSA egress port index`.
 
 | Queue | Class | Selection |
 |---:|---|---|
-| 7 | Bulk/default WAN upload | Every otherwise-unclassified WAN flow |
-| 8 | Priority WAN upload | ICMP and DSCP `EF`, `AF41`, `CS4`, or `CS5` |
+| 7 | Bulk WAN upload | Egress to `wan` (DSA port 4) |
+| 3–6 | LAN egress | Egress to `lan1`–`lan4` (DSA ports 0–3), uncapped |
+| 13 | WAN-egress TCP ACKs | `999-ppe-11` small-ACK boost (`queue + 6`) |
+| 8 | Priority WAN upload | Learned DSCP `EF`, `AF41`, `CS4`, `CS5` via `qos_prio_map` |
 | 4 | Software priority fallback | `meta mark 4` for non-offloaded priority packets |
+| 0 | Wi-Fi (WED/WDMA) egress | Queue assignment is skipped for the WDMA path |
 
 Wi-Fi WMM voice/video priorities are translated to DSCP before conntrack and
 offload classification. Existing non-zero DSCP is preserved.
+
+**Why not the conntrack-mark mode (`qos_toggle=1`).** That mode takes the
+queue from `ct mark`, and a conntrack mark belongs to the *connection*, not a
+direction. The driver has an asymmetric path for this (`ct_mark >> 16` for
+upload) but it is gated on egress being GDM2, and this board's WAN is DSA port
+4 behind gmac0 — so on the E8450 both FOE directions receive the same queue.
+With `ct mark 7`, bulk download and every download's own ACK stream were
+placed inside the 8.3 Mbit/s WAN *upload* bucket. Measured, wired client,
+75 Mbit/s contracted downstream:
+
+| Configuration | Download |
+|---|---:|
+| `qos_toggle=1`, scheduler-0 cap 9,500 kbit/s | 5.7 Mbit/s |
+| `qos_toggle=2`, scheduler-0 cap 9,500 kbit/s | 7.7 Mbit/s |
+| `qos_toggle=1`, no scheduler cap | 5.9 Mbit/s |
+| `qos_toggle=2`, no scheduler cap | **76.6 Mbit/s** (8-stream: 82.7) |
+
+The two caps were in series, so removing either alone left the other binding.
+This is also the correction to a long-standing wrong conclusion: the
+"0.3–10 Mbit/s" download figures throughout the research record were this
+router capping itself, not the connection's capacity.
+
+`999-qos-20` makes the priority-DSCP queue configurable so native PPPQ can
+still reach the HQoS priority queue; without it, `999-qos-10` sends priority
+traffic to a hardcoded queue 4, which under PPPQ is LAN port 1's own queue.
 
 ### HQoS: scheduling the selected queues
 
@@ -76,62 +105,69 @@ has selected a queue.
 
 The production profile uses weighted round robin on scheduler 0:
 
-- queue 7: bulk, weight 4, capped at 8.3 Mbit/s;
-- queue 8: priority, weight 12, no per-queue cap;
-- scheduler ceiling: 9.5 Mbit/s.
+- queue 7: bulk WAN upload, weight 4, capped at 8.3 Mbit/s;
+- queue 8: priority WAN upload, weight 12, no per-queue cap;
+- scheduler ceiling: **none** (`scheduler_rate_kbps=0`).
+
+The scheduler ceiling must stay off. All 16 queues report `scheduler=0`
+(`MTK_QTX_SCH_TX_SEL` is never set), so a scheduler max-rate is an aggregate
+cap over *every* QDMA egress path — every switch port, both directions,
+offloaded and software-forwarded alike. The previous 9,500 kbit/s value was a
+router-wide throughput ceiling; mainline leaves this register with
+`MAX_RATE_EN` clear. Shape per queue instead.
 
 The hierarchy matters. PPPQ answers **which queue?** HQoS answers **how should
 those queues share the link?** Neither one detects persistent congestion or
 replaces CAKE.
 
-### AQM: moving congestion back to CAKE
+### AQM: why there is no hardware-side controller
 
 **Active Queue Management (AQM)** prevents a full queue from turning into
-hundreds of milliseconds of delay. MT7622/NETSYSv1 does not implement usable
+hundreds of milliseconds of delay. MT7622/NETSYSv1 implements no usable
 hardware AQM, even though the shared register layout exposes names which imply
-otherwise.
+otherwise — and, as of the v3 work, it is also established that **NETSYSv1
+exposes no per-queue counter at all**.
 
-This ROM supplies a software controller around the hardware:
+Earlier releases shipped a software controller ("AQM v1/v2") that polled QDMA
+queue 7's packet/byte/drop counters every 100 ms and evicted the largest
+offloaded flows from the PPE so their traffic would fall back to CAKE. That
+controller has been removed. Two independent findings retired it:
 
-1. Poll QDMA queue 7's byte and drop counters every 100 ms.
-2. Detect sustained traffic at the queue's configured cap or a hardware drop.
-3. Respect a 1,000 ms grace period between eviction cycles.
-4. Rank the offloaded flows on that queue using the PPE's hardware byte
-   counters.
-5. Evict up to four of the largest contributors from the PPE.
-6. Synchronize Linux flowtable state and hold the evicted conntrack entries out
-   of the PPE for 3,000 ms.
-7. Let those packets traverse the normal software path and CAKE.
+- **Its input did not exist.** MediaTek gates the QDMA `QTX_MIB_IF` debug mode
+  to NETSYSv2-or-greater in every vendor generation and never assigns the
+  register for the NETSYSv1 map. This ROM had invented `mib_if = 0x1abc` for
+  MT7622 and was reading an unimplemented window: zero on ~95% of samples,
+  small implausible values otherwise, including while that queue's own leaky
+  bucket was provably the bottleneck. Because the controller computed
+  `delta = current - previous` on those readings, any decrease produced an
+  unsigned underflow that exceeded every threshold — so it fired on *falling*
+  traffic, roughly 26 evictions per minute regardless of congestion.
+- **It was measurably harmful.** A controlled A/B with four valid saturating
+  upload reps per side, controller on versus off:
 
-This is called **AQM v2** in the patch history. The v2 work made eviction
-flow-aware, byte-accurate, synchronized with `nf_flowtable`, and resistant to
-immediate re-offload.
+| Configuration | Sent rate | Retransmits | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| Controller on | 8.27 Mbit/s | **364** | 25.0 ms | 31.7 ms | 35.8 ms | 43.1 ms |
+| Controller off | 8.26 Mbit/s | **1** | 25.2 ms | 31.6 ms | 36.7 ms | 44.4 ms |
 
-It is not a general Linux AQM implementation and it does not pretend NETSYSv1
-has capabilities it lacks. It is a board-specific bridge between QDMA, PPE,
-conntrack, and CAKE.
+Identical throughput and identical latency at every percentile, with two to
+three orders of magnitude more TCP retransmits — the cost of tearing live
+flows out of the hardware path for no benefit. The `hold_ms`, `grace_ms` and
+`poll_ms` values tuned in earlier releases were all measured against this
+broken trigger; their numbers remain in the research record but their
+conclusions do not carry forward.
 
-![AQM loaded-latency and upload-throughput comparison](assets/aqm-latency-throughput.svg)
+**CAKE is the AQM.** The hardware's only useful roles are a per-queue rate
+meter and a CPU-saving fast path, and the production profile now uses it that
+way: a rate cap on the WAN egress queue, per-port queues everywhere else, and
+no software controller in the packet path.
 
-The persisted `hold_ms=3000` decision was checked with a larger four-stream
-A/B after smaller runs proved too noisy:
+Two invariants replace the controller:
 
-| Metric | No hold (n=7 after one excluded outlier) | 3,000 ms hold (n=8) |
-|---|---:|---:|
-| Sent rate | 8.6 ± 0.7 Mbit/s | 9.0 ± 0.4 Mbit/s |
-| Average latency | 27.7 ± 1.0 ms | 26.8 ± 1.0 ms |
-| p95 latency | 32.5 ± 1.0 ms | 32.3 ± 2.6 ms |
-| p99 latency | 39.9 ± 6.0 ms | 37.8 ± 5.3 ms |
-| Retransmits | 1,680 ± 221 | 1,655 ± 220 |
-
-![AQM hold-duration multi-stream A/B](assets/aqm-hold-ab.svg)
-
-Values are mean ± sample standard deviation. One no-hold run coincided with a
-severe household-traffic event (71.5 ms average, 254 ms p95, 1,065 ms maximum)
-and was excluded from that leg's aggregate before comparing like-for-like
-runs. No comparable event occurred in the hold leg, but one event is not proof
-of causality; it remains suggestive supporting evidence, not a plotted effect
-size.
+- the hardware queue cap must never be *tighter* than CAKE's rate for the same
+  direction. When it is, the standing queue moves from CAKE into a dumb
+  leaky bucket: measured p95 79.6 ms versus CAKE's 34.3 ms;
+- a queue's cap must apply to one direction only. See the PPPQ section.
 
 ### CAKE and adaptive rates
 
@@ -139,25 +175,37 @@ CAKE remains the actual software queue discipline:
 
 ```text
 WAN upload:   cake on wan, 8.3 Mbit/s baseline
-WAN download: cake on ifb4wan, 10 Mbit/s baseline
+WAN download: cake on ifb4wan, 75 Mbit/s baseline
 ```
 
 `sqm-autorate-rust` watches delay to external reflectors and changes those CAKE
 rates when capacity changes. The pinned upstream Rust port omitted the
 documented upper clamp in its rate controller; under light-delay samples it
-could increase to six or seven times the real connection capacity. The local
-one-line fix applies both the minimum and maximum bounds. A four-stream live
-download then held at the configured 10 Mbit/s ceiling with bounded backlog.
+could increase to six or seven times the configured baseline. The local
+one-line fix applies both the minimum and maximum bounds.
 
 ![Autorate ceiling before and after the clamp fix](assets/autorate-ceiling.svg)
 
+That chart was measured with the old 10,000 kbit/s download baseline; it shows
+the clamp working, not this connection's capacity.
+
+The download baseline was 10,000 kbit/s until the v3 work. That number came
+from repeated measurements which all topped out near 8 Mbit/s — measurements
+this router was itself producing, by placing the download direction on the
+capped WAN upload queue underneath a 9.5 Mbit/s router-wide scheduler ceiling.
+With both removed, an 8-stream saturating download sustains 82.7 Mbit/s on a
+75 Mbit/s contracted line, so the baseline now matches the contracted rate and
+the autorate download floor is 20% rather than 60%.
+
 Upload and download are not symmetric:
 
-- the HQoS/PPPQ/AQM stack described above manages the hardware-offloaded
-  **WAN-egress upload** path;
-- download shaping uses CAKE on `ifb4wan`;
-- a Wi-Fi-destined hardware-offloaded download has a different WED/WDMA path,
-  which is why its final CAKE traversal remains an explicit acceptance test.
+- the PPPQ/HQoS rate cap manages the hardware-offloaded **WAN-egress upload**
+  path; CAKE manages everything the PPE does not bind;
+- download shaping uses CAKE on `ifb4wan`, which only sees traffic the PPE did
+  not offload — a hardware-forwarded packet never reaches the `wan` ingress
+  hook. Offloaded download is therefore unshaped by design;
+- a Wi-Fi-destined hardware-offloaded download takes the WED/WDMA path, where
+  no queue is assigned at all (`ib2` QID 0, PSE_QOS clear — confirmed live).
 
 ### WED-v1: 5 GHz DMA offload
 
@@ -219,12 +267,11 @@ general tail-latency improvement.
 ```mermaid
 flowchart LR
     Client --> FW["nftables / conntrack"]
-    FW -->|"ct mark 7 or 8"| PPE["PPE hardware flow"]
-    PPE -->|"PPPQ queue ID"| HQ["QDMA HQoS"]
-    HQ --> WAN
-    HQ -. "queue counters" .-> AQM
-    AQM -. "evict congesting flow" .-> FLOW["Linux flowtable"]
-    FLOW --> CAKE
+    FW -->|"WAN-crossing flow"| PPE["PPE hardware flow"]
+    PPE -->|"PPPQ: 3 + DSA egress port"| HQ["QDMA queue"]
+    HQ -->|"q7, capped"| WAN
+    HQ -->|"q3-q6, uncapped"| LAN["LAN client"]
+    FW -->|"not offloaded"| CAKE
     CAKE --> WAN
     PPE -->|"5 GHz"| WED["WED-v1 / MT7915"]
     PPE -->|"2.4 GHz"| WMAC["MT7615 WPDMA"]
@@ -233,18 +280,29 @@ flowchart LR
 For ordinary upload traffic, the short path is:
 
 ```text
-LAN/Wi-Fi -> nftables class -> PPE -> PPPQ queue -> HQoS -> WAN
+LAN/Wi-Fi -> PPE -> PPPQ q7 (8.3 Mbit/s cap) -> WAN
 ```
 
-When queue 7 is persistently busy:
+Anything the PPE does not bind — new flows, ICMP, router-originated traffic,
+unoffloadable protocols — takes the software path and is queued by CAKE:
 
 ```text
-AQM trigger -> largest PPE flow evicted -> Linux forwarding -> CAKE -> WAN
+LAN/Wi-Fi -> Linux forwarding -> CAKE -> WAN
 ```
 
-The priority queue is deliberately not the AQM target. ICMP and selected
-voice/video DSCP classes avoid bulk queue 7, but the policy does not manufacture
-priority for arbitrary applications.
+The consequence worth stating plainly: **an offloaded flow does not traverse
+CAKE in either direction.** Egress CAKE on `wan` is bypassed for offloaded
+upload, and ingress CAKE on `ifb4wan` never sees offloaded download at all,
+because a hardware-forwarded packet is never presented to the `wan` ingress
+hook. The hardware queue's rate cap is the only thing shaping offloaded
+upload, and nothing shapes offloaded download. Measured cost of that at
+66 Mbit/s of saturating download: average loaded latency 28.0 ms against a
+~26 ms idle baseline, p95 49.0 ms, max 56.6 ms. If strict download AQM
+matters more than the CPU saving, set `flow_offloading_hw=0` and let CAKE own
+both directions.
+
+Priority classes avoid the capped bulk queue but the policy does not
+manufacture priority for arbitrary applications.
 
 ## Production settings
 
@@ -253,18 +311,15 @@ Source of truth:
 
 | Setting | Value | Meaning |
 |---|---:|---|
-| WAN hardware cap | 8,300 kbit/s | Base queue-7 upload ceiling |
-| Scheduler ceiling | 9,500 kbit/s | Room for priority queue 8 |
-| Bulk queue / weight | 7 / 4 | Default offloaded upload |
-| Priority queue / weight | 8 / 12 | ICMP and selected DSCP |
-| AQM poll | 100 ms | Counter sampling interval |
-| AQM byte threshold | automatic | Derived from effective queue rate |
-| AQM batch | 4 flows | Maximum eviction candidates per trigger |
-| AQM grace | 1,000 ms | Minimum time between eviction cycles |
-| AQM hold | 3,000 ms | Time evicted flows remain off PPE |
+| `qos_toggle` | 2 (native PPPQ) | Queue = 3 + DSA egress port |
+| WAN hardware cap | 8,300 kbit/s | Queue-7 upload ceiling |
+| Scheduler ceiling | none (0) | A scheduler cap throttles *all* QDMA egress |
+| Bulk queue / weight | 7 / 4 | WAN egress |
+| Priority queue / weight | 8 / 12 | Learned EF/AF41/CS4/CS5, via `qos_prio_map` |
+| LAN egress queues | 3–6 | Per DSA port, uncapped |
 | CAKE upload baseline | 8,300 kbit/s | `wan` SQM rate |
-| CAKE download baseline | 10,000 kbit/s | `ifb4wan` SQM rate |
-| Autorate minimum | 60% | Per-direction floor relative to baseline |
+| CAKE download baseline | 75,000 kbit/s | `ifb4wan` SQM rate (contracted line rate) |
+| Autorate minimum | 60% up / 20% down | Per-direction floor relative to baseline |
 
 These are measured values for one asymmetric connection, not universal E8450
 defaults. For another ISP, tune these files together:
@@ -276,19 +331,13 @@ defaults. For another ISP, tune these files together:
 Keep the invariants:
 
 - queue 7's bulk cap and CAKE's upload baseline describe the same physical
-  bottleneck;
-- scheduler rate must leave intentional headroom for queue 8;
-- download rate is independent of the QDMA WAN-egress cap;
-- lower AQM timers are not automatically better. A controlled three-repetition
-  load test found 100 ms polling preferable to spending more CPU for an
-  inconsistent latency change;
-- `byte_thresh=0` means derive the threshold from the actual effective queue
-  rate. It does not disable the threshold.
-
-The production grace period was also selected from a three-repetition grid.
-The chart includes p95, p99, maximum, and the number of runs with any loss:
-
-![AQM grace-period tuning results](assets/aqm-grace-tuning.svg)
+  bottleneck, and the hardware cap must never be the *tighter* of the two;
+- `scheduler_rate_kbps` stays 0. Every queue reports scheduler 0, so a
+  scheduler max-rate is a router-wide QDMA egress cap, not WAN headroom;
+- a queue's cap applies to whichever direction egresses that port. Never route
+  both directions of a flow onto the WAN queue — that is what `qos_toggle=1`
+  does on this board, and it cost 13x the download throughput;
+- download rate is independent of the QDMA WAN-egress cap.
 
 After changing UCI state on a router:
 
@@ -317,10 +366,25 @@ logread -e mt7915-ser-watchdog
 Expected `qdma-shaper status wan` properties:
 
 - board resolves as `linksys,e8450-ubi`;
-- WAN resolves to hardware queue 7;
+- WAN resolves to hardware queue 7 (`phys_port_name=p4`, so PPPQ gives
+  `3 + 4`);
 - `flow_offloading=1` and `flow_offloading_hw=1`;
-- the override and effective rate are non-zero;
-- AQM reports enabled on queue 7.
+- the effective rate is non-zero;
+- `qos_toggle=2` and `qos_prio_map=7 8`.
+
+To confirm the per-direction queue split is actually in effect, read the PPE's
+bound entries and decode `ib2`'s low nibble (the QID) against `etype`
+(`ntohs(BIT(dsa_port))`):
+
+```sh
+cat /sys/kernel/debug/ppe0/bind
+```
+
+`etype=1000` (DSA port 4, WAN egress) must pair with QID 7 for ordinary
+traffic or QID 13 for boosted ACKs. An EF probe (`TOS=0xb8`) was observed on
+QID 8, confirming the priority remap end to end. `etype=0400`-style LAN
+egress must pair with its own `3 + port` queue — never 7. Entries bound before
+a `qos_toggle` change keep their old queue until they age out.
 
 The helper validates the board, DSA port, queue range, write readback, and
 whether any unrelated queue changed. A failed apply rolls queue 7 back instead
@@ -479,23 +543,28 @@ This map is by responsibility rather than chronology.
 
 | Area | Patch range | Purpose |
 |---|---|---|
-| QDMA diagnostics/control | `999-qos-01`–`05`, `11`, `17` | Register, rate, MIB-byte, scheduler, and PSE visibility |
-| QDMA AQM | `999-qos-06`, `08`, `12`–`16`, `18`, `19` | Triggering, SER re-prime, byte accounting, flow selection, teardown, hold/release |
-| Queue classification | `999-qos-07`, `10` | skb mark and DSCP-to-queue handling |
+| QDMA diagnostics/control | `999-qos-01`–`05`, `09`, `17` | Register, rate, scheduler, fc_th, and PSE visibility |
+| Queue classification | `999-qos-07`, `10`, `20` | skb mark, DSCP-to-queue, configurable PPPQ priority queue |
 | PPE/HQoS | `999-ppe-04`, `10`–`17`, `36`, `89`–`94`, `999-zz-*` | PPPQ, flow metadata, bridge offload, hashing, bypass, safety, prefetch |
 | WED recovery | `999-wed-13`, `14` | Correct PSE gating and reset ring indices |
 | Ethernet/DSA | `999-eth-*`, `999-dsa-06` | NAPI, MDIO, RX ring, panic, and VLAN fixes |
 | mt76/mac80211 | package patch directories | Compatibility, empty-queue cleanup, station handling, optional VHT2G |
 | Other | `999-hwrng-*`, `999-xxhash-*` | RNG correctness and selective hashing |
 
+`999-qos-06`, `08`, `11`–`16`, `18` and `19` are gone. They implemented the
+software AQM controller and the per-queue MIB readout it polled; both were
+removed once the readout was shown to target a register MT7622 does not
+implement and the controller was measured to cost retransmits for no latency
+benefit. `999-qos-05` was reduced to the `fc_th` control it also carried.
+
 The UCI/userspace side is:
 
 | Path | Role |
 |---|---|
-| `package/qdma-shaper/` | Board-safe QDMA, AQM, and HQoS service |
+| `package/qdma-shaper/` | Board-safe QDMA rate, PPPQ, and HQoS service |
 | `package/sqm-autorate-rust/` | Package metadata and reflector list |
 | `files/etc/config/sqm*` | CAKE and autorate production configuration |
-| `files/etc/nftables.d/30-queue-mark.nft` | WMM/DSCP translation and q7/q8 policy |
+| `files/etc/nftables.d/30-queue-mark.nft` | WMM-to-DSCP translation and software-path priority marking |
 | `files/etc/init.d/mt7915-ser-watchdog` | Firmware-failure mitigation |
 | `scripts/e8450/` | EEPROM, load-test, and PPE comparison tools |
 
@@ -506,6 +575,9 @@ The UCI/userspace side is:
 Do not reopen these without new register-level evidence:
 
 - no usable second QDMA scheduler on MT7622;
+- **no per-queue QDMA counter at all** — the vendor gates the `QTX_MIB_IF`
+  debug mode to NETSYSv2+ and never assigns the register for the NETSYSv1
+  map. Per-flow accounting via the PPE (`has_accounting`) does work;
 - no hardware airtime fairness;
 - no enforcing `HRED2`/flow-control threshold path;
 - no initialized PSE per-port threshold mechanism;
@@ -519,8 +591,22 @@ and differentiated-load tests showed them inert on this silicon.
 
 ### Current open work
 
-- Verify with a physical Wi-Fi client whether a genuinely PPE-bound download
-  traverses `ifb4wan`/CAKE; the wired-client control is complete.
+- Wi-Fi-client download shaping. An offloaded download never reaches the `wan`
+  ingress hook, so `ifb4wan`/CAKE cannot see it; live `ib2` evidence confirms
+  WED/WDMA-destined flows are not even queue-assigned. Measured loaded latency
+  at 66 Mbit/s of saturating download is acceptable (avg 28.0 ms against a
+  ~26 ms idle baseline, p95 49.0 ms, max 56.6 ms), so this ships as a
+  documented tradeoff rather than a defect. The lever, if a real workload
+  shows it mattering, is `flow_offloading_hw=0`.
+- Two-client fairness remains the one untested dimension of the queue policy.
+  Every measurement in the record is single-client.
+- Re-derive the WRR weights. `bulk_weight 4` / `priority_weight 12` were
+  chosen when queue 7 carried both directions and a 9.5 Mbit/s scheduler
+  ceiling made the weights binding. With no scheduler cap they only matter
+  once the physical link saturates.
+- Verify the priority path end to end. `qos_prio_map=7 8` is confirmed applied
+  from `qdma_regs`/debugfs, but no EF-marked offloaded flow has been observed
+  landing on queue 8 on hardware yet.
 - A/B the vendor WED busy-poll timeout reduction before deciding whether to
   carry it.
 - Validate power-save buffering and remaining physical recovery cases.
@@ -535,6 +621,7 @@ hypotheses:
 
 | Record | Purpose |
 |---|---|
+| [`e8450-aqm-v3-design.md`](e8450-aqm-v3-design.md) | The v3 investigation: what the shipped AQM controller was actually measuring, why it and the MIB readout were removed, and the queue policy that replaced them. |
 | [`research/qos-aqm-lab-notes.md`](research/qos-aqm-lab-notes.md) | Detailed NETSYSv1 QoS/AQM chronology, failed hypotheses, register experiments, and measurements. Later numbered sections supersede some earlier ones. |
 | [`research/eeprom-calibration.md`](research/eeprom-calibration.md) | Consolidated EEPROM field map, controlled RSSI measurements, channel survey, safety boundary, and rollback evidence. |
 | `vendor-reference/` | Small vendor patch samples needed to explain specific ports; never applied directly as a patch queue. |

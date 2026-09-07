@@ -1,12 +1,16 @@
-# qos-07/qos-10 queue steering and production HQoS marks:
-# - Unmarked WAN-bound traffic uses HQoS q7 (the capped bulk queue).
-# - ICMP and high-priority DSCP traffic use q8 (uncapped priority queue).
-# - meta mark 4 keeps non-offloaded priority packets on q4 in qos-07.
+# WMM/DSCP translation and software-path priority marking.
 #
-# The ct mark is set after conntrack has attached (forward priority -1) and
-# before fw4's flow-add rule (forward priority filter). qos_toggle=1 consumes
-# the low nibble as the PPE/QDMA queue. qos_toggle=2 ignores ct marks and
-# qos-10 continues to select q4 from DSCP.
+# The PPE queue for an offloaded flow comes from native PPPQ
+# (qos_toggle=2: queue = 3 + DSA egress port, so WAN egress -> q7), not from
+# a conntrack mark. The former `ct mark set 7/8` rules are gone: with
+# qos_toggle=1 the mark applied to *both* FOE directions of a flow, which put
+# bulk download and every download's ACK stream inside the 8,300 kbit/s WAN
+# upload bucket - measured at 5.7 vs 76.6 Mbit/s downstream. Learned priority
+# DSCP is steered to the HQoS priority queue by qos-10/qos-20 in the driver.
+#
+# `meta mark set 4` is still needed: it is what qos-07 uses to place
+# non-offloaded (software-path) priority packets on q4, since mtk_select_queue
+# maps a 1..15 skb mark straight to a QDMA queue.
 #
 # mac80211 already sets skb->priority to the 802.11 QoS TID in rx.c before
 # the packet reaches prerouting. This avoids a mt76-specific rx change and
@@ -35,12 +39,12 @@ chain wifi_tid_dscp {
 	iifname "wl1-ap0" meta priority 5 ip6 dscp 0 ip6 dscp set af41
 }
 
-# Default WAN bulk queue for HQoS. Priority rules below override the ct mark.
+# Software-path priority marking for WAN egress. Offloaded flows are queued by
+# PPPQ in the driver and never reach this hook after their FOE entry is bound.
 chain queue_mark_forward {
-	type filter hook forward priority filter - 1; policy accept;
-	oifname "wan" ct mark set 7
-	oifname "wan" ip protocol icmp ct mark set 8 meta mark set 4
-	oifname "wan" ip6 nexthdr ipv6-icmp ct mark set 8 meta mark set 4
-	oifname "wan" ip dscp { ef, af41, cs4, cs5 } ct mark set 8 meta mark set 4
-	oifname "wan" ip6 dscp { ef, af41, cs4, cs5 } ct mark set 8 meta mark set 4
+	type filter hook forward priority filter - 1; policy accept
+	oifname "wan" ip protocol icmp meta mark set 4
+	oifname "wan" ip6 nexthdr ipv6-icmp meta mark set 4
+	oifname "wan" ip dscp { ef, af41, cs4, cs5 } meta mark set 4
+	oifname "wan" ip6 dscp { ef, af41, cs4, cs5 } meta mark set 4
 }

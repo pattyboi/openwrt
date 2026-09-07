@@ -1,11 +1,15 @@
 #!/bin/sh
-# qdma-shaper: MediaTek NETSYSv1 QDMA WAN queue shaper + AQM backend.
+# qdma-shaper: MediaTek NETSYSv1 QDMA WAN queue shaper backend.
 #
-# Wraps the qos-03/qos-06 debugfs controls (qdma_rate, qdma_aqm, qdma_regs)
-# with board- and DSA-aware safety checks. It sets a per-queue upload max-rate
-# cap on the WAN egress queue (queue = 3 + DSA port index) and wires the
-# qos-06 occupancy-driven AQM that evicts PPE-offloaded flows to CAKE/SQM
-# when the hardware queue saturates, bounding latency under load.
+# Wraps the qos-03/04/20 debugfs controls (qdma_rate, qdma_sch, qdma_txq,
+# qos_toggle, qos_prio_map, qdma_regs) with board- and DSA-aware safety
+# checks. It sets a per-queue upload max-rate cap on the WAN egress queue
+# (queue = 3 + DSA port index) and programs the PPPQ/HQoS profile.
+#
+# There is no software AQM here any more: NETSYSv1 exposes no per-queue
+# counter (the vendor gates the QDMA MIB debug mode to NETSYSv2+) and a
+# controlled A/B showed the counter-driven eviction controller cost ~364
+# TCP retransmits per 20 s upload with no latency benefit. CAKE is the AQM.
 #
 # Commands:
 #   qdma-shaper validate <interface> <rate_kbps>
@@ -13,10 +17,10 @@
 #   qdma-shaper clear    <interface>
 #   qdma-shaper status   <interface>
 #
-# Requires flow_offloading_hw=1 for full effect: PPE-offloaded transit flows
-# are capped by the hardware leaky bucket; the AQM evicts them to CAKE when
-# the queue saturates. Router-originated and non-offloaded traffic uses CAKE
-# directly. Result: near-CAKE latency at hardware-offload CPU cost.
+# Requires flow_offloading_hw=1 for full effect: PPE-offloaded WAN-egress
+# transit flows are capped by queue 7's hardware leaky bucket. Router-originated
+# and non-offloaded traffic uses CAKE directly; offloaded download traffic
+# bypasses CAKE and the WAN-egress bucket.
 
 log() { logger -t qdma-shaper "$*" 2>/dev/null; echo "qdma-shaper: $*" >&2; }
 die() { log "$@"; exit 1; }
@@ -157,7 +161,7 @@ cmd_clear() {
 }
 
 cmd_status() {
-	local iface="$1" out dir dev q line board fo foh cake aqm_node aqm_state
+	local iface="$1" out dir dev q line board fo foh cake toggle prio_map
 	out="$(resolve_target "$iface")" || exit 1
 	set -- $out; dir="$1"; dev="$2"; q="$3"
 	line="$(regs_line "$dir" "$q")"
@@ -170,11 +174,13 @@ cmd_status() {
 		tc qdisc show dev "$dev" 2>/dev/null | grep -q cake && cake="yes"
 	fi
 
-	aqm_node=""
+	toggle="unavailable"; prio_map="unavailable"
 	for d in /sys/kernel/debug/*.ethernet; do
-		[ -f "$d/qdma_aqm" ] && { aqm_node="$d/qdma_aqm"; break; }
+		[ -f "$d/qos_toggle" ] || continue
+		toggle="$(cat "$d/qos_toggle" 2>/dev/null)"
+		[ -f "$d/qos_prio_map" ] && prio_map="$(cat "$d/qos_prio_map" 2>/dev/null)"
+		break
 	done
-	[ -n "$aqm_node" ] && aqm_state="$(cat "$aqm_node" 2>/dev/null)" || aqm_state="unavailable"
 
 	echo "interface=$iface"
 	echo "netdev=$dev"
@@ -189,7 +195,8 @@ cmd_status() {
 	echo "flow_offloading=${fo:-0}"
 	echo "flow_offloading_hw=${foh:-0}"
 	echo "cake_on_${dev}=$cake"
-	echo "aqm=$aqm_state"
+	echo "qos_toggle=$toggle"
+	echo "qos_prio_map=$prio_map"
 }
 
 usage() {

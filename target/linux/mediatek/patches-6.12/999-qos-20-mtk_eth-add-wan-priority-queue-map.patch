@@ -1,0 +1,186 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: map PPPQ priority DSCP to a configurable queue
+
+Prerequisite for moving the production profile from `qos_toggle=1`
+(conntrack-mark queue selection) to `qos_toggle=2` (native PPPQ,
+`queue = 3 + dsa_port`).
+
+Why the production profile has to move: with `qos_toggle=1` the E8450
+cannot express a per-direction queue at all. The driver's own asymmetric
+path (`ct_mark >> 16`) is gated on `odev == eth->netdev[1]` (GDM2), but
+this board's WAN is DSA port 4 behind gmac0 (`wan: port@4` in
+mt7622-linksys-e8450.dtsi), so that test is never true here and both
+FOE directions of every flow receive `ct_mark & MTK_QDMA_QUEUE_MASK`.
+files/etc/nftables.d/30-queue-mark.nft sets `ct mark 7` per
+*connection*, so the download direction - and every download's own ACK
+stream - was placed inside the rate-capped WAN bulk queue. Confirmed on
+hardware: both FOE directions of a wired client's download carried
+ib2=0x007c0437, i.e. MTK_FOE_IB2_QID = 7 with PSE_QOS set.
+
+Measured on the live router (3 reps/side, 14 s saturating HTTPS fetch
+from a wired client; 75 Mbit/s contracted downstream):
+
+  qos_toggle=1, scheduler-0 cap 9500 kbit/s    5.7 Mbit/s
+  qos_toggle=2, scheduler-0 cap 9500 kbit/s    7.7 Mbit/s
+  qos_toggle=1, no scheduler cap               5.9 Mbit/s
+  qos_toggle=2, no scheduler cap               76.6 Mbit/s
+
+The two caps were in series - queue 7's 8,300 kbit/s bucket and the
+scheduler-0 aggregate ceiling (all 16 queues report scheduler 0, so
+that ceiling applies to every QDMA egress path). Removing either alone
+leaves the other binding, which is why every download measurement in
+docs/research/qos-aqm-lab-notes.md landed in the 0.3-10 Mbit/s range
+and was mistaken for this connection's real capacity. An 8-stream
+saturating download after both fixes sustained 82.7 Mbit/s.
+
+`qos_toggle=2` gives the per-direction separation for free: WAN egress
+is DSA port 4, so `3 + dsa_port` is queue 7 - the same queue
+qdma-shaper already caps - while LAN egress lands on queues 3-6. The
+one thing it loses is the shipped HQoS priority queue: 999-qos-10
+hardcodes `queue = 4` for learned EF/AF41/CS4/CS5, which under PPPQ is
+DSA port 1's own per-port queue, so priority WAN egress would silently
+share a LAN port's queue and the configured `priority_queue 8` /
+weight-12 profile would never be used.
+
+Make that mapping configurable instead of hardcoded. New NETSYSv1-only
+debugfs file, written by the qdma-shaper service alongside the queue and
+scheduler programming it already does:
+
+  qos_prio_map (rw)  "<port_queue> <prio_queue>"
+
+When `port_queue` is non-zero and PPPQ selected exactly that queue -
+i.e. this flow is egressing the port qdma-shaper shapes - a learned
+priority DSCP re-selects `prio_queue`. Any other egress port keeps its
+own PPPQ queue, so a priority *download* is no longer pulled onto an
+unrelated port's queue either. Default is "0 0", which preserves
+999-qos-10's existing `queue = 4` behaviour exactly, so this patch is
+inert until userspace configures it.
+
+The 999-ppe-11 TCP-ACK boost (`queue += 6`) is deliberately left alone:
+it applies for the first time on this board under `qos_toggle=2`,
+moving WAN-egress ACKs off the capped bulk queue, which is part of the
+point.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1420,6 +1420,12 @@
+ 	struct metadata_dst		*dsa_meta[MTK_MAX_DSA_PORTS];
+ 
+ 	u8				qos_toggle;
++	/* qos-20: PPPQ priority-DSCP remap. When qos_prio_port_queue is
++	 * non-zero and PPPQ selected that queue, a learned priority DSCP
++	 * selects qos_prio_queue instead. 0/0 keeps qos-10's hardcoded q4.
++	 */
++	u8				qos_prio_port_queue;
++	u8				qos_prio_queue;
+ 	struct dentry			*qdma_debugfs_dir;
+ 	/* Protects NETSYSv1 QDMA scheduler state and register writes. */
+ 	spinlock_t			qdma_sch_lock;
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1131,6 +1131,67 @@
+ 	.write	 = mtk_qos_toggle_write,
+ };
+ 
++/* qos-20: remap the PPPQ priority-DSCP queue.
++ *
++ * "<port_queue> <prio_queue>": when PPPQ selects @port_queue for a flow
++ * (i.e. the flow egresses the port whose queue qdma-shaper shapes) and the
++ * flow carries a learned priority DSCP, mtk_flow_set_output_device() uses
++ * @prio_queue instead of qos-10's hardcoded queue 4 - which under PPPQ is
++ * DSA port 1's own per-port queue, not a priority queue.
++ *
++ * port_queue == 0 disables the remap and restores qos-10's behaviour.
++ */
++static int mtk_qos_prio_map_show(struct seq_file *s, void *unused)
++{
++	struct mtk_eth *eth = s->private;
++
++	seq_printf(s, "%u %u\n", eth->qos_prio_port_queue,
++		   eth->qos_prio_queue);
++	return 0;
++}
++
++static int mtk_qos_prio_map_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, mtk_qos_prio_map_show, inode->i_private);
++}
++
++static ssize_t mtk_qos_prio_map_write(struct file *file,
++				      const char __user *ubuf,
++				      size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct mtk_eth *eth = s->private;
++	unsigned int port_queue, prio_queue;
++	char buf[16], extra;
++
++	if (!mtk_qdma_v1_override_supported(eth))
++		return -EOPNOTSUPP;
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%u %u %c", &port_queue, &prio_queue, &extra) != 2 ||
++	    port_queue >= MTK_QDMA_NUM_QUEUES ||
++	    prio_queue >= MTK_QDMA_NUM_QUEUES)
++		return -EINVAL;
++
++	eth->qos_prio_port_queue = (u8)port_queue;
++	eth->qos_prio_queue = (u8)prio_queue;
++
++	return count;
++}
++
++static const struct file_operations mtk_qos_prio_map_fops = {
++	.owner	 = THIS_MODULE,
++	.open	 = mtk_qos_prio_map_open,
++	.read	 = seq_read,
++	.llseek	 = seq_lseek,
++	.release = single_release,
++	.write	 = mtk_qos_prio_map_write,
++};
++
+ static ssize_t mtk_qdma_sch_write(struct file *file, const char __user *ubuf,
+ 				  size_t count, loff_t *ppos)
+ {
+@@ -1333,6 +1394,8 @@
+ 						&mtk_qos_toggle_fops)) ||
+ 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_sch", 0200, root, eth,
+ 						&mtk_qdma_sch_fops)) ||
++	     IS_ERR_OR_NULL(debugfs_create_file("qos_prio_map", 0644, root,
++						eth, &mtk_qos_prio_map_fops)) ||
+ 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_txq", 0200, root, eth,
+ 						&mtk_qdma_txq_fops)) ||
+ 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_fc", 0200, root, eth,
+--- a/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
+@@ -345,12 +345,22 @@
+ 	if (eth->qos_toggle == 2 && mtk_ppe_check_pppq_path(mac, idev, dsa_port)) {
+ 		/* Keep learned priority DSCP flows off the capped bulk queue.
+ 		 * dscp is the raw IP TOS/traffic-class byte; ignore ECN bits.
++		 *
++		 * qos-20: the destination is qos_prio_queue when PPPQ picked
++		 * the shaped port's queue (qos_prio_port_queue), so priority
++		 * WAN egress reaches the configured HQoS priority queue rather
++		 * than a LAN port's own PPPQ queue. Unconfigured, this keeps
++		 * qos-10's original hardcoded queue 4.
+ 		 */
+ 		if ((dscp & 0xfc) == 0xb8 || /* EF */
+ 		    (dscp & 0xfc) == 0x88 || /* AF41 */
+ 		    (dscp & 0xfc) == 0x80 || /* CS4 */
+-		    (dscp & 0xfc) == 0xa0)   /* CS5 */
+-			queue = 4;
++		    (dscp & 0xfc) == 0xa0) { /* CS5 */
++			if (!eth->qos_prio_port_queue)
++				queue = 4;
++			else if (queue == eth->qos_prio_port_queue)
++				queue = eth->qos_prio_queue;
++		}
+ 		if (dsa_port >= 0 && ct && nf_ct_protonum(ct) == IPPROTO_TCP) {
+ 			/* Dispatch small (<=64B) IPv4/IPv6 TCP ACKs to a
+ 			 * higher-priority queue.

@@ -5,9 +5,8 @@ Expose PSE (Packet Switch Engine) per-port buffer-occupancy registers
 (PSE_FQFC_CFG1/2, PSE_DROP_CFG, PSE_PPE_DROP, PSE_IQ_REV, PSE_OQ_TH)
 for register-pairing verification. This is the block that routes
 PPE-offloaded WLAN-egress flows (mtk_foe_entry_set_wdma, distinct from
-the QDMA-queue mtk_foe_entry_set_queue path qdma-shaper/qdma_aqm
-already cover) - never previously instrumented by this tree's QDMA
-debugfs work (qos-01..16).
+the QDMA-queue mtk_foe_entry_set_queue path qdma-shaper covers) - never
+previously instrumented by this tree's QDMA debugfs work (qos-01..10).
 
 Read-only: no register writes, no queue changes, no WED operations.
 Used to test the WLAN-egress port-pairing hypothesis against live
@@ -15,11 +14,12 @@ register readback before trusting any write. The result and the closed
 PSE hardware dead end are summarized in docs/README.md; the detailed
 chronology remains in docs/research/qos-aqm-lab-notes.md.
 
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
 ---
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
 +++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
-@@ -1674,6 +1674,41 @@
- 	.write	 = mtk_qdma_aqm_write,
+@@ -1277,6 +1277,40 @@
+ 	.write	= mtk_qdma_fc_write,
  };
  
 +static int mtk_pse_debugfs_show(struct seq_file *s, void *unused)
@@ -39,9 +39,8 @@ chronology remains in docs/research/qos-aqm-lab-notes.md.
 +			   mtk_r32(eth, PSE_PPE_DROP(i)));
 +
 +	/* PSE_IQ_REV/PSE_OQ_TH pack two ports per register (low/high 16
-+	 * bits); read-only, no writes. See docs/e8450-download-shaping-
-+	 * handoff.md for the (unverified) port-pairing hypothesis this
-+	 * dump is meant to test against a live comparison.
++	 * bits); read-only, no writes. Used to test the WLAN-egress
++	 * port-pairing hypothesis against live register readback.
 +	 */
 +	for (i = 1; i <= 8; i++) {
 +		u32 iq = mtk_r32(eth, PSE_IQ_REV(i));
@@ -60,7 +59,7 @@ chronology remains in docs/research/qos-aqm-lab-notes.md.
  static void mtk_qdma_debugfs_init(struct mtk_eth *eth)
  {
  	struct dentry *root;
-@@ -1684,7 +1719,9 @@
+@@ -1287,7 +1321,9 @@
  
  	eth->qdma_debugfs_dir = root;
  	if (IS_ERR_OR_NULL(debugfs_create_file("qdma_regs", 0444, root, eth,

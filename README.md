@@ -21,7 +21,7 @@ real problem or survive an A/B test.
 | CPU / packet engine | Dual-core Cortex-A53 / MediaTek NETSYSv1 |
 | 5 GHz | MT7915 over PCIe with WED-v1 DMA offload |
 | 2.4 GHz | Integrated MT7615/WMAC; PPE offload, no WED path |
-| Traffic management | Hardware HQoS + PPPQ, software AQM, CAKE, adaptive rates |
+| Traffic management | Hardware PPPQ per-port queues + WAN rate cap, CAKE, adaptive rates |
 | Hardware flow offload | Enabled by default |
 | Package philosophy | Small fixed image; customize at build time |
 
@@ -35,22 +35,30 @@ Stock choices are usually either:
 - enable hardware flow offload for throughput but bypass most software queue
   management.
 
-This fork combines both paths:
+This fork uses each path where it is actually good:
 
-1. **PPPQ** assigns hardware-offloaded WAN flows to QDMA queues.
-2. **HQoS** gives bulk traffic a capped queue and latency-sensitive traffic a
-   higher-priority queue.
-3. **AQM** watches the capped hardware queue. When it stays busy, the heaviest
-   flows are removed from hardware offload and sent through CAKE.
-4. A short hold prevents an evicted flow from immediately jumping back into
-   hardware while congestion is still present.
+1. **PPPQ** assigns every hardware-offloaded flow to the QDMA queue belonging
+   to its egress switch port, so the WAN upload queue shapes upload only.
+2. **HQoS** caps that WAN queue at the connection's real upload rate and gives
+   latency-sensitive classes an uncapped priority queue.
+3. **CAKE** queues everything the PPE does not bind — new flows, ICMP,
+   router-originated traffic — and is the only AQM in the system.
 
-The result keeps PPE offload for ordinary traffic and invokes CAKE where it is
-useful. In the initial controlled A/B, saturating-load p95 latency fell from
-196 ms to 33.8 ms while upload throughput retained 98.5%. A later hardened-AQM
-run measured 30.5 ms p95.
+Earlier releases also shipped a software controller that polled the hardware
+queue's counters and evicted busy flows back to CAKE. It has been removed:
+MT7622 implements no per-queue counter (MediaTek gates that register block to
+newer NETSYS generations), so the controller was reading an unimplemented
+register window and firing on noise. A controlled A/B, four saturating upload
+reps per side, found identical throughput and identical latency at every
+percentile with and without it — and 364 versus 1 TCP retransmits. Details:
+[`docs/e8450-aqm-v3-design.md`](docs/e8450-aqm-v3-design.md).
 
-![AQM loaded-latency and upload-throughput comparison](docs/assets/aqm-latency-throughput.svg)
+Removing the conntrack-mark queue policy at the same time fixed a large
+self-inflicted throughput loss. A conntrack mark belongs to a connection, not
+a direction, so on this board it placed bulk download — and every download's
+own ACK stream — inside the WAN *upload* queue's 8.3 Mbit/s bucket. Wired
+client, 75 Mbit/s contracted line: **5.7 Mbit/s before, 66-83 Mbit/s after**,
+with loaded latency averaging 28 ms against a 26 ms idle baseline.
 
 ### Adaptive CAKE rates
 
@@ -92,7 +100,7 @@ the tested offsets, measurements, and limitations.
 | PPE hardware flow offload | On | Production |
 | PPPQ queue assignment | On | Production |
 | HQoS bulk/priority scheduling | On | Production |
-| Queue-triggered AQM v2 | On | Production |
+| Software queue-triggered AQM | Removed | Retired in v3; no hardware signal exists, measured harmful |
 | CAKE + `sqm-autorate-rust` | On | Production |
 | MT7915 recovery watchdog | On | Production mitigation |
 | 2.4 GHz VHT20/QAM-256 | Off | Opt-in; client compatibility varies |
@@ -155,7 +163,7 @@ Before flashing:
 ## Day-to-day checks
 
 ```sh
-# Hardware shaper, resolved WAN queue, CAKE, offload, and AQM state
+# Hardware shaper, queue map, CAKE, and offload state
 qdma-shaper status wan
 
 # Service state and recent shaping/recovery events
@@ -182,8 +190,8 @@ must be retuned for a different ISP link; do not assume the included
 
 ## Known hardware limits
 
-- NETSYSv1 has no usable hardware AQM. The fork's AQM is a software controller
-  around the hardware queue and flow table.
+- NETSYSv1 has no usable hardware AQM or per-queue counters. The former
+  software eviction controller was retired after its A/B showed no benefit.
 - The apparent second QDMA scheduler, hardware airtime-fairness controls,
   `HRED2`, and PSE per-port thresholds are inert on MT7622.
 - The integrated 2.4 GHz radio has no WED interconnect; software cannot add one.

@@ -166,20 +166,6 @@ def error_bars(
         svg.text(cx, plot_bottom + 22, label, "small", "middle")
 
 
-def aqm_latency() -> str:
-    svg = SVG(
-        "AQM cuts loaded latency while preserving upload rate",
-        "Same controlled saturating-upload comparison; exact values from the original A/B.",
-    )
-    svg.panel(35, 92, 450, 390, "Ping p95 under load (lower is better)")
-    vertical_bars(svg, 35, 92, 450, 390, ["AQM off", "AQM on"], [196, 33.8], 210, [RED, TEAL], " ms")
-    svg.panel(515, 92, 450, 390, "Upload throughput (higher is better)")
-    vertical_bars(svg, 515, 92, 450, 390, ["AQM off", "AQM on"], [8.304, 8.178], 9, [BLUE, TEAL], " Mbit/s", decimals=3)
-    return svg.finish(
-        "docs/research/qos-aqm-lab-notes.md §22.12",
-        "One run per mode in this initial gate; later hardened-AQM testing measured 30.5 ms p95.",
-    )
-
 
 def napi_ab() -> str:
     svg = SVG(
@@ -196,67 +182,6 @@ def napi_ab() -> str:
     )
 
 
-def grace_tuning() -> str:
-    svg = SVG(
-        "AQM grace-period tuning",
-        "poll_ms=100 fixed; three saturating-upload repetitions per grace value.",
-        600,
-    )
-    svg.panel(35, 92, 930, 425, "Latency distribution (lower is better)")
-    plot_left, plot_right = 110, 935
-    plot_top, plot_bottom = 155, 435
-    max_value = 45
-    for i in range(6):
-        value = max_value * i / 5
-        gy = plot_bottom - (plot_bottom - plot_top) * i / 5
-        svg.line(plot_left, gy, plot_right, gy, "grid")
-        svg.text(plot_left - 10, gy + 4, f"{value:g}", "small", "end")
-    groups = [
-        ("1000 ms", [30.5, 31.8, 37.1], 0),
-        ("3000 ms", [31.7, 36.5, 41.5], 2),
-        ("5000 ms", [30.9, 34.7, 36.5], 2),
-    ]
-    colors = [BLUE, ORANGE, PURPLE]
-    metric_names = ["p95", "p99", "max"]
-    group_slot = (plot_right - plot_left) / len(groups)
-    bar_w = 42
-    for gi, (label, values, loss_reps) in enumerate(groups):
-        center = plot_left + group_slot * (gi + 0.5)
-        for mi, (value, color) in enumerate(zip(values, colors)):
-            bx = center + (mi - 1) * (bar_w + 7) - bar_w / 2
-            bh = (plot_bottom - plot_top) * value / max_value
-            svg.rect(bx, plot_bottom - bh, bar_w, bh, color, 4)
-            svg.text(bx + bar_w / 2, plot_bottom - bh - 7, f"{value:.1f}", "small", "middle")
-        svg.text(center, plot_bottom + 23, label, "label", "middle")
-        svg.text(center, plot_bottom + 43, f"loss in {loss_reps}/3 reps", "small", "middle")
-    for i, (name, color) in enumerate(zip(metric_names, colors)):
-        lx = 330 + i * 145
-        svg.rect(lx, 494, 14, 14, color, 2)
-        svg.text(lx + 21, 506, name, "small")
-    return svg.finish(
-        "docs/research/qos-aqm-lab-notes.md §35.2",
-        "Live household traffic makes this a small, noisy n=3 tuning result—not a universal timer benchmark.",
-    )
-
-
-def hold_ab() -> str:
-    svg = SVG(
-        "AQM hold_ms=3000 production A/B",
-        "Four-stream saturation; means ± sample standard deviation.",
-        610,
-    )
-    panels = [
-        (35, "Sent rate (Mbit/s)", [8.6, 9.0], [0.7, 0.4], 10.5, "", 1),
-        (355, "Ping p99", [39.9, 37.8], [6.0, 5.3], 52, " ms", 1),
-        (675, "Retransmits", [1680, 1655], [221, 220], 2100, "", 0),
-    ]
-    for x, title, means, errors, maximum, suffix, decimals in panels:
-        svg.panel(x, 92, 290, 430, title)
-        error_bars(svg, x, 92, 290, 430, ["hold 0", "hold 3000"], means, errors, maximum, [BLUE, TEAL], suffix, decimals)
-    return svg.finish(
-        "docs/README.md AQM hold measurement table (original run log retained in git history)",
-        "hold=0 aggregate excludes one severe household-traffic outlier (n=7); hold=3000 uses all eight reps.",
-    )
 
 
 def autorate_ceiling() -> str:
@@ -338,10 +263,7 @@ def radio_rssi() -> str:
 
 
 CHARTS = {
-    "aqm-latency-throughput.svg": aqm_latency,
     "napi-weight-ab.svg": napi_ab,
-    "aqm-grace-tuning.svg": grace_tuning,
-    "aqm-hold-ab.svg": hold_ab,
     "autorate-ceiling.svg": autorate_ceiling,
     "radio-rssi.svg": radio_rssi,
 }

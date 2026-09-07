@@ -1,0 +1,107 @@
+From: OpenWrt E8450 investigation <noreply@example.invalid>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add NETSYSv1 QDMA fc_th control
+
+Expose the global NETSYSv1 QDMA flow-control/RED threshold register
+(fc_th, 0x1a10) for measurement: read it back in qdma_regs and allow a
+diagnostic write via a new qdma_fc debugfs file. The driver init value
+is FC_THRES_DROP_MODE | FC_THRES_DROP_EN | FC_THRES_MIN (0x00174444).
+
+This register was investigated as a possible hardware tail-drop lever
+that would bound QDMA queue latency. It is inert on MT7622: the vendor
+writes the same init value in every driver revision and never tunes it,
+and lowering it produced no observable change in queue behaviour. The
+readback is retained because that negative result is worth being able
+to re-verify cheaply; see docs/README.md's closed hardware dead ends.
+
+This patch previously also added a per-queue "MIB" counter readout
+(QTX_MIB_IF debug mode at 0x1abc, plus the 64-bit byte-counter pair at
+QTX_CFG+0x8/+0xc added later by qos-11). That was removed: the MIB
+debug mode does not exist on NETSYSv1. MediaTek gates the entire block
+to NETSYSv2-or-greater in every vendor generation (mtk-openwrt-feeds
+25.12 999-eth-90 proprietary-debugfs patch:
+"if (mtk_is_netsys_v2_or_greater(eth))"; the 5.4 equivalent uses
+"if (!MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA_V1_1))", which MT7622 also
+fails), and assigns qtx_mib_if = 0x46bc only for mt7986_reg_map and
+mt7988_reg_map - never for the NETSYSv1 register map, which has no such
+field at all. Reading 0x1abc on this SoC returned zero on ~95% of
+samples and small implausible values otherwise, including during
+transfers where that queue's own leaky bucket was provably the
+bottleneck.
+
+There is no per-queue counter on this hardware. The offload path's real
+accounting is the PPE per-flow counters (mt7622_data sets
+.has_accounting = true), which mtk_ppe's own stats path already uses.
+
+All controls are NETSYSv1-gated, serialized under qdma_sch_lock, and
+change nothing unless written. NETSYSv2/v3 and MT7621 are untouched.
+
+Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -992,6 +992,8 @@
+ 
+ 	seq_printf(s, "tx_sch_rate_value=0x%08x\n",
+ 		   mtk_r32(eth, map->qdma.tx_sch_rate));
++	seq_printf(s, "fc_th_value=0x%08x\n",
++		   mtk_r32(eth, map->qdma.fc_th));
+ 
+ 	return 0;
+ }
+@@ -1198,6 +1200,45 @@
+ 	.write	= mtk_qdma_txq_write,
+ };
+ 
++/* qos-05: write the global QDMA flow-control/RED threshold register
++ * (fc_th, 0x1a10). Diagnostic only: the driver init value is
++ * FC_THRES_DROP_MODE | FC_THRES_DROP_EN | FC_THRES_MIN (0x4444); lowering
++ * the threshold was investigated as a hardware tail-drop lever and found
++ * inert on this SoC.
++ */
++static ssize_t mtk_qdma_fc_write(struct file *file, const char __user *ubuf,
++				 size_t count, loff_t *ppos)
++{
++	struct mtk_eth *eth = file->private_data;
++	const struct mtk_reg_map *map = eth->soc->reg_map;
++	unsigned long long parsed;
++	char buf[16], extra;
++
++	if (!mtk_qdma_v1_override_supported(eth))
++		return -EOPNOTSUPP;
++	if (*ppos || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%llx %c", &parsed, &extra) != 1 ||
++	    parsed > 0xffffffffULL)
++		return -EINVAL;
++
++	spin_lock_bh(&eth->qdma_sch_lock);
++	mtk_w32(eth, (u32)parsed, map->qdma.fc_th);
++	spin_unlock_bh(&eth->qdma_sch_lock);
++
++	return count;
++}
++
++static const struct file_operations mtk_qdma_fc_fops = {
++	.owner	= THIS_MODULE,
++	.open	= simple_open,
++	.write	= mtk_qdma_fc_write,
++};
++
+ static void mtk_qdma_debugfs_init(struct mtk_eth *eth)
+ {
+ 	struct dentry *root;
+@@ -1219,7 +1260,9 @@
+ 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_sch", 0200, root, eth,
+ 						&mtk_qdma_sch_fops)) ||
+ 	     IS_ERR_OR_NULL(debugfs_create_file("qdma_txq", 0200, root, eth,
+-						&mtk_qdma_txq_fops))))
++						&mtk_qdma_txq_fops)) ||
++	     IS_ERR_OR_NULL(debugfs_create_file("qdma_fc", 0200, root, eth,
++						&mtk_qdma_fc_fops))))
+ 		goto error;
+ 
+ 	return;

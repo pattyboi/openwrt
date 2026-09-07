@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=qdma-shaper
 PKG_VERSION:=1
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 PKG_MAINTAINER:=OpenWrt E8450 investigation <noreply@example.invalid>
 PKG_LICENSE:=GPL-2.0-only
@@ -14,17 +14,17 @@ include $(INCLUDE_DIR)/package.mk
 define Package/qdma-shaper
   SECTION:=net
   CATEGORY:=Network
-  TITLE:=MediaTek NETSYSv1 QDMA WAN queue shaper (experimental)
+  TITLE:=MediaTek NETSYSv1 QDMA WAN queue shaper
   DEPENDS:=@TARGET_mediatek_mt7622
   PKGARCH:=all
 endef
 
 define Package/qdma-shaper/description
-  Experimental board- and DSA-aware control for the qos-03 NETSYSv1 QDMA
-  per-queue max-rate override on MT7622. Sets a single upload cap on the WAN
-  egress queue via the mtk_eth_soc debugfs qdma_rate interface, with
-  fail-closed identity and readback checks. Upload-only token bucket; not an
-  AQM and does not shape download.
+  Board- and DSA-aware control for the NETSYSv1 QDMA per-queue max-rate,
+  PPPQ, and HQoS overrides on MT7622. Caps WAN egress with a hardware token
+  bucket while keeping each DSA egress direction on its native port queue.
+  Includes fail-closed identity and readback checks. CAKE handles traffic that
+  does not enter the hardware flow-offload path.
 endef
 
 define Package/qdma-shaper/conffiles
