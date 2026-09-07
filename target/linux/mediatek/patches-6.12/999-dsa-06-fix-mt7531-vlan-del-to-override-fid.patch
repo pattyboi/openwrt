@@ -13,7 +13,7 @@ mt7530_hw_vlan_del() omitting it left a stale/undefined FID hardware
 group behind a partial VLAN-member deletion on the exact MT7531 DSA
 switch this board uses (4x LAN + 1x WAN).
 
-See docs/e8450-mtk-feeds-audit-2026-09.md S3.
+See docs/README.md's patch map.
 
 Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
 ---

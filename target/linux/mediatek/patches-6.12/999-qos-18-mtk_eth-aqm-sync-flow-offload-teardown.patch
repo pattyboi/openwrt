@@ -1,7 +1,7 @@
 From: OpenWrt E8450 investigation <noreply@example.invalid>
 Subject: [PATCH] net: ethernet: mtk_eth_soc: AQM eviction: sync generic flow_offload teardown
 
-AQM v2 phase A (docs/e8450-aqm-v2-design.md). qos-06's eviction
+AQM v2 phase A (summarized in docs/README.md). qos-06's eviction
 (mtk_qdma_aqm_unbind_queue()) calls mtk_foe_entry_clear() directly on
 the PPE hardware FOE entry, entirely bypassing the generic kernel
 flowtable (net/netfilter/nf_flow_table_core.c) the flow's

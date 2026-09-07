@@ -1,9 +1,9 @@
 From: OpenWrt E8450 investigation <noreply@example.invalid>
 Subject: [PATCH] net: ethernet: mtk_eth_soc: AQM v2 phase B: ct-mark hold/release
 
-docs/e8450-aqm-v2-design.md SS4.3/SS4.4. qos-18 synced nf_flowtable's own
-bookkeeping with each eviction, but left the actual "how long does an
-evicted flow stay off PPE hardware" question exactly where v1 left it:
+AQM v2 hold/release phase (summarized in docs/README.md). qos-18 synced
+nf_flowtable's bookkeeping with each eviction, but left the actual
+"how long does an evicted flow stay off PPE hardware" question where v1 left it:
 governed by nf_flowtable's congestion-blind 30s idle GC
 (NF_FLOW_TIMEOUT), not by the AQM. This patch closes that gap using the
 declarative refuse-to-bind primitive 999-ppe-93 already ships
@@ -22,11 +22,9 @@ declarative refuse-to-bind primitive 999-ppe-93 already ships
 - mtk_qdma_aqm_hold_gc(): releases every hold whose new hold_ms
   cooldown has elapsed - restores the saved mark (so this never
   clobbers an unrelated HQoS priority mark set by
-  files/etc/nftables.d/30-queue-mark.nft; see the design doc SS5 for why
-  ct_mark's value space is already fully claimed by that existing
-  scheme and a save/restore, not a dedicated bit, is the correct fix
-  here) and drops the reference. Runs once per mtk_qdma_aqm_work() poll
-  tick.
+  files/etc/nftables.d/30-queue-mark.nft; the existing queue-mark
+  namespace requires save/restore rather than a dedicated bit) and drops
+  the reference. Runs once per mtk_qdma_aqm_work() poll tick.
 - mtk_qdma_aqm_hold_flush(): releases every currently-held flow
   immediately regardless of hold_ms, called from both the "disable" and
   "enable" debugfs writes. Necessary because mtk_qdma_aqm_work() stops
@@ -74,10 +72,10 @@ Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
  		u64		unbind_total;
  	} qdma_aqm;
 +	/* qos-19 (AQM v2 phase B): ct-mark hold table, guarded by its own
-+	 * lock - never held across qdma_sch_lock/ppe_lock (see
-+	 * docs/e8450-aqm-v2-design.md SS6). hold_ms == 0 disables the whole
-+	 * mechanism at runtime, reverting exactly to qos-06 through qos-18's
-+	 * mtk_foe_entry_clear()+flow_offload_teardown()-only eviction.
++	 * leaf lock, never held across qdma_sch_lock/ppe_lock. hold_ms == 0
++	 * disables the mechanism at runtime, reverting exactly to qos-06
++	 * through qos-18's clear-and-teardown-only eviction.
++	 * See docs/README.md for the userspace runtime contract.
 +	 */
 +#define MTK_QDMA_AQM_MAX_HOLD	64
 +	struct {
@@ -168,11 +166,11 @@ Signed-off-by: OpenWrt E8450 investigation <noreply@example.invalid>
 +}
 +
 +/* Release every hold whose hold_ms has elapsed: restore the conntrack
-+ * entry's pre-hold mark (so this doesn't clobber an unrelated HQoS
-+ * priority mark set by files/etc/nftables.d/30-queue-mark.nft - see
-+ * docs/e8450-aqm-v2-design.md SS5) and drop the reference taken in
-+ * mtk_qdma_aqm_flow_hold(). Called once per mtk_qdma_aqm_work() poll
-+ * tick; the table is normally empty or near-empty, so this is cheap.
++ * entry's pre-hold mark so this doesn't clobber the HQoS priority mark
++ * set by files/etc/nftables.d/30-queue-mark.nft, then drop the reference
++ * taken in mtk_qdma_aqm_flow_hold(). Called once per AQM poll tick; the
++ * table is normally empty or near-empty, so this is cheap.
++ * The userspace contract is summarized in docs/README.md.
 + */
 +static void mtk_qdma_aqm_hold_gc(struct mtk_eth *eth)
 +{

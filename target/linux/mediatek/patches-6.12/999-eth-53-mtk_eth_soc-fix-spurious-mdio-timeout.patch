@@ -26,7 +26,7 @@ hardware register read before declaring a timeout.
 
 No chip-version gate - applies to this tree's NETSYSv1 baseline as-is.
 This board's MT7531 switch is driven over exactly this internal MDIO
-bus. See docs/e8450-mtk-feeds-audit-2026-09.md S2.
+bus. See docs/README.md's patch map.
 
 Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
 ---

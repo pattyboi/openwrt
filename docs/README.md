@@ -1,295 +1,525 @@
-# Linksys E8450 (MT7622/NETSYSv1) hardware-validated patch set — docs index
+# E8450 Performance ROM handbook
 
-This fork carries a from-source, hardware-tested set of kernel/driver patches
-for the Linksys E8450 (MediaTek MT7622, NETSYSv1, WED-v1), built and
-validated against a live, in-production router — not a lab bench. Every
-finding below was reached by reading the actual driver source in this tree
-and confirming behavior on real hardware; nothing here is copied from a
-vendor changelog without independent verification.
+This is the technical companion to the project
+[`README`](../README.md). It explains what the ROM changes, how the packet
+path works, what can be configured safely, and why some patches remain local.
+It replaces the former collection of overlapping roadmaps, handoffs, design
+documents, and dated test summaries.
 
-## TL;DR
+## Contents
 
-- **WED-v1 (Wi-Fi DMA offload) ring-desync bug**: found, root-caused, fixed
-  (`999-wed-14`). A busy-path reset in `mtk_wed_reset_dma()` skipped the
-  WED-side ring index reset, permanently desyncing `WED_WDMA_RXn` after an
-  SER under load. Confirmed stuck ring before the fix, confirmed clean
-  `QCNT=0` after, on the same hardware.
-- **NETSYSv1 PSE port mapping bug**: found, fixed (`999-wed-13` corrected).
-  The vendor's WDMA-during-SER gating patch used the NETSYSv2+ port formula
-  unmodified; on MT7622 it silently poked the wrong register and never
-  actually gated anything.
-- **Controlled SER recovery: root-caused as unfixable from this host's
-  driver source; auto-reboot watchdog deployed as mitigation.** A
-  recovered prior investigation (see
-  [`WED-breadcrumb-harness-design.md`](WED-breadcrumb-harness-design.md))
-  already hardware-tested three independent ring/reset fixes together and
-  hit the identical failure; this fork's own testing (post ring-desync fix)
-  reproduced it again. Root cause: the MT7915 MCU firmware never replies to
-  a specific command during full-reset recovery. Not a host-side bug.
-  `mt7915-ser-watchdog` (procd service, self-enabling on every future
-  flash) detects the driver's own terminal failure message and self-reboots,
-  bounding a previously-indefinite outage to ~65 s — live-verified twice,
-  including catching and fixing a BusyBox `grep -m1`-on-an-infinite-stream
-  bug in the first implementation. See
-  [`e8450-ppe-validation.md`](e8450-ppe-validation.md) for the full writeup.
-- **AQM (bufferbloat control)**: NETSYSv1 has no hardware AQM (confirmed via
-  exhaustive vendor-SDK source mining, both firmware generations). Built a
-  software occupancy-driven AQM instead (`999-qos-06`), then hardened it
-  twice: byte-accurate trigger threshold (`999-qos-12`, was a fixed
-  1400-byte packet-count assumption) and flow-aware eviction (`999-qos-13`,
-  targets the actual congesting flow via the PPE's own per-flow hardware
-  byte accounting, instead of arbitrary walk order). Reduced p95 latency
-  under saturating load from 196 ms to 22-34 ms. See
-  [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md).
-- **AQM eviction code review, then built/flashed/hardware-validated**:
-  with the hardware-capability question closed (§28.5), re-read the
-  software AQM eviction path itself and found three fixable software
-  issues: `999-qos-14` dedups a hand-copied PPE accessor, `999-qos-15`
-  removes a doubled `ppe_lock`-guarded flow-table walk from every AQM
-  trigger (reuses pass 1's eviction ranking in pass 2 instead of
-  re-deriving it), and `999-qos-16` fixes a latent `u32` overflow in the
-  byte-threshold auto-compute. Built into a real image, flashed to the
-  live E8450, and hardware-validated: a saturating-load p95 latency test
-  (30.5 ms) landed squarely inside the already-good 22-34 ms band, no
-  dmesg regressions, AQM actively triggering/evicting under load. See
-  [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md)
-  §32-36. A follow-up live A/B (§35) then tuned the AQM's own timing
-  knobs: `grace_ms` dropped from 3000 to **1000 ms** (adopted as the new
-  production default - lower latency and, uniquely, zero packet loss
-  across every rep of a 3-rep saturating-load grid), `poll_ms` stayed at
-  100 (tested, effect too small to justify a change). §36 then checked
-  the **download** direction after a reported external "B" bufferbloat
-  grade: real, severe loaded-latency spikes (p95 300-1200 ms) reproduced,
-  but `tc` telemetry sampled *during* the load shows CAKE's ingress queue
-  (`ifb4wan`) at ~0 backlog and <16 ms internal delay throughout - the
-  router's own queue management is exonerated by direct measurement, not
-  inference. The likely causes (10 real concurrently-associated
-  stations, and/or `sqm-autorate-rust`'s adaptive rate ramp outrunning
-  real sustained capacity between OWD-detected pullbacks) are both
-  outside anything a further kernel/CAKE patch on this router could fix.
-  A same-day follow-up (§37) checked that against the confirmed
-  contracted plan (Internet Essentials, 75/10 Mbps): `download_base_kbits`/
-  `download_min_percent` turned out **not** to be a ceiling at all (read
-  directly from the vendored `sqm-autorate-rust` source - they set only
-  the floor and a minor nudge term, with no `.min()` clamp on the
-  up-ramp), confirmed live by watching the shaped rate swing from its
-  6 Mbit floor up to 69.5 Mbit (93% of the contracted line) and back
-  within one boot. Lowering the base/percent config would not have
-  fixed an overshoot problem; the real gap is that the vendored
-  `sqm-autorate-rust` has no rate ceiling at all, only OWD-based
-  pullback - a real upstream gap, not a config error. §38 then ran an
-  actual controlled speedtest from the router itself (no `opkg`/`curl`/
-  `iperf3` on this image - used `wget`/interface byte counters instead):
-  real sustained download throughput measured at 6-10 Mbit/s across
-  three tests (1-stream, 6-stream, 4-stream), confirming it was never a
-  single-stream/BDP limitation and matching `download_base_kbits`'s
-  already-conservative 10 Mbit value almost exactly - the shaper's drift
-  to 68-69 Mbit was pure algorithm defect, not evidence of hidden real
-  capacity. Patched the one line in the vendored source missing the
-  `.min(base_rate)` clamp upstream's own docs describe, cross-compiled
-  and deployed live: shaped rate now holds exactly at 10 Mbit under a
-  genuine 4-stream saturating download (10.56 Mbit/s achieved), with
-  real bounded CAKE backlog and ping maxing at 92 ms - not SS36's
-  uncontrolled 300-1200 ms spikes.
-- **Hash audit extended, rapidhash evaluated and rejected, both dormant
-  conversions reverted**: swept the rest of the reachable kernel for
-  jhash call sites matching the measured xxh32-winning size class and
-  converted two more (bridge multicast MDB/(S,G) keys, IPv6
-  fragment-reassembly key — `999-xxhash-02`, `999-xxhash-03`). Live
-  telemetry then showed both targets are dormant on this specific router
-  (`multicast_snooping=0`, zero IPv6 fragment-reassembly events in 2+
-  days), so both were reverted rather than carry unexercised patches
-  through future rebases — the audit findings remain documented for
-  later if usage changes. Separately benchmarked
-  [rapidhash](https://github.com/Nicoshev/rapidhash) on real arm64
-  hardware against this tree's actual jhash/xxh32 call-site sizes: xxh32
-  wins at every tested length, so rapidhash was not adopted. See
-  [`selective-xxhash-plan.md`](selective-xxhash-plan.md).
-- **2.4GHz CPU overhead and 5GHz stability**: MT7622 is actually a
-  **dual-core** Cortex-A53 SoC (2 CPUs, not 4 — corrected during this
-  pass). Found all three device IRQs with real per-packet cost
-  (2.4GHz WMAC, Ethernet TX, 5GHz MT7915) statically stacked onto one of
-  the two cores; rebalanced WMAC onto the other (`files/etc/rc.local`).
-  Also found and fixed an mt76-core inefficiency: every 2.4GHz TX-status
-  event unconditionally took a lock and an MMIO register read for up to
-  5 queues regardless of whether they had anything queued
-  (`902-mt76-dma-skip-empty-queue-tx-cleanup.patch`) — confirmed live
-  against the running router: a 4.9x `TASKLET` softirq imbalance between
-  the two cores, and all 5 WMAC hardware queues reading empty even with 8
-  active 2.4GHz clients. For 5GHz stability, identified DFS channel 52's
-  radar-triggered channel switching as a real, distinct instability
-  mechanism, and separately confirmed **background CAC cannot be enabled
-  on this board at all** — not a disabled policy flag, but a genuine
-  missing-second-radio hardware limitation, confirmed both from driver
-  source and live against the router (one 5GHz `wiphy`, no second PHY to
-  host it). Rate control, AMPDU caps, and per-chain TX power were all
-  found to be firmware-only or architecturally unavailable to tune from
-  the host; moving off the DFS channel needs an on-site RF survey this
-  session doesn't have. See
-  [`wifi-cpu-and-stability-investigation.md`](wifi-cpu-and-stability-investigation.md).
-- **2.4 GHz vendor VHT20/QAM-256**: added a default-off `vht2g` opt-in
-  spanning mac80211, mt76/MT7615, and both wifi-scripts paths. Built and
-  flashed the corrected image to the live E8450; the compatible PS4 client
-  negotiated `VHT-MCS 3`–`4` at 26–39 Mbps RX during the soak. All seven
-  2.4 GHz clients returned after reload and remained associated for 60 s;
-  no controlled throughput gain was claimed because no dedicated VHT
-  iperf endpoint was available. Full record:
-  [`e8450-vht2g-experiment.md`](e8450-vht2g-experiment.md).
-- **Dual hardware scheduler / HW airtime fairness**: both investigated and
-  confirmed **dead on this chip** — wired in the register map (inherited
-  from the shared v2/v3 template) but with no enforcement circuit behind
-  them on MT7622. Real negative results, not assumptions.
-- **mt76 upstream pin bumped** two months forward; ten hand-backported local
-  patches deleted because they landed upstream in the meantime, replaced by
-  three newly-discovered, narrower compat fixes found by actually attempting
-  the build. See [`e8450-ppe-validation.md`](e8450-ppe-validation.md).
-- **Live bufferbloat review**: SQM's download rate was configured at 64
-  Mbit, never once approached in dozens of real tests (0.3-8 Mbit/s
-  observed) — a ceiling that's never the real bottleneck gives zero
-  bufferbloat protection. High-resolution tracing also directly caught
-  upload bufferbloat's real mechanism: a flow sitting in the QDMA hardware
-  leaky-bucket queue (no depth control) for up to the AQM's `grace_ms`
-  window before eviction. Fixed the calibration two ways: a measured static
-  correction, then shipped `sqm-autorate-rust` (built via `rustup` instead
-  of OpenWrt's multi-hour from-source LLVM+rustc bootstrap — no prebuilt
-  release existed, so this was the actual shortcut) so the rate now tracks
-  real capacity continuously instead of a static guess. See
-  [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md).
-- **Radio TX power raised to the legal ceiling via factory-eeprom
-  calibration** (2026-09-04): decoded the complete field map of both
-  radio eeproms (MT7622 WMAC 2.4G, MT7915 5G — V1 layout, not the
-  MT7916/MT7981-era V2 layout an off-the-shelf community tool assumes),
-  found the stock calibration ceiling (27/28 dBm) sat *below* the
-  regdomain limit on both bands, and raised it to 30 dBm with a
-  validated power model (`0.5 dBm/byte`) and a one-command apply/
-  revert tool. RSSI-measured real gain, not just register math: +4 dB
-  far-field on 5 GHz at a fixed test point. A router-side channel
-  survey (radios scanning while serving — undocumented capability
-  before this) then moved both bands off their most contested/noisiest
-  channels, including off the DFS channel (52) an earlier investigation
-  had flagged as a real instability source but lacked the on-site RF
-  survey to act on. See
-  [`../.recall/router-probes/2026-09-04-factory-dump/`](../.recall/router-probes/2026-09-04-factory-dump/)
-  (full map, dumps, RSSI logs) and
-  [`../scripts/e8450/eeprom.sh`](../scripts/e8450/eeprom.sh) (the tool).
-- **Download-direction bufferbloat root-caused as an upstream
-  `sqm-autorate-rust` bug, not a router-side shaping gap** (2026-09-04,
-  §36-38): an external "B" bufferbloat grade prompted checking the
-  download direction directly under load — real, severe latency spikes
-  reproduced, but direct `tc` telemetry showed CAKE's own ingress queue
-  at ~0 backlog throughout, exonerating this router's queue management
-  by measurement rather than inference. Root cause: the vendored
-  autorate tool's shaped-rate ramp had no upper clamp, silently
-  drifting to 6-7x the connection's real ~6-10 Mbit/s sustained
-  capacity (confirmed via an actual router-side speedtest, not a
-  public server). One-line fix restores the documented ceiling;
-  verified holding exactly at 10 Mbit under a genuine saturating
-  download, real bounded CAKE backlog, ping maxing at 92 ms instead of
-  2153 ms.
-- **PSE (Packet Switch Engine) per-port buffer thresholds: audited,
-  closed** (`999-qos-17`, 2026-09-04). The one register range never
-  covered by qos-01..16's QDMA-scoped debugfs work. Built a read-only
-  diagnostic (mirrors `999-qos-01`'s exact scope), flashed live, and
-  read `PSE_IQ_REV`/`PSE_OQ_TH` as all-zero — confirmed by source: the
-  driver's PSE-threshold init code has no NETSYSv1 code path at all.
-  Joins QDMA scheduler-1 and `HRED2`/`fc_th` as a third confirmed-inert
-  hardware avenue on this chip. Also corrected an earlier hypothesis
-  about how this chip routes WLAN-egress hardware-offloaded flows, with
-  stronger evidence: `mtk_foe_entry_set_wdma()`/`mtk_foe_entry_set_queue()`
-  write mutually exclusive flow-table bitfields, so WLAN-bound offloaded
-  downloads never carry a QDMA queue ID — whether that means they
-  bypass CAKE shaping entirely is the one open question tracked in
-  [`e8450-download-shaping-handoff.md`](e8450-download-shaping-handoff.md).
+- [Feature guide](#feature-guide)
+- [How traffic moves through the router](#how-traffic-moves-through-the-router)
+- [Production settings](#production-settings)
+- [Operations and troubleshooting](#operations-and-troubleshooting)
+- [Wi-Fi and radio behavior](#wi-fi-and-radio-behavior)
+- [Backports and upstreaming](#backports-and-upstreaming)
+- [Patch map](#patch-map)
+- [Known limits and open work](#known-limits-and-open-work)
+- [Building and changing the ROM](#building-and-changing-the-rom)
 
-## Architecture
+## Feature guide
+
+### PPE: hardware flow offload
+
+The **Packet Processing Engine (PPE)** remembers established flows and forwards
+later packets without repeating the full Linux networking path. This lowers CPU
+cost and leaves more headroom for Wi-Fi, encryption, and local services.
+
+Hardware offload normally conflicts with software queue management: packets
+which stay in the PPE may not visit CAKE. This ROM keeps the PPE enabled but
+adds a controlled path back to software when its hardware upload queue becomes
+congested.
+
+Default:
+
+```text
+firewall flow_offloading=1
+firewall flow_offloading_hw=1
+```
+
+For a controlled comparison, `scripts/e8450/ppe-offload-bypass.sh` marks new
+flows for one IPv4 host with conntrack mark `0x99`. Patch `999-ppe-93` refuses
+PPE binding for those flows, leaving them on the software/CAKE path. Existing
+flows must be re-established because marking does not retroactively unbind
+them.
+
+### PPPQ: selecting a hardware queue
+
+**PPPQ means per-port/per-queue QoS. It is unrelated to PPP, PPPoE, or modem
+authentication.**
+
+NETSYSv1 has 16 QDMA transmit queues. PPPQ stores a queue ID in an offloaded
+PPE flow, so different classes can reach different hardware queues instead of
+all offloaded traffic sharing one undifferentiated path.
+
+The shipped nftables policy in `files/etc/nftables.d/30-queue-mark.nft` uses:
+
+| Queue | Class | Selection |
+|---:|---|---|
+| 7 | Bulk/default WAN upload | Every otherwise-unclassified WAN flow |
+| 8 | Priority WAN upload | ICMP and DSCP `EF`, `AF41`, `CS4`, or `CS5` |
+| 4 | Software priority fallback | `meta mark 4` for non-offloaded priority packets |
+
+Wi-Fi WMM voice/video priorities are translated to DSCP before conntrack and
+offload classification. Existing non-zero DSCP is preserved.
+
+### HQoS: scheduling the selected queues
+
+**Hierarchical QoS (HQoS)** is the hardware scheduler policy applied after PPPQ
+has selected a queue.
+
+The production profile uses weighted round robin on scheduler 0:
+
+- queue 7: bulk, weight 4, capped at 8.3 Mbit/s;
+- queue 8: priority, weight 12, no per-queue cap;
+- scheduler ceiling: 9.5 Mbit/s.
+
+The hierarchy matters. PPPQ answers **which queue?** HQoS answers **how should
+those queues share the link?** Neither one detects persistent congestion or
+replaces CAKE.
+
+### AQM: moving congestion back to CAKE
+
+**Active Queue Management (AQM)** prevents a full queue from turning into
+hundreds of milliseconds of delay. MT7622/NETSYSv1 does not implement usable
+hardware AQM, even though the shared register layout exposes names which imply
+otherwise.
+
+This ROM supplies a software controller around the hardware:
+
+1. Poll QDMA queue 7's byte and drop counters every 100 ms.
+2. Detect sustained traffic at the queue's configured cap or a hardware drop.
+3. Respect a 1,000 ms grace period between eviction cycles.
+4. Rank the offloaded flows on that queue using the PPE's hardware byte
+   counters.
+5. Evict up to four of the largest contributors from the PPE.
+6. Synchronize Linux flowtable state and hold the evicted conntrack entries out
+   of the PPE for 3,000 ms.
+7. Let those packets traverse the normal software path and CAKE.
+
+This is called **AQM v2** in the patch history. The v2 work made eviction
+flow-aware, byte-accurate, synchronized with `nf_flowtable`, and resistant to
+immediate re-offload.
+
+It is not a general Linux AQM implementation and it does not pretend NETSYSv1
+has capabilities it lacks. It is a board-specific bridge between QDMA, PPE,
+conntrack, and CAKE.
+
+### CAKE and adaptive rates
+
+CAKE remains the actual software queue discipline:
+
+```text
+WAN upload:   cake on wan, 8.3 Mbit/s baseline
+WAN download: cake on ifb4wan, 10 Mbit/s baseline
+```
+
+`sqm-autorate-rust` watches delay to external reflectors and changes those CAKE
+rates when capacity changes. The pinned upstream Rust port omitted the
+documented upper clamp in its rate controller; under light-delay samples it
+could increase to six or seven times the real connection capacity. The local
+one-line fix applies both the minimum and maximum bounds. A four-stream live
+download then held at the configured 10 Mbit/s ceiling with bounded backlog.
+
+Upload and download are not symmetric:
+
+- the HQoS/PPPQ/AQM stack described above manages the hardware-offloaded
+  **WAN-egress upload** path;
+- download shaping uses CAKE on `ifb4wan`;
+- a Wi-Fi-destined hardware-offloaded download has a different WED/WDMA path,
+  which is why its final CAKE traversal remains an explicit acceptance test.
+
+### WED-v1: 5 GHz DMA offload
+
+**Wi-Fi Ethernet Dispatch (WED)** connects the PPE and Ethernet DMA path to the
+PCIe MT7915 5 GHz radio, reducing CPU-owned packet movement.
+
+Two local fixes matter:
+
+- `999-wed-13` corrects the PSE WDMA port calculation used during recovery.
+  The vendor version used a newer-NETSYS formula and silently gated the wrong
+  register on MT7622.
+- `999-wed-14` resets the WED-side WDMA receive index on the busy reset path.
+  Without it, the WED and WDMA ring indices could remain permanently
+  desynchronized after recovery under load.
+
+The integrated MT7615 2.4 GHz radio has its own WPDMA block. It can use PPE
+flow offload, but it has no physical WED connection.
+
+### Recovery watchdog
+
+A separate MT7915 failure remains after the host-side ring fixes: firmware can
+stop responding to a recovery command. The driver cannot reset a firmware core
+which never acknowledges the command.
+
+`files/usr/sbin/mt7915-ser-watchdog` and its procd service watch for the
+driver's terminal failure message and reboot. This is intentionally documented
+as a mitigation, not presented as a firmware fix.
+
+### Smaller fixes and tuning
+
+- Ethernet NAPI poll weight raised from 64 to 256 after a controlled A/B
+  improved upload throughput without a latency regression.
+- MT7622 Ethernet RX ring increased to 1,024 descriptors.
+- A false MDIO timeout race and an MT7531 VLAN deletion FID bug are fixed.
+- The PPE's MIB-cache typo, multicast metadata, queue bounds, flow aging,
+  bridge-offload plumbing, and leak paths are corrected.
+- Seeded xxh32 is used only at measured, suitable flowtable/nftables key sizes;
+  blanket hash replacement was rejected.
+- The 2.4 GHz WMAC interrupt is moved away from the core already carrying the
+  Ethernet and 5 GHz packet load.
+- mt76 skips transmit cleanup's lock and MMIO read when a queue is already
+  empty.
+
+## How traffic moves through the router
 
 ```mermaid
 flowchart LR
-    subgraph WAN["WAN"]
-        ISP[ISP]
-    end
-    subgraph SoC["MT7622 SoC"]
-        GDMA[GDMA/QDMA<br/>16 TX queues]
-        PPE[PPE / HNAT<br/>hardware flow table]
-        WED["WED-v1<br/>(999-wed-13/14 fixed here)"]
-        DSA["MT7531 DSA switch<br/>lan1-4"]
-    end
-    subgraph Wireless["Wireless"]
-        MT7915["MT7915 (5 GHz)<br/>PCIe, WED-attached"]
-        MT7615["MT7615/WMAC (2.4 GHz)<br/>own WPDMA, no WED path"]
-    end
-    subgraph Soft["Software fallback path"]
-        CAKE[CAKE SQM]
-        AQM["qos-06/12/13 AQM<br/>evicts PPE binding on congestion"]
-        AUTORATE["sqm-autorate-rust<br/>tunes CAKE rate to real capacity"]
-        SERWD["mt7915-ser-watchdog<br/>auto-reboots on unrecoverable SER"]
-    end
-
-    ISP <--> GDMA
-    GDMA <--> PPE
-    PPE -- "HW-offloaded flow" --> WED
-    PPE -- "HW-offloaded flow" --> DSA
-    WED <--> MT7915
-    DSA <--> MT7615
-    PPE -. "AQM eviction on trigger" .-> AQM
-    AQM --> CAKE
-    AUTORATE -. "tunes rate" .-> CAKE
-    CAKE -. "re-offload eligible" .-> PPE
+    Client --> FW["nftables / conntrack"]
+    FW -->|"ct mark 7 or 8"| PPE["PPE hardware flow"]
+    PPE -->|"PPPQ queue ID"| HQ["QDMA HQoS"]
+    HQ --> WAN
+    HQ -. "queue counters" .-> AQM
+    AQM -. "evict congesting flow" .-> FLOW["Linux flowtable"]
+    FLOW --> CAKE
+    CAKE --> WAN
+    PPE -->|"5 GHz"| WED["WED-v1 / MT7915"]
+    PPE -->|"2.4 GHz"| WMAC["MT7615 WPDMA"]
 ```
 
-`WED` only ever attaches to the PCIe-connected `MT7915` (5 GHz). The
-SoC-internal `MT7615`/WMAC (2.4 GHz) has its own independent WPDMA ring
-block — confirmed by reading `mt7615/soc.c`/`dma.c` directly — with no
-hardware interconnect to WED/PPE at all. 2.4 GHz clients still get PPE flow
-offload and the software AQM; they just never get WED's zero-CPU DMA bypass,
-and no patch can add that without new silicon.
+For ordinary upload traffic, the short path is:
 
-## Documents
+```text
+LAN/Wi-Fi -> nftables class -> PPE -> PPPQ queue -> HQoS -> WAN
+```
 
-| Doc | Covers |
+When queue 7 is persistently busy:
+
+```text
+AQM trigger -> largest PPE flow evicted -> Linux forwarding -> CAKE -> WAN
+```
+
+The priority queue is deliberately not the AQM target. ICMP and selected
+voice/video DSCP classes avoid bulk queue 7, but the policy does not manufacture
+priority for arbitrary applications.
+
+## Production settings
+
+Source of truth:
+[`package/qdma-shaper/files/qdma-shaper.config`](../package/qdma-shaper/files/qdma-shaper.config)
+
+| Setting | Value | Meaning |
+|---|---:|---|
+| WAN hardware cap | 8,300 kbit/s | Base queue-7 upload ceiling |
+| Scheduler ceiling | 9,500 kbit/s | Room for priority queue 8 |
+| Bulk queue / weight | 7 / 4 | Default offloaded upload |
+| Priority queue / weight | 8 / 12 | ICMP and selected DSCP |
+| AQM poll | 100 ms | Counter sampling interval |
+| AQM byte threshold | automatic | Derived from effective queue rate |
+| AQM batch | 4 flows | Maximum eviction candidates per trigger |
+| AQM grace | 1,000 ms | Minimum time between eviction cycles |
+| AQM hold | 3,000 ms | Time evicted flows remain off PPE |
+| CAKE upload baseline | 8,300 kbit/s | `wan` SQM rate |
+| CAKE download baseline | 10,000 kbit/s | `ifb4wan` SQM rate |
+| Autorate minimum | 60% | Per-direction floor relative to baseline |
+
+These are measured values for one asymmetric connection, not universal E8450
+defaults. For another ISP, tune these files together:
+
+- `package/qdma-shaper/files/qdma-shaper.config`
+- `files/etc/config/sqm`
+- `files/etc/config/sqm-autorate`
+
+Keep the invariants:
+
+- queue 7's bulk cap and CAKE's upload baseline describe the same physical
+  bottleneck;
+- scheduler rate must leave intentional headroom for queue 8;
+- download rate is independent of the QDMA WAN-egress cap;
+- lower AQM timers are not automatically better. A controlled three-repetition
+  load test found 100 ms polling preferable to spending more CPU for an
+  inconsistent latency change;
+- `byte_thresh=0` means derive the threshold from the actual effective queue
+  rate. It does not disable the threshold.
+
+After changing UCI state on a router:
+
+```sh
+service qdma-shaper reload
+service sqm restart
+service sqm-autorate-rust restart
+qdma-shaper status wan
+```
+
+Persist the same values in the source overlay before the next firmware build,
+or `sysupgrade`/configuration replacement can reintroduce drift.
+
+## Operations and troubleshooting
+
+### Quick health check
+
+```sh
+qdma-shaper status wan
+tc -s qdisc show dev wan
+tc -s qdisc show dev ifb4wan
+logread -e qdma-shaper
+logread -e mt7915-ser-watchdog
+```
+
+Expected `qdma-shaper status wan` properties:
+
+- board resolves as `linksys,e8450-ubi`;
+- WAN resolves to hardware queue 7;
+- `flow_offloading=1` and `flow_offloading_hw=1`;
+- the override and effective rate are non-zero;
+- AQM reports enabled on queue 7.
+
+The helper validates the board, DSA port, queue range, write readback, and
+whether any unrelated queue changed. A failed apply rolls queue 7 back instead
+of silently leaving a partial configuration.
+
+### Hardware-offload comparison
+
+From the build workstation:
+
+```sh
+scripts/e8450/ppe-offload-bypass.sh mark 192.168.1.100
+# Reconnect the test application so it creates a new conntrack flow.
+scripts/e8450/ppe-offload-bypass.sh status
+scripts/e8450/ppe-offload-bypass.sh unmark
+```
+
+Replace the address with the test client. This helper has a fixed router target
+of `root@192.168.1.1` and uses `ROUTER_PASS` or `.router-credentials`.
+
+`[HW_OFFLOAD]` in `/proc/net/nf_conntrack` is not sufficient proof that a flow
+is bound in the MediaTek PPE. Use the PPE debugfs entry table and byte counters
+when proving the hardware path.
+
+### Load-test harness
+
+`scripts/e8450/saturating-load-harness.sh` records throughput, latency, and TCP
+retransmits for repeated comparisons. Use more than one repetition and change
+one variable at a time. Household traffic made single-run conclusions
+misleading during earlier work.
+
+### Recovery safety
+
+- Never runtime-load/unload `mt7915e`.
+- Never PCI unbind/rebind the MT7915.
+- Clear stale pstore panic files before rebooting after a crash.
+- A missing 5 GHz network after the watchdog signature is a firmware recovery
+  problem, not evidence that lowering queue timers will help.
+
+## Wi-Fi and radio behavior
+
+### 5 GHz
+
+- MT7915, PCIe, WED-v1 attached.
+- Production deployment uses a non-DFS channel after a local RF survey.
+- Background CAC cannot work: the board has no second 5 GHz PHY to perform it.
+- Rate control and several aggregation/power decisions are firmware-owned and
+  cannot be meaningfully tuned from the host driver.
+
+### 2.4 GHz
+
+- Integrated MT7615/WMAC with its own WPDMA rings.
+- PPE flow offload is available; WED is not.
+- Optional VHT20/QAM-256 support is default-off. It was confirmed to negotiate
+  VHT rates with a compatible client, but no general throughput gain is
+  claimed.
+
+### EEPROM calibration
+
+`scripts/e8450/eeprom.sh` can view, check, apply, and revert the known
+calibration layout. Factory images contain per-device regions. Only apply a
+profile after checking the current unit; never assume another E8450 has
+identical bytes.
+
+Changing the regulatory domain or requested `txpower` is not equivalent to
+changing the EEPROM ceiling. Both regulatory limits and calibrated limits
+apply, and neither authorizes operation above the local legal maximum.
+
+## Backports and upstreaming
+
+### What “backport” means here
+
+A backport takes a specific fix from a newer kernel, mt76 snapshot, mac80211
+snapshot, or MediaTek vendor feed and adapts it to this ROM's older stable
+baseline. It is not a wholesale upgrade and it is not proof that every nearby
+vendor feature belongs on MT7622.
+
+Every candidate is filtered by:
+
+1. **Reachability:** does this board execute the changed code?
+2. **Generation:** is it NETSYSv1/WED-v1 code, not a v2/v3 register lookalike?
+3. **Minimality:** can the bug fix land without importing vendor-only
+   frameworks or debug interfaces?
+4. **Build proof:** does it apply and compile against the pinned source?
+5. **Hardware proof:** is the intended path observable on the E8450?
+
+This process rejected many apparently relevant patches for MT7986/MT7988,
+WED-v2/v3 RRO, multiple PPEs, hardware airtime fairness, and unused PSE
+thresholds.
+
+### Three kinds of local patch
+
+| Kind | Example | Maintenance rule |
+|---|---|---|
+| Upstream backport | later mt76/kernel correctness fix | Remove when the pinned source includes it |
+| Vendor adaptation | WED recovery or PPE/DSA fix | Keep only the minimal mainline-compatible part |
+| Fork-original | NETSYSv1 QDMA AQM and control plane | Keep evidence and split generic fixes from board policy |
+
+An mt76 pin refresh already removed ten local patches after their upstream
+commits became part of the pinned source. The 2.4 GHz QAM-256 path uses the
+driver-opt-in form from an upstream-submitted series rather than a broad vendor
+capability override. These are examples of the desired lifecycle: prefer the
+maintained implementation, then delete the duplicate local patch.
+
+### What has not been claimed
+
+This repository does **not** claim that every local patch has been submitted or
+accepted upstream. Several parts are intentionally poor upstream candidates in
+their present form:
+
+- debugfs experiment controls and register probes;
+- deployment policy containing fixed queues, rates, and conntrack marks;
+- a cross-subsystem AQM controller specialized to NETSYSv1's missing hardware;
+- mitigation for a firmware failure which cannot be fixed in host code.
+
+Before submission, a patch must be separated into:
+
+1. a generic correctness fix with no local policy;
+2. a device capability or driver mechanism;
+3. optional OpenWrt packaging/UCI policy;
+4. test-only diagnostics, which should normally stay out of production
+   interfaces.
+
+Small generic fixes—ring reset correctness, bounds checks, MDIO polling, DSA
+state, and resource lifetime—are the most suitable upstream units. The HQoS
+profile itself belongs in this ROM; upstream kernels should expose mechanisms,
+not one household's rate plan.
+
+### Tracking future upstream changes
+
+When updating Linux, mt76, or mac80211:
+
+1. search each local patch's subject and `Upstream commit:` header;
+2. verify the new source contains the behavior, not only a similar title;
+3. remove the local patch rather than carry an empty/conflicting compatibility
+   layer;
+4. rebuild the affected package and image;
+5. repeat the hardware scenario which originally justified the patch.
+
+Closed roadmaps and audit diaries are intentionally not retained as active
+documentation. Git history preserves them; this handbook records their current
+disposition.
+
+## Patch map
+
+The patch files remain the authoritative description of exact code changes.
+This map is by responsibility rather than chronology.
+
+| Area | Patch range | Purpose |
+|---|---|---|
+| QDMA diagnostics/control | `999-qos-01`–`05`, `11`, `17` | Register, rate, MIB-byte, scheduler, and PSE visibility |
+| QDMA AQM | `999-qos-06`, `08`, `12`–`16`, `18`, `19` | Triggering, SER re-prime, byte accounting, flow selection, teardown, hold/release |
+| Queue classification | `999-qos-07`, `10` | skb mark and DSCP-to-queue handling |
+| PPE/HQoS | `999-ppe-04`, `10`–`17`, `36`, `89`–`94`, `999-zz-*` | PPPQ, flow metadata, bridge offload, hashing, bypass, safety, prefetch |
+| WED recovery | `999-wed-13`, `14` | Correct PSE gating and reset ring indices |
+| Ethernet/DSA | `999-eth-*`, `999-dsa-06` | NAPI, MDIO, RX ring, panic, and VLAN fixes |
+| mt76/mac80211 | package patch directories | Compatibility, empty-queue cleanup, station handling, optional VHT2G |
+| Other | `999-hwrng-*`, `999-xxhash-*` | RNG correctness and selective hashing |
+
+The UCI/userspace side is:
+
+| Path | Role |
 |---|---|
-| [`e8450-ppe-validation.md`](e8450-ppe-validation.md) | PPE/WED hardware validation: the ring-desync fix, the PSE port-mapping fix, the controlled-SER investigation and its auto-reboot mitigation, the mt76 upstream pin bump. |
-| [`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md) | The full QoS/AQM/HQoS investigation: what NETSYSv1's QDMA block can and cannot do in hardware, the `qos-01`..`qos-16` patch series (including the qos-14/15/16 software-only AQM eviction-path review), and the production HQoS+AQM profile. |
-| [`selective-xxhash-plan.md`](selective-xxhash-plan.md) | Historical A53 hash benchmark, selective seeded xxh32 policy, flowtable/nftables conversions (active), bridge-multicast/IPv6-fragment conversions (reverted — confirmed dormant on this router), and the rapidhash evaluation (measured, not adopted). |
-| [`e8450-upstream-backport-roadmap.md`](e8450-upstream-backport-roadmap.md) | **Closed 2026-09-04.** Historical tracking sheet for vendor-SDK/upstream hand-backports through the August mt76 pin bump. See its closure section for final disposition of every item; continuation is `e8450-upstream-roadmap-2026-09.md`. |
-| [`e8450-upstream-roadmap-2026-09.md`](e8450-upstream-roadmap-2026-09.md) | Current vendor-SDK/upstream/Linux roadmap. Done: kernel `6.12.94`→`6.12.103` point-release bump, the mt76 pin-bump evaluation (nothing left to pull for this hardware), the mac80211 `backports-v6.18.26`→`v7.2` audit (one TIM-recalc fix ported, everything else infra-coupled), and the `mtk-openwrt-feeds`/`immortalwrt` audit (Task 8 — see `e8450-mtk-feeds-audit-2026-09.md` for full detail). Still open: WED-20 busy-poll A/B, PS-buffering validation, physical acceptance tests, the deferred kernel-6.18 migration, and the explicitly-excluded/closed list carried forward (MCU firmware limitation, WED-16, cache-line audit, DMA ring depth). |
-| [`wed-v1-opportunities.md`](wed-v1-opportunities.md) | **Closed 2026-09-04.** Survey of WED-v1-specific vendor-SDK opportunities and their disposition (WED-03 hardware-confirmed, WED-16 dropped as moot). Continuation is `e8450-upstream-roadmap-2026-09.md`. |
-| [`WED-breadcrumb-harness-design.md`](WED-breadcrumb-harness-design.md) | Recovered from an earlier, since-abandoned investigation branch (preserved at git tag `archive/wed-ser-investigation-2026-07-12`); the closing writeup on the controlled-SER MCU-death investigation this fork's own testing later independently reproduced. |
-| [`wifi-cpu-and-stability-investigation.md`](wifi-cpu-and-stability-investigation.md) | 2.4GHz MT7615/WMAC CPU-overhead reduction (IRQ affinity, mt76 core DMA fix) and MT7915 5GHz connection-stability findings (DFS channel-52 radar switching, rate-control/AMPDU/roaming-assist candidates investigated and mostly found low-value or unavailable — the DFS channel finding was later acted on directly, see the radio-calibration note below). |
-| [`e8450-download-shaping-handoff.md`](e8450-download-shaping-handoff.md) | Download-direction bufferbloat: the real root cause (an upstream `sqm-autorate-rust` ceiling bug, fixed) versus the still-open architectural question (does a real **Wi-Fi** client's hardware-offloaded download bypass CAKE — the wired-client case was closed 2026-09-06 via the `ct mark 0x99` bypass, CAKE confirmed actively shaping it), with the register-level FOE-bitfield evidence and the PSE closure that ruled out a hardware-shaping alternative. |
-| [`e8450-mtk-feeds-audit-2026-09.md`](e8450-mtk-feeds-audit-2026-09.md) | Audit of `mediatek/mtk-openwrt-feeds` and `immortalwrt/immortalwrt` for anything new and useful not already in this tree, all seven findings now with a final disposition: three low-risk PPE/ETH/DSA correctness fixes (flashed, no dedicated functional test yet), the PPE conntrack-mark (`ct mark 0x99`) hardware-offload bypass (flashed, live-tested, and — 2026-09-06 — its AQM/CAKE interaction directly verified with no regression), `613-netfilter-optional-tcp-window-check` (decided not adopted, 2026-09-06, no live evidence of the problem it targets), NAPI poll weight 256 (A/B tested, adopted), and the watchdog timeout clamp (dormant under current config, no action needed). |
-| [`e8450-aqm-v2-design.md`](e8450-aqm-v2-design.md) | AQM v2: closes the gap where evicted flows' re-offload timing was governed by nf_flowtable's generic 30s idle GC instead of the AQM itself. **Shipped and closed out 2026-09-06** (`999-ppe-94`/`999-qos-18`/`999-qos-19`, implemented, build-verified, flashed, hardware-tested): syncs `flow_offload_teardown()` on eviction, a congestion-aware ct-mark hold/release table, and a defensive PPE queue-range clamp. `hold_ms=3000` **adopted as the production default** (`qdma-shaper.config`) after progressively larger A/Bs (n=1 → n=4 → n=8, single- then multi-stream) found no statistically distinguishable throughput/latency/retransmit cost and flatter/lower worst-case latency; includes a survey of every mainline hardware-offload driver for eviction precedent (none exists), a real build-time discovery (`symbol_get()` for a built-in-vs-module link failure), and a documented negative-methodology result (`ppe0/entries` is the wrong signal for hold duration). |
+| `package/qdma-shaper/` | Board-safe QDMA, AQM, and HQoS service |
+| `package/sqm-autorate-rust/` | Package metadata and reflector list |
+| `files/etc/config/sqm*` | CAKE and autorate production configuration |
+| `files/etc/nftables.d/30-queue-mark.nft` | WMM/DSCP translation and q7/q8 policy |
+| `files/etc/init.d/mt7915-ser-watchdog` | Firmware-failure mitigation |
+| `scripts/e8450/` | EEPROM, load-test, and PPE comparison tools |
 
-## Repo-specific notes for anyone building this
+## Known limits and open work
 
-- `configs/e8450-ubi.config` is the seed defconfig for this board.
-- `files/usr/sbin/mt7915-ser-watchdog` + `files/etc/init.d/mt7915-ser-watchdog`
-  auto-reboot on the MT7915 controlled-SER MCU-death failure (see
-  `e8450-ppe-validation.md`'s controlled-SER section) — no fix exists at the
-  driver level, so this bounds the outage instead. Self-enabling via
-  `files/etc/rc.d/S99mt7915-ser-watchdog`.
-- Both radio eeproms were raised from their stock calibration ceiling
-  to the legal 30 dBm maximum, and the 5/2.4 GHz channels moved off
-  their most contested channels (including off DFS channel 52). Fully
-  reversible: pristine backup + one-command tool at
-  `scripts/e8450/eeprom.sh`, full field map and revert procedure at
-  `.recall/router-probes/2026-09-04-factory-dump/EEPROM-MAP.md`. If you
-  build and flash this tree for a *different physical unit*, do not
-  assume its factory calibration matches — dump and check with
-  `eeprom.sh check` before assuming the same bytes apply; per-device
-  calibration regions are unit-specific and flagged in the map.
-- `files/usr/sbin/sqm-autorate-rust` is a hand-built binary sidecar, not an
-  opkg-managed package — `CONFIG_PACKAGE_sqm-autorate-rust` is deliberately
-  left unset since a normal `make` of it still hits the full from-source
-  Rust bootstrap. See `netsys-qos-port-investigation.md` §31.4 for the
-  actual (fast) build method if it ever needs rebuilding.
-- `files/` is the `/etc` overlay baked into the image. `files/etc/shadow`
-  and `files/etc/config/wireless`'s real key are intentionally excluded via
-  `.gitignore` — set your own root password and Wi-Fi key before flashing.
-- `flash.sh` reads router credentials from `$ROUTER_PASS` or a local,
-  gitignored `.router-credentials` file (copy `.router-credentials.example`
-  and fill it in) — never hardcode a real password in a tracked file.
-- Local-only kernel patches carry a commit message explaining *why* they
-  exist and, where applicable, an `Upstream commit:` line if they're a
-  hand-backport of something already merged upstream (check that line
-  before assuming a patch is still needed — see the roadmap doc).
+### Closed hardware dead ends
+
+Do not reopen these without new register-level evidence:
+
+- no usable second QDMA scheduler on MT7622;
+- no hardware airtime fairness;
+- no enforcing `HRED2`/flow-control threshold path;
+- no initialized PSE per-port threshold mechanism;
+- no WED path for the integrated 2.4 GHz radio;
+- no background DFS CAC with one 5 GHz PHY.
+
+The shared MediaTek headers expose some of these register names because newer
+SoCs implement them. Register presence is not capability proof. Live readback
+and differentiated-load tests showed them inert on this silicon.
+
+### Current open work
+
+- Verify with a physical Wi-Fi client whether a genuinely PPE-bound download
+  traverses `ifb4wan`/CAKE; the wired-client control is complete.
+- A/B the vendor WED busy-poll timeout reduction before deciding whether to
+  carry it.
+- Validate power-save buffering and remaining physical recovery cases.
+- Treat a Linux 6.18 move as a separate migration, not a pile of opportunistic
+  patch changes.
+
+### Evidence log
+
+[`netsys-qos-port-investigation.md`](netsys-qos-port-investigation.md) is kept
+as the detailed chronological QoS/AQM lab record, including failed hypotheses,
+register experiments, measurements, and the latest timer re-check. It is
+evidence, not the recommended entry point; later numbered sections supersede
+some earlier hypotheses.
+
+`vendor-reference/` retains the small vendor patch samples needed to explain
+specific ports. It is reference material, not a patch queue applied directly
+to the build.
+
+## Building and changing the ROM
+
+### Reproducible starting point
+
+```sh
+./scripts/feeds update -a
+./scripts/feeds install -a
+cp configs/e8450-ubi.config .config
+make defconfig
+make -j"$(nproc)"
+```
+
+The seed config, local feeds, patch directories, and `files/` overlay together
+define the image. A successful kernel package build alone is not a flashable
+deliverable; build the final sysupgrade image.
+
+### Change discipline
+
+- Change one packet-path variable at a time.
+- Keep configuration changes and the source overlay synchronized.
+- Test default-off experiments as default-off.
+- For a bug fix, reproduce the original failure path and verify it no longer
+  occurs.
+- For performance work, record throughput, latency distribution, loss/ECN,
+  retransmits, CPU load, and the relevant PPE/QDMA counters.
+- Do not infer hardware binding from Linux flowtable state alone.
+- Delete experiment-only patches and controls after a negative result unless
+  they are the minimal evidence needed to prevent the same dead end.
+
+### Flashing hazards
+
+`../flash.sh` targets `root@192.168.1.1` and retains configuration with
+`sysupgrade -c`. Review the script and deployment overlay before use. The
+repository's included firewall, addresses, rates, and radio choices are not a
+generic release profile.
+
+Two board-specific rules are non-negotiable:
+
+1. no runtime `mt7915e` reload or PCI rebind;
+2. no reboot after a panic until stale `/sys/fs/pstore/dmesg-*` files have been
+   handled.

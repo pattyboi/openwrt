@@ -2933,10 +2933,10 @@ change, not an AQM change, and out of scope here.
 
 Prompted by "revert dormant xxhash changes, then a new clean build, flash
 and test." The three AQM patches from §32 (and the mt76 `902` empty-queue
-fix, and the `files/etc/rc.local` IRQ-affinity rebalance from
-`docs/wifi-cpu-and-stability-investigation.md`) were built into a real
-image and flashed to the live E8450, closing the "not yet
-hardware-validated" gap §32.5 left open.
+fix, and the `files/etc/rc.local` IRQ-affinity rebalance summarized in
+the Wi-Fi section of `docs/README.md`) were built into a real image and flashed
+to the live E8450, closing the "not yet hardware-validated" gap §32.5
+left open.
 
 ### 33.1 Build and flash
 
@@ -2991,8 +2991,8 @@ alive and triggering/evicting within the first two minutes of uptime
 consistent with pre-flash behavior). 2.4GHz reconnected 9 real stations
 within the first minute; 5GHz completed its mandatory 60-second DFS CAC
 (`DFS-CAC-COMPLETED success=1 ... radar_detected=0`) and came up clean -
-a live, first-hand confirmation of the DFS-on-channel-52 mechanism
-documented in `docs/wifi-cpu-and-stability-investigation.md`.
+a live, first-hand confirmation of the DFS-on-channel-52 mechanism now
+summarized in `docs/README.md`.
 
 ### 33.4 AQM saturating-load test, compared against the documented baseline
 
@@ -3026,10 +3026,9 @@ introduced no functional regression. The AQM counters advancing by 12
 triggers/16 evictions during the test window confirm the eviction path
 was genuinely exercised under this load, not coincidentally idle.
 
-This closes §32.5's "not yet hardware-validated" gap for qos-14/15/16 and
-the mt76 `902` patch, and closes
-`docs/wifi-cpu-and-stability-investigation.md`'s equivalent gap for the
-IRQ-affinity rebalance. Not yet measured: a dedicated CPU-time A/B
+This closes §32.5's "not yet hardware-validated" gap for qos-14/15/16,
+the mt76 `902` patch, and the IRQ-affinity rebalance. Not yet measured:
+a dedicated CPU-time A/B
 (`mpstat`/`perf`) isolating the `ppe_lock`-contention savings specifically
 - the latency test above proves no regression and confirms the AQM still
 works correctly, but quantifying *how much* CPU qos-15 and `902` save
@@ -3646,7 +3645,92 @@ Fixed with a one-line, build-verified, live-validated patch;
 `files/usr/sbin/sqm-autorate-rust` now ships the clamped binary.
 
 
+## 39. `poll_ms` idle/light-load CPU-cost re-check, and a same-session correction (2026-09-06)
 
+Prompted by "can you improve qdma's leaky bucket," with live SSH access
+to the router provided for the first time in this session (prior
+entries all ran from a separate workstation driving traffic *through*
+the router). Intent was to finally attempt §34 item 1 (CPU-time
+profiling of the AQM poll cost, explicitly skipped when `grace_ms` was
+tuned in §35). That intent was not fully achievable and one real
+mistake happened along the way; both are recorded here rather than
+silently corrected, per this document's own convention (see SS35.1's
+methodology-mistake writeup for precedent).
 
+### 39.1 What was actually measurable this session
 
+No `perf`/`mpstat` binary exists on this image (confirmed:
+`which perf mpstat` empty) and `opkg` itself is absent (this is the
+minimal/staging build, no package manager) - real profiling per §34
+item 1 is not possible without adding tooling to the image first. There
+was also no second LAN host available from this session to reproduce
+§33/§35's controlled `iperf3`+`ping` saturating-load harness (SSH
+reached only the router itself; locally-originated traffic never gets
+PPE-offloaded, so it can't exercise `mtk_qdma_aqm_work()`'s eviction
+path the way a real forwarded flow does). At the time of testing
+(~01:47-02:00, real household load, 0-8 `BND` offloaded flows observed,
+well below saturating) the only available instrument was `/proc/stat`
+CPU-jiffy deltas across fixed 60 s windows - the same "coarse proxy, not
+a profiling result" caveat SS35.3 already applied to `/proc/loadavg`.
+
+### 39.2 Data gathered
+
+Live-reconfigured `poll_ms` via the `qdma_aqm` debugfs node (each value
+held 60 s, real light household load, not synthetic) at 100 (baseline),
+50, 25, and - new, never tried before since it's the hard floor the
+kernel write-validator enforces (`poll_ms < 10` rejected) - **10 ms, 10x
+the production default**:
+
+| `poll_ms` | user | sys | idle | irq | softirq | triggers | unbinds |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 195 | 494 | 10564 | 214 | 137 | 1 | 1 |
+| 50 | 264 | 561 | 10430 | 214 | 151 | 5 | 8 |
+| 25 | 229 | 488 | 10542 | 213 | 141 | 1 | 2 |
+| 10 | 240 | 524 | 10469 | 210 | 140 | 2 | 4 |
+
+(jiffies, HZ=100, summed both CPUs, 60 s window each). No dmesg
+errors/oops/AXI-lock/SER lines at any setting, including the untested
+10 ms floor sustained for 60 s; `ping -c4 8.8.8.8` after reverting
+averaged 21.8 ms, in line with every other measurement in this
+document. `softirq`/`system` deltas do not move monotonically with
+`poll_ms` and track `unbind` count (real, variable, uncontrolled
+household load) at least as well as poll frequency - consistent with
+SS35.3's own reading that the fixed per-tick cost (one MIB register read
+plus a lock) is cheap, but this is not a controlled A/B and does not
+supersede SS35.3/35.4's saturating-load result.
+
+### 39.3 The mistake, and the correction
+
+Reading only SS34 (which frames `poll_ms` as an open lever) and not yet
+having reached SS35.4's actual recorded decision, this session applied
+`poll_ms=25` to the **live production router** via `uci set
+qdma-shaper.queue7.poll_ms=25` + `service qdma-shaper reload`, reasoning
+from 39.2's CPU-safety data alone. That was wrong: SS35.4 already ran
+the real, decisive experiment - a controlled saturating-load `iperf3`+
+`ping` A/B, 3 reps - and explicitly declined to lower `poll_ms` because
+the latency effect was "too small and inconsistent (worse p99 at the
+most aggressive setting) to justify doubling or quadrupling the AQM's
+polling rate." Idle-load CPU-safety data does not establish a latency
+benefit and does not meet this document's own bar for overriding a
+prior decisive result. Caught within the same session (before yielding)
+by reading SS35.4 properly; reverted immediately: `uci set
+qdma-shaper.queue7.poll_ms=100` + `service qdma-shaper reload`,
+confirmed live (`poll_ms=100 grace_ms=1000 hold_ms=3000`) matching
+`package/qdma-shaper/files/qdma-shaper.config` exactly - no repo file
+was ever edited, so no source-side revert was needed.
+
+### 39.4 Net status
+
+No production change. §35.4's decision (`poll_ms=100`, `grace_ms=1000`)
+stands, now with one additional data point: the 10 ms floor is
+hardware-safe (no crash/lock/oops) even though it was never adopted.
+§34 item 1 (real CPU-time profiling under saturating load) remains
+genuinely open - it needs `perf`/`mpstat` (not present in this image)
+and a second traffic-generating LAN host (not available from this
+session), neither of which SSH-to-the-router-alone can substitute for.
+§34 item 4 (two-client fairness) remains open for the same
+second-host-availability reason. Every other QDMA/AQM tunable in this
+tree (`grace_ms=1000`, `hold_ms=3000`, `batch=4`, queue caps/weights)
+was reconfirmed live, unchanged, and matching its documented,
+hardware-tested value - no drift found.
 

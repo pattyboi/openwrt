@@ -11,7 +11,7 @@ with a multicast packet, resulting in abnormal operation of the CDMA.
 Verified live and unpatched in this tree before this port: every home
 LAN generates mDNS/SSDP/IGMP multicast traffic that traverses this
 exact FOE-entry-prepare path under this fork's bridged PPE offload
-(999-ppe-90). See docs/e8450-mtk-feeds-audit-2026-09.md S1.
+(999-ppe-90). See docs/README.md's patch map.
 
 Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
 ---

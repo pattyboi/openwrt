@@ -10,11 +10,10 @@ already cover) - never previously instrumented by this tree's QDMA
 debugfs work (qos-01..16).
 
 Read-only: no register writes, no queue changes, no WED operations.
-Intended to test the port-pairing hypothesis in
-docs/e8450-download-shaping-handoff.md against live register readback
-before any write is trusted, per this tree's own gate discipline
-(SS13 Gate A, SS28 dual-scheduler verification). Disposable diagnostic,
-like qos-01.
+Used to test the WLAN-egress port-pairing hypothesis against live
+register readback before trusting any write. The result and the closed
+PSE hardware dead end are summarized in docs/README.md; the detailed
+chronology remains in docs/netsys-qos-port-investigation.md.
 
 ---
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c

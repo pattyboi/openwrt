@@ -22,13 +22,10 @@ from being hardware-offloaded by the PPE.
 Users can mark 0x99 to conntrack entry to bypass PPE binding using
 `nft ... ct mark set 0x99`. No chip-version gate.
 
-Directly relevant to the open question in
-docs/e8450-download-shaping-handoff.md (does a WiFi client's
-PPE-hardware-offloaded download bypass CAKE shaping): marking a known
-flow's conntrack entry with 0x99 keeps it off PPE hardware offload
-permanently, giving a declarative test/mitigation instead of relying
-solely on the reactive occupancy-driven eviction in 999-qos-06. See
-docs/e8450-mtk-feeds-audit-2026-09.md S4.
+This provides the controlled comparison described in docs/README.md:
+marking a known flow's conntrack entry with 0x99 keeps it off PPE
+hardware offload, giving a declarative test or mitigation instead of
+relying solely on the reactive occupancy-driven eviction in 999-qos-06.
 
 Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
 ---

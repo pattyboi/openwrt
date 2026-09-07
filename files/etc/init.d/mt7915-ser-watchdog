@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # Auto-recovery for the WED-v1 MT7915 full-reset MCU-death failure.
-# See /usr/sbin/mt7915-ser-watchdog and docs/e8450-ppe-validation.md
-# (controlled-SER section) for the failure this works around.
+# See /usr/sbin/mt7915-ser-watchdog and docs/README.md's recovery
+# watchdog section for the failure this works around.
 
 START=99
 USE_PROCD=1

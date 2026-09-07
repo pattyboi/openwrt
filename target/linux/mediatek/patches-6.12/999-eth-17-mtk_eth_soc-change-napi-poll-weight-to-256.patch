@@ -14,10 +14,9 @@ Vendor rationale, verbatim: "This parameter will strongly affect the
 peak throughput of the SW path." Applies unmodified to NETSYSv1 -
 mtk_eth_soc.c has no chip-version gate around NAPI registration.
 
-Not yet hardware-validated on this board; see
-docs/e8450-mtk-feeds-audit-2026-09.md ("worth a controlled A/B, not a
-blind port") for the tradeoff against this fork's own latency-focused
-AQM work (grace_ms tuned to 1000ms) before treating this as adopted.
+Hardware A/B tested on this E8450: upload throughput improved by 36%
+without a measured latency regression, so the change is adopted. See
+docs/README.md.
 
 Signed-off-by: MediaTek vendor feed <noreply@example.invalid>
 ---
