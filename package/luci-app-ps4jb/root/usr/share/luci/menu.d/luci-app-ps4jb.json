@@ -1,0 +1,13 @@
+{
+  "admin/services/ps4jb": {
+    "title": "PS4 jailbreak",
+    "order": 60,
+    "action": {
+      "type": "view",
+      "path": "ps4jb/binload"
+    },
+    "depends": {
+      "acl": [ "luci-app-ps4jb" ]
+    }
+  }
+}

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Give the PS4 jailbreak host its own uhttpd instance on :8000, so it never shares a
+# docroot or a CGI prefix with LuCI's instance on :80.
+#
+# OpenWrt runs every /etc/uci-defaults script at package install and deletes it on success,
+# so this is the install-time step.  It is written to be idempotent: run it twice and the
+# section is the same as after the first run.
+
+[ -x /usr/sbin/uhttpd ] || exit 0
+
+# `uci set <config>.<name>=<type>` creates the named section; `uci add` would create an
+# anonymous one (@uhttpd[0]) that cannot be addressed by name afterwards.
+uci -q get uhttpd.ps4jb >/dev/null 2>&1 || uci set uhttpd.ps4jb='uhttpd'
+
+uci set uhttpd.ps4jb.enabled='1'
+uci set uhttpd.ps4jb.home='/www/ps4jb'
+uci set uhttpd.ps4jb.listen_http='0.0.0.0:8000'
+uci set uhttpd.ps4jb.cgi_prefix='/t'
+uci set uhttpd.ps4jb.index_page='index.html'
+uci set uhttpd.ps4jb.no_symlinks='1'
+uci set uhttpd.ps4jb.no_dirlists='1'
+uci set uhttpd.ps4jb.max_requests='3'
+uci commit uhttpd
+
+/etc/init.d/uhttpd reload >/dev/null 2>&1
+
+exit 0

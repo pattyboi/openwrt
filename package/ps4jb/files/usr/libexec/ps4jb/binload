@@ -1,0 +1,95 @@
+#!/bin/sh
+# binload -- hand a payload to a console's GoldHEN PayLoader.
+#
+#     binload <host> <port> <payload>
+#
+# GoldHEN runs an HTTP payload server: POST the payload as the body and it loads it;
+# **200 means loaded**.  The request is built by hand and written through `nc` rather
+# than with the router's `wget`, because that wget sends the body *chunked* (measured
+# 2026-09-23, `Transfer-Encoding: chunked` with `Content-Length: 0`) and a payload
+# loader is not obliged to understand chunked.
+#
+# **Never probe the port with a bare connect.**  Measured on GoldHEN 2.4b18.11
+# (2026-09-20): a connect-and-close took the PayLoader listener down -- 9090 went from
+# open to refused between one probe and the next, while FTP and the klog stayed up.  So
+# this script only ever speaks the real protocol, and its own answer is the probe.
+#
+# Prints one JSON object on stdout and exits 0 only when the console answered 200.
+# The reply is bounded at 20 s: the payload is written either way, so a silence is
+# reported as "sent, no reply", not as a failure to send.
+
+set -u
+
+host=${1:-}
+port=${2:-}
+payload=${3:-}
+
+if [ -z "$host" ] || [ -z "$port" ] || [ -z "$payload" ]; then
+	echo '{"ok":false,"message":"usage: binload <host> <port> <payload>"}'
+	exit 2
+fi
+if [ ! -f "$payload" ]; then
+	printf '{"ok":false,"message":"no such payload: %s"}\n' "$payload"
+	exit 2
+fi
+
+len=$(wc -c < "$payload" 2>/dev/null || echo 0)
+if [ "$len" -le 0 ]; then
+	echo '{"ok":false,"message":"payload is empty or unreadable"}'
+	exit 2
+fi
+
+out="/tmp/ps4jb-binload.$$"
+{
+	printf 'POST / HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/octet-stream\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' \
+		"$host" "$port" "$len"
+	cat "$payload"
+} 2>/dev/null | nc "$host" "$port" >"$out" 2>&1 &
+ncp=$!
+
+# The watchdog stops waiting as soon as the reply's first bytes land -- a loader that answers
+# and then holds the connection open must not cost the caller 20 seconds -- and never waits
+# longer than 20 s.  The payload has been written either way, so a silence is reported as
+# "sent, no reply", not as a failure to send.
+(
+	i=0
+	while [ "$i" -lt 20 ]; do
+		[ -s "$out" ] && break
+		sleep 1
+		i=$((i + 1))
+	done
+	kill "$ncp" 2>/dev/null
+) 2>/dev/null &
+wd=$!
+
+wait "$ncp"
+rc=$?
+kill "$wd" 2>/dev/null
+
+status=$(head -n 1 "$out" 2>/dev/null | tr -d '\r"' | tr -d '\\')
+first=$(head -c 200 "$out" 2>/dev/null | tr -d '\r\n"' | tr -d '\\')
+rm -f "$out"
+
+if [ -z "$status" ]; then
+	if [ "$rc" -ne 0 ]; then
+		printf '{"ok":false,"bytes":%s,"message":"no reply from %s:%s (%s) -- is GoldHEN running?"}\n' \
+			"$len" "$host" "$port" "$first"
+	else
+		printf '{"ok":false,"bytes":%s,"message":"sent %s bytes to %s:%s, no reply within 20s"}\n' \
+			"$len" "$len" "$host" "$port"
+	fi
+	exit 1
+fi
+
+case "$status" in
+*" 200"*)
+	printf '{"ok":true,"bytes":%s,"status":"%s","message":"GoldHEN answered 200 -- payload loaded"}\n' \
+		"$len" "$status"
+	exit 0
+	;;
+*)
+	printf '{"ok":false,"bytes":%s,"status":"%s","message":"no 200 from %s:%s -- the payload did not load"}\n' \
+		"$len" "$status" "$host" "$port"
+	exit 1
+	;;
+esac
