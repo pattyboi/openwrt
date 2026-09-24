@@ -1,0 +1,25 @@
+#!/bin/sh
+
+. /lib/functions/system.sh
+
+case "$(board_name)" in
+linksys,e8450-ubi)
+	# sysupgrade -c backs up and restores any /etc/config file that differs
+	# from what the *previously running* image shipped (overlay-upper diff,
+	# not a full-file compare) — so if the live router has ever had a local
+	# UCI edit to dhcp/network since its last flash, that restored copy
+	# would silently reintroduce dnsmasq on :53 and the old Pi/Cloudflare
+	# dns list, fighting unbound for the port. Force the DNS-cutover state
+	# unconditionally on first boot of this image, independent of whatever
+	# sysupgrade preserved.
+	uci -q set dhcp.@dnsmasq[0].port='1053'
+	uci -q set dhcp.@dnsmasq[0].noresolv='1'
+	uci -q delete dhcp.@dnsmasq[0].resolvfile
+	uci -q delete network.wan.dns
+	uci -q delete network.wan6.dns
+	uci -q commit dhcp
+	uci -q commit network
+	;;
+esac
+
+exit 0

@@ -26,9 +26,10 @@ config interface 'wan'
 	option device 'wan'
 	option proto 'dhcp'
 	option multipath 'off'
+	# unbound (files/etc/config/unbound) is the router's only DNS path now
+	# (DoT forward-zone to Cloudflare) — no resolv.conf.auto consumer left,
+	# so peerdns stays off with no dns list to populate it.
 	option peerdns '0'
-	list dns '192.168.1.6'
-	list dns '1.1.1.1'
 
 config interface 'wan6'
 	option device 'wan'
@@ -38,5 +39,3 @@ config interface 'wan6'
 	option norelease '1'
 	option multipath 'off'
 	option peerdns '0'
-	list dns '192.168.1.6'
-	list dns '1.1.1.1'

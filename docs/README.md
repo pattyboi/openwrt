@@ -417,11 +417,13 @@ misleading during earlier work.
 
 ### Recovery safety
 
-- Never runtime-load/unload `mt7915e`.
-- Never PCI unbind/rebind the MT7915.
-- Clear stale pstore panic files before rebooting after a crash.
-- A missing 5 GHz network after the watchdog signature is a firmware recovery
-  problem, not evidence that lowering queue timers will help.
+The hard rules — never runtime-reload/unload `mt7915e` or PCI unbind/rebind
+the MT7915, and always clear stale pstore panic files before rebooting after
+a crash — are in the project [`README`'s Safety rules](../README.md#safety-rules).
+They apply here without exception.
+
+A missing 5 GHz network after the watchdog signature is a firmware recovery
+problem, not evidence that lowering queue timers will help.
 
 ## Wi-Fi and radio behavior
 
@@ -676,8 +678,5 @@ different test sessions, and inconclusive results visible.
 repository's included firewall, addresses, rates, and radio choices are not a
 generic release profile.
 
-Two board-specific rules are non-negotiable:
-
-1. no runtime `mt7915e` reload or PCI rebind;
-2. no reboot after a panic until stale `/sys/fs/pstore/dmesg-*` files have been
-   handled.
+The project [`README`'s Safety rules](../README.md#safety-rules) are
+non-negotiable during and after every flash.

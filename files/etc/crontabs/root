@@ -1,0 +1,4 @@
+# Refresh the adblock feed daily. `reload` forces a fresh fetch (ETag
+# check); `start`/`restart` would only restore existing backups. Matches
+# the Pi's kresd blocklist refresh schedule (pi-tuning/dns).
+17 3 * * * /etc/init.d/adblock reload

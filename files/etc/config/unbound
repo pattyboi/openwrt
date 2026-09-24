@@ -1,0 +1,48 @@
+
+# "Parallel dnsmasq" topology: unbound owns port 53 on every LAN-facing
+# interface (validating, blocking, DoT-forwarding); dnsmasq keeps DHCP and
+# moves its own DNS listener to 1053 for local *.lan hostname lookups only
+# (files/etc/config/dhcp). See docs/README.md for the full design writeup.
+
+config unbound
+	option add_extra_dns '0'
+	option add_local_fqdn '1'
+	option add_wan_fqdn '0'
+	option dhcp_link 'dnsmasq'
+	option domain 'lan'
+	option domain_type 'static'
+	# Matches dnsmasq's existing ednspacket_max (files/etc/config/dhcp).
+	option edns_size '1232'
+	option hide_binddata '1'
+	list iface_lan 'lan'
+	option iface_wan 'wan'
+	option interface_auto '1'
+	option listen_port '53'
+	option localservice '1'
+	option manual_conf '0'
+	option num_threads '2'
+	option protocol 'mixed'
+	option query_minimize '1'
+	option rebind_protection '1'
+	option rebind_localhost '1'
+	# Conservative starting point pending a live RAM measurement on the
+	# router; the board also carries PPE/WED/hostapd/luci concurrently,
+	# unlike a dedicated DNS appliance. Revisit once headroom is confirmed.
+	option resource 'small'
+	option ttl_min '120'
+	option validator '1'
+	option validator_ntp '1'
+	option verbosity '1'
+
+# Strict DoT to Cloudflare, no plaintext fallback — same upstream and the
+# same no-downgrade posture as the Pi's kresd.conf (pi-tuning/dns).
+config zone
+	option enabled '1'
+	option fallback '0'
+	option tls_upstream '1'
+	option tls_index 'cloudflare-dns.com'
+	option tls_port '853'
+	list server '1.1.1.1'
+	list server '1.0.0.1'
+	list zone_name '.'
+	option zone_type 'forward_zone'

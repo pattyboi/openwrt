@@ -10,11 +10,16 @@ config dnsmasq
 	option authoritative '1'
 	option readethers '1'
 	option leasefile '/tmp/dhcp.leases'
-	option resolvfile '/tmp/resolv.conf.d/resolv.conf.auto'
 	option localservice '1'
 	option ednspacket_max '1232'
 	list rebind_domain 'home'
 	option strictorder '1'
+	# DNS moved to unbound (files/etc/config/unbound). dnsmasq keeps DHCP
+	# and answers *.lan hostname lookups on a loopback-only port that
+	# unbound's dhcp_link forwards to; it no longer resolves anything
+	# itself, so resolvfile/upstream forwarding is off.
+	option port '1053'
+	option noresolv '1'
 
 config dhcp 'lan'
 	option interface 'lan'
