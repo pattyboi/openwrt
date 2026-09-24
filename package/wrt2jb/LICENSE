@@ -1,0 +1,42 @@
+MIT License — scope
+
+This license covers the original glue code in this package: the OpenWrt
+package Makefile, the uhttpd/uci-defaults wiring, usr/libexec/wrt2jb/binload,
+and www/wrt2jb/t (the beacon CGI / status page).
+
+It does NOT cover, and does not grant any rights to:
+
+  - the RAW GAME browser exploit chain (index.html, jb.html, jb.js, core.js,
+    mem.js, int64.js, rpc_worker.js, ps4_offsets.js, logo_raw.png, patches/) —
+    fetched at build time from raw13g/raw13g.github.io, upstream ships no
+    license of its own;
+  - the bundled goldhen.bin / payload2.bin — GoldHEN is closed-source,
+    binary-only, distributed by its author with no license file;
+  - ps4debug-NG (fetched at build time from a pinned, hash-verified GitHub
+    release, never vendored into this repository) — licensed GPL-3.0 by its
+    own authors; see https://github.com/Pharaoh2k/ps4debug-NG.
+
+See README.md § Credits & attribution for the full list. Redistribute those
+components under their own upstream terms, not this one.
+
+---
+
+Copyright (c) 2026 pattyboi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -1,0 +1,17 @@
+{
+  "luci-app-wrt2jb": {
+    "description": "Grant access to the PS4 jailbreak host control (status and binload)",
+    "read": {
+      "ubus": {
+        "luci.wrt2jb": [ "status" ]
+      },
+      "uci": [ "wrt2jb" ]
+    },
+    "write": {
+      "ubus": {
+        "luci.wrt2jb": [ "binload", "save_config" ]
+      },
+      "uci": [ "wrt2jb" ]
+    }
+  }
+}

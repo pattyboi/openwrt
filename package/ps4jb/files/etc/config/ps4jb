@@ -1,3 +1,0 @@
-config ps4jb 'main'
-	option console_ip '192.168.1.185'
-	option binloader_port '9090'

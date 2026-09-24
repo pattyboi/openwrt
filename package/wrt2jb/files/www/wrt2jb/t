@@ -1,0 +1,114 @@
+#!/bin/sh
+# /www/wrt2jb/t -- the RAW GAME chain's beacon endpoint, and a status page.
+#
+# The chain POSTs its stage log here ("PS4-JB&tag=...&detail=...") about 240 times per run
+# and ignores the reply, so a POST answers 204 and appends one row to $LOG.  GET /t renders
+# what that log says about the last run, so "did it work?" is a question about a page rather
+# than about the console's screen.
+#
+# uhttpd runs this file because the wrt2jb instance sets `cgi_prefix '/t'`.  The log lives in
+# RAM (/tmp): it survives a run, not a reboot -- one NDJSON row per beacon, so a log copied
+# off the router is a run record.
+
+LOG_DIR=/tmp/wrt2jb
+LOG="$LOG_DIR/http.jsonl"
+MANIFEST=/www/wrt2jb/MANIFEST
+MAX_BODY=65536
+
+mkdir -p "$LOG_DIR" 2>/dev/null
+
+header() {
+	printf 'Status: %s\r\nContent-Type: %s\r\nCache-Control: no-store\r\n\r\n' "$1" "$2"
+}
+
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	n="${CONTENT_LENGTH:-0}"
+	case "$n" in ''|*[!0-9]*) n=0 ;; esac
+	[ "$n" -gt "$MAX_BODY" ] && n=$MAX_BODY
+	body=''
+	[ "$n" -gt 0 ] && body="$(head -c "$n" 2>/dev/null | tr -d '\r\n"\\')"
+	# The body is URL-encoded by the chain, so it carries no quote or backslash of its own;
+	# tr is the belt to that brace.  The row is written whole, so a reader never sees half.
+	printf '{"at":"%s","path":"/t","client":"%s","ua":"%s","status":204,"body":"%s"}\n' \
+		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${REMOTE_ADDR:-}" \
+		"$(printf '%s' "${HTTP_USER_AGENT:-}" | tr -d '"\\')" "$body" >>"$LOG" 2>/dev/null
+	header '204 No Content' 'text/plain'
+	exit 0
+fi
+
+# The raw log, for a tool that wants the rows rather than a page: GET /t?log=1
+case "$REQUEST_METHOD:$QUERY_STRING" in
+GET:*log*)
+	header '200 OK' 'application/x-ndjson'
+	cat "$LOG" 2>/dev/null
+	exit 0
+	;;
+esac
+
+version=$(sed -n 's/^package //p' "$MANIFEST" 2>/dev/null)
+revision=$(sed -n 's/^source_revision //p' "$MANIFEST" 2>/dev/null)
+goldhen=$(sed -n 's/^sha256 \([0-9a-f]\{16\}\)[0-9a-f]* goldhen.bin$/\1/p' "$MANIFEST" 2>/dev/null)
+
+header '200 OK' 'text/html; charset=utf-8'
+
+awk -v ver="$version" -v rev="$revision" -v gh="$goldhen" -v logpath="$LOG" '
+function hexv(c,   i) { i = index("0123456789abcdef", tolower(c)); return (i ? i - 1 : -1) }
+function dec(s,   out, i, c, h) {
+	out = ""
+	for (i = 1; i <= length(s); i++) {
+		c = substr(s, i, 1)
+		if (c == "%" && i + 2 <= length(s)) {
+			h = hexv(substr(s, i + 1, 1)) * 16 + hexv(substr(s, i + 2, 1))
+			if (h >= 0) { out = out sprintf("%c", h); i += 2; continue }
+		}
+		out = out (c == "+" ? " " : c)
+	}
+	return out
+}
+function esc(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); return s }
+{
+	n++
+	if (match($0, /"at":"[^"]*"/)) at = substr($0, RSTART + 6, RLENGTH - 7)
+	if (match($0, /"body":"[^"]*"/)) {
+		b = substr($0, RSTART + 8, RLENGTH - 9)
+		tag = ""; det = ""
+		if (match(b, /tag=[^&]*/)) tag = dec(substr(b, RSTART + 4, RLENGTH - 4))
+		if (match(b, /detail=[^&]*/)) det = dec(substr(b, RSTART + 7, RLENGTH - 7))
+		if (tag == "PROOF-SUMMARY-FINAL") proof = at " " det
+		if (tag == "KPATCH-BLOB") kpatch = at " " det
+		if (tag == "JB-ROOT") jbroot = at " " det
+		if (tag == "EG-VERDICT") egv = at " " det
+		if (tag == "PAYLOAD-RUN" || tag == "PAYLOAD-BLOB") payload = at " " det
+		last = at " " tag " " det
+	}
+}
+END {
+	if (n == 0) { state = "NO RUN YET"; cls = "idle" }
+	else if (egv ~ /jailbroken=1/) { state = "JAILBROKEN"; cls = "ok" }
+	else if (jbroot != "") { state = "ROOT REACHED, no end verdict"; cls = "warn" }
+	else { state = "NO JAILBREAK IN THIS LOG"; cls = "bad" }
+
+	print "<!doctype html><meta charset=\"utf-8\"><title>WRT2JB &mdash; PS4 jailbreak host</title>"
+	print "<style>"
+	print " body{font:15px/1.5 system-ui,sans-serif;background:#0b0d10;color:#c8ced8;margin:0;padding:24px}"
+	print " h1{font-size:19px;letter-spacing:.06em;margin:0 0 4px}"
+	print " .state{font-size:26px;font-weight:700;margin:12px 0}"
+	print " .ok{color:#7fd0a0} .bad{color:#d08a7f} .warn{color:#d8c07f} .idle{color:#8b95a3}"
+	print " dt{color:#8b95a3;font-size:12px;text-transform:uppercase;letter-spacing:.08em;margin-top:12px}"
+	print " dd{margin:2px 0 0;font-family:ui-monospace,monospace;font-size:13px;word-break:break-word}"
+	print " a{color:#7fb0d0} .hint{color:#5c6672;font-size:12px;margin-top:24px}"
+	print "</style>"
+	printf "<h1>WRT2JB &mdash; PS4 jailbreak host</h1>\n"
+	printf "<div class=\"state %s\">%s</div>\n", cls, state
+	printf "<dt>serving</dt><dd>RAW GAME chain %s &middot; GoldHEN %s&hellip;</dd>\n",
+		(rev == "" ? "?" : substr(rev, 1, 9)), (gh == "" ? "?" : gh)
+	printf "<dt>beacons logged</dt><dd>%d &middot; last %s</dd>\n", n, (last == "" ? "-" : esc(last))
+	if (proof != "") printf "<dt>proof</dt><dd>%s</dd>\n", esc(proof)
+	if (kpatch != "") printf "<dt>kernel patch</dt><dd>%s</dd>\n", esc(kpatch)
+	if (jbroot != "") printf "<dt>root</dt><dd>%s</dd>\n", esc(jbroot)
+	if (payload != "") printf "<dt>payload</dt><dd>%s</dd>\n", esc(payload)
+	if (egv != "") printf "<dt>end verdict</dt><dd>%s</dd>\n", esc(egv)
+	print "<p class=\"hint\">Run it from the console: open <a href=\"/\">http://&lt;router&gt;:8000/</a> in the"
+	print " browser. Log: " logpath " (RAM &mdash; it does not survive a reboot).</p>"
+}
+' "$LOG"

@@ -1,0 +1,13 @@
+{
+  "admin/services/wrt2jb": {
+    "title": "WRT2JB",
+    "order": 60,
+    "action": {
+      "type": "view",
+      "path": "wrt2jb/binload"
+    },
+    "depends": {
+      "acl": [ "luci-app-wrt2jb" ]
+    }
+  }
+}
