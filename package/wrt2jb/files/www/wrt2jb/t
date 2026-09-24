@@ -16,6 +16,7 @@ MANIFEST=/www/wrt2jb/MANIFEST
 MAX_BODY=65536
 
 mkdir -p "$LOG_DIR" 2>/dev/null
+[ -f "$LOG" ] || : > "$LOG" 2>/dev/null
 
 header() {
 	printf 'Status: %s\r\nContent-Type: %s\r\nCache-Control: no-store\r\n\r\n' "$1" "$2"
