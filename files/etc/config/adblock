@@ -22,8 +22,9 @@ config adblock 'global'
 	# total (~89% of the Pi's ~440k), 158MB/500MB still available after
 	# reload, verified against no other trigger changes. AdmiraList and
 	# the two hosts/amblock lists (Amazon tracker, Admiral) are not native
-	# adblock feeds -- they would need a custom local-blocklist fetch
-	# script (adb_locallist), not reproduced here yet.
+	# adblock feeds and are intentionally not reproduced here -- this
+	# 3-feed set was judged good enough; the custom local-blocklist fetch
+	# script that full parity would need was decided against, not deferred.
 	#
 	# hagezi/stevenblack are adblock's "VAR" category feeds: the UCI
 	# option value is the literal path suffix appended to the feed's base
