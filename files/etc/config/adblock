@@ -13,11 +13,27 @@ config adblock 'global'
 	option adb_safesearch '0'
 	option adb_mail '0'
 	option adb_report '0'
-	# Deliberately conservative for the first cutover: oisd_small is
-	# "L" class (30k-80k domains), well inside adblock's own "XL (80k-200k)
-	# should work for 256-512 MByte devices" guidance, on a board that also
-	# runs PPE/WED/hostapd/luci concurrently — unlike a dedicated DNS box.
-	# The Pi's current list is ~456k domains across 6 sources; that is NOT
-	# reproduced here. Expand (hagezi/stevenblack/oisd_big) only after a
-	# live RAM measurement confirms headroom post-cutover.
-	list adb_feed 'oisd_small'
+	# Live RAM measurement (2026-09-25, router already running the DNS
+	# cutover): oisd_small alone (57,391 domains) left 339MB/500MB
+	# available -- well past the threshold this comment used to wait for.
+	# Expanded to the 3 native feeds matching the Pi's non-amblock sources
+	# (hagezi pro, oisd_big, StevenBlack fakenews -- see pi-tuning/dns
+	# sources/00-base.adlist for the exact originals): 392,408 domains
+	# total (~89% of the Pi's ~440k), 158MB/500MB still available after
+	# reload, verified against no other trigger changes. AdmiraList and
+	# the two hosts/amblock lists (Amazon tracker, Admiral) are not native
+	# adblock feeds -- they would need a custom local-blocklist fetch
+	# script (adb_locallist), not reproduced here yet.
+	#
+	# hagezi/stevenblack are adblock's "VAR" category feeds: the UCI
+	# option value is the literal path suffix appended to the feed's base
+	# URL, not a bare category name (adb_hag_feed/adb_stb_feed below).
+	# hagezi's "wildcard/pro.txt" is *.domain-prefixed and adblock's
+	# "rule: feed 1" parser silently produces zero domains against it
+	# (logged as "preparation ... failed, rc: 0", not a download error) --
+	# use the onlydomains variant, which is bare "domain.tld" per line.
+	list adb_feed 'oisd_big'
+	list adb_feed 'hagezi'
+	list adb_feed 'stevenblack'
+	option adb_hag_feed 'wildcard/pro-onlydomains.txt'
+	option adb_stb_feed 'alternates/fakenews/hosts'
