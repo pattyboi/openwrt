@@ -547,7 +547,7 @@ This map is by responsibility rather than chronology.
 |---|---|---|
 | QDMA diagnostics/control | `999-qos-01`–`04` | Register, rate, scheduler, and queue controls |
 | Queue classification | `999-qos-07`, `10`, `20` | skb mark, DSCP-to-queue, configurable PPPQ priority queue |
-| PPE/HQoS | `999-ppe-04`, `10`–`17`, `36`, `89`–`94`, `999-zz-*` | PPPQ, flow metadata, bridge offload, hashing, bypass, safety, prefetch |
+| PPE/HQoS | `999-ppe-04`, `10`–`17`, `36`, `89`–`95`, `999-zz-*` | PPPQ, flow metadata, bridge offload, hashing, bypass, safety, prefetch, flowtable UAF |
 | WED recovery | `999-wed-13`, `14`, `15` | Correct PSE gating, reset ring indices, shorten busy-poll timeout |
 | Ethernet/DSA | `999-eth-*`, `999-dsa-06` | NAPI, MDIO, RX ring, panic, and VLAN fixes |
 | mt76/mac80211 | package patch directories | Compatibility, empty-queue cleanup, station handling, optional VHT2G |
@@ -636,6 +636,21 @@ and differentiated-load tests showed them inert on this silicon.
   produced zero WED/mt7915 SER events in the observed uptime, so the
   disconnect symptom itself hasn't been locally reproduced. Flash and watch
   `logread -e mt7915-ser-watchdog` after the next real SER event.
+- Linux 6.12.104-111 audited (kernel.org longterm is 6.12.111 against
+  this fork's pinned 6.12.103): backported `999-eth-92` (named-IRQ
+  fallback correctness, and the source of this board's benign
+  `IRQ fe1/fe2 not found` boot lines) and `999-ppe-95` (a KASAN-caught
+  UAF in the generic nf_flowtable core this fork's PPE offload depends
+  on). A straight version bump to 6.12.111 was attempted first and
+  reverted: OpenWrt's own generic `backport-6.12/201-v6.13-...
+  of_graph_get_next_port.patch` fails 2 of 4 hunks there (upstream
+  folded equivalent code ahead of it) - a distro-wide generic-patch
+  conflict, out of scope for this board's own audit. Not ported: 5
+  UBI/UBIFS reliability fixes (edge-case-triggered, no observed
+  symptom), a PCI mediatek rescan-lock hardening (guards a hotplug
+  race this board's boot-once operation never hits), and the MT7530
+  PHY EEE-disable fix (explicitly MT7530/MT7621-only in its own commit
+  text; this board's MT7531 already disables EEE correctly).
 - Validate power-save buffering and remaining physical recovery cases.
 - Treat a Linux 6.18 move as a separate migration, not a pile of opportunistic
   patch changes.
