@@ -1,0 +1,47 @@
+# Console update/telemetry domains, blocked so a jailbroken PS4/PS5/Switch/Wii
+# on the LAN can never reach the real vendor servers and auto-update or phone
+# home. Domain list sourced from the DNS_Rules (Block + Redirect targets,
+# collapsed to their base domains) in:
+# https://github.com/Al-Azif/ps4-exploit-host/blob/master/settings.json
+# adblock blocks the domain and every subdomain; one bare domain per line is
+# enough, no wildcard syntax needed.
+playstation.com
+playstation.net
+playstation.org
+scea.com
+sonyentertainmentnetwork.com
+sie-rd.com
+nintendowifi.net
+nintendo.net
+nintendo.at
+nintendo.be
+nintendo.ch
+nintendo.co.jp
+nintendo.co.kr
+nintendo.co.nz
+nintendo.co.uk
+nintendo.co.za
+nintendo.com
+nintendo.com.au
+nintendo.com.hk
+nintendo.cz
+nintendo.de
+nintendo.dk
+nintendo.es
+nintendo.fi
+nintendo.fr
+nintendo.gr
+nintendo.hu
+nintendo.it
+nintendo.jp
+nintendo.nl
+nintendo.no
+nintendo.pt
+nintendo.ru
+nintendo.se
+nintendo.tw
+nintendo-europe.com
+nintendoswitch.cn
+nintendoswitch.com
+nintendoswitch.com.cn
+wii.com
