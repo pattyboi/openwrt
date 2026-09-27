@@ -1,0 +1,48 @@
+From: Rex Lu <rex.lu@mediatek.com>
+Subject: [PATCH] net: ethernet: mtk_wed: refactor check wed module busy time
+
+change timeout from 1.5s to 100ms. Without this patch, L1 SER may spend
+5s in heavy bi-di traffic and wed module can not go back to the idle
+state. It will cause some stations disconnect.
+
+Vendor source: MediaTek mtk-openwrt-feeds 25.12 patch 999-wed-20.
+Signed-off-by: Rex Lu <rex.lu@mediatek.com>
+
+Applicability (local, 2026-09-27): mtk_wed_poll_busy() carries no
+NETSYSv1/v2/v3 gate - it is the shared busy-wait helper used by every
+WED generation's start/stop/reset paths, confirmed unmodified at this
+tree's built drivers/net/ethernet/mediatek/mtk_wed.c:276-285 before this
+patch. Previously deferred pending an A/B (see docs/README.md's Current
+open work), because the fork's traffic record was single-client and
+this board's WED-v1 path saw comparatively little sustained load.
+
+Now applicable: live traffic evidence (2026-09-27 evaluation) shows the
+RAX70 wireless-repeater backhaul keeps wl1-ap0's WED-v1 path in
+continuous bidirectional traffic - one station measured at ~27% of its
+own connected time in TX and a nonzero RX duty cycle, all day, not a
+short burst. That is exactly the "heavy bi-di traffic" condition the
+vendor's own commit message names as the trigger for the 1.5s stall.
+Shortening the poll interval (15ms -> 1ms) and the overall timeout
+(1.5s -> 100ms) bounds how long any mtk_wed_poll_busy() caller can block
+during that condition, including this fork's own WED-v1 SER recovery
+patches (999-wed-13, 999-wed-14).
+
+Hardware caveat: this router has produced zero WED/mt7915 SER events in
+the observed uptime, so the specific station-disconnect symptom has not
+been reproduced live on this board - the case for carrying this patch
+now rests on the vendor's stated failure mode matching this
+deployment's confirmed traffic shape, not on a local reproduction. Flash
+and monitor `logread -e mt7915-ser-watchdog` after the next real SER
+event to confirm no regression.
+---
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -276,7 +276,7 @@
+ static int
+ mtk_wed_poll_busy(struct mtk_wed_device *dev, u32 reg, u32 mask)
+ {
+-	int sleep = 15000;
++	int sleep = 1000;
+ 	int timeout = 100 * sleep;
+ 	u32 val;
+ 
