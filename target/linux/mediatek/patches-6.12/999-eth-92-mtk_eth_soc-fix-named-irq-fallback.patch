@@ -1,0 +1,64 @@
+From: Daniel Golle <daniel@makrotopia.org>
+From: Frank Wunderlich <frank-w@public-files.de>
+Subject: [PATCH] net: ethernet: mtk_eth_soc: fix named-IRQ lookup fallback
+
+Combines two upstream mainline fixes to mtk_get_irqs(), both already in
+Linux stable as of 6.12.105/6.12.106:
+
+1. "net: ethernet: mtk_eth_soc: only use legacy mode on missing IRQ
+   name" (070e98dd4e26279280e15db8f37077a001ca1b4c upstream). If
+   platform_get_irq_byname() fails with anything other than -ENXIO
+   ("name not present in this DT"), the driver must propagate that
+   error instead of silently falling through to legacy index-based
+   IRQ lookup.
+
+2. "net: ethernet: mtk_eth_soc: improve support for named interrupts"
+   (e81d36d48880ab3f2b351ce3df799acaa8b11c4f upstream). Switches to
+   platform_get_irq_byname_optional(), which does not log its own
+   error when the name is simply absent (the expected case for a
+   legacy, index-based DT), and adds one clear driver-side dev_warn
+   instead.
+
+Applicability (local, 2026-09-27): this board's DTS uses legacy
+index-based ethernet interrupts, not named ones, so eth->irq[MTK_FE_IRQ_TX/RX]
+always come back -ENXIO here and the driver falls through to the
+legacy per-index loop below (unchanged by this patch - that loop is a
+separate refactor from a later upstream commit, not ported here to keep
+this change minimal). Confirmed live: this router's dmesg has always
+carried
+  mtk_soc_eth 1b100000.ethernet: error -ENXIO: IRQ fe1 not found
+  mtk_soc_eth 1b100000.ethernet: error -ENXIO: IRQ fe2 not found
+at every boot - platform_get_irq_byname()'s own unconditional dev_err
+for the "name absent" case, benign (the legacy fallback always
+succeeds) but noisy. This replaces it with one clear dev_warn.
+
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -4097,11 +4097,23 @@
+ 	int i;
+ 
+ 	/* future SoCs beginning with MT7988 should use named IRQs in dts */
+-	eth->irq[MTK_FE_IRQ_TX] = platform_get_irq_byname(pdev, "fe1");
+-	eth->irq[MTK_FE_IRQ_RX] = platform_get_irq_byname(pdev, "fe2");
++	eth->irq[MTK_FE_IRQ_TX] = platform_get_irq_byname_optional(pdev, "fe1");
++	eth->irq[MTK_FE_IRQ_RX] = platform_get_irq_byname_optional(pdev, "fe2");
+ 	if (eth->irq[MTK_FE_IRQ_TX] >= 0 && eth->irq[MTK_FE_IRQ_RX] >= 0)
+ 		return 0;
+ 
++	/* only use legacy mode if platform_get_irq_byname_optional returned -ENXIO */
++	if (eth->irq[MTK_FE_IRQ_TX] != -ENXIO)
++		return dev_err_probe(&pdev->dev, eth->irq[MTK_FE_IRQ_TX],
++				     "Error requesting FE TX IRQ\n");
++
++	if (eth->irq[MTK_FE_IRQ_RX] != -ENXIO)
++		return dev_err_probe(&pdev->dev, eth->irq[MTK_FE_IRQ_RX],
++				     "Error requesting FE RX IRQ\n");
++
++	if (!MTK_HAS_CAPS(eth->soc->caps, MTK_SHARED_INT))
++		dev_warn(&pdev->dev, "legacy DT: missing interrupt-names.");
++
+ 	/* legacy way:
+ 	 * On MTK_SHARED_INT SoCs (MT7621 + MT7628) the first IRQ is taken
+ 	 * from devicetree and used for both RX and TX - it is shared.

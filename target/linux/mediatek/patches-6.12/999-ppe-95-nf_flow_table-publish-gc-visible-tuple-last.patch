@@ -1,0 +1,57 @@
+From: Jérémy Jean <Jeremy.Jean@oss.cyber.gouv.fr>
+Subject: [PATCH] netfilter: flowtable: publish GC-visible tuple last
+
+Upstream commit 2014ac62df9d45bb9a004a043e85df7be09ed780, in Linux
+stable as of 6.12.105.
+
+nf_flow_table_iterate() only treats original-direction tuple nodes as
+owning entries. Publishing the original node first lets GC observe and
+free a flow while flow_offload_add() is still inserting the reply node.
+Publish the reply node first and the original node last so GC never
+sees a partially installed flow.
+
+KASAN can trigger slab-use-after-free read and write reports in the
+flowtable/rhashtable path (rht_deferred_worker, jhash, flow_offload_del,
+flow_offload_lookup, etc.).
+
+Fixes: ac2a66665e23 ("netfilter: add generic flow table infrastructure")
+
+Applicability (local, 2026-09-27): this is the generic nf_flowtable
+core every offloaded flow on this router goes through - fw4's
+`meta l4proto { tcp, udp } flow add @ft` in the forward chain adds
+every TCP/UDP flow to this exact table, and it is the mechanism behind
+the MediaTek PPE hardware binding this fork's whole QoS/PPPQ story
+depends on. A production router forwarding continuous real traffic
+(now including a 24/7 wireless-repeater backhaul) creates and tears
+down flow-table entries constantly, which is exactly the churn this
+race needs. No local instability has been observed, but there is also
+no local instrumentation (KASAN is a debug-only detector) that could
+have caught it if it happened.
+
+Signed-off-by: Jérémy Jean <Jeremy.Jean@oss.cyber.gouv.fr>
+Signed-off-by: pat <pi3iman@gmail.com>
+---
+--- a/net/netfilter/nf_flow_table_core.c
++++ b/net/netfilter/nf_flow_table_core.c
+@@ -280,17 +280,18 @@
+ 	flow->timeout = nf_flowtable_time_stamp + flow_offload_get_timeout(flow);
+ 
+ 	err = rhashtable_insert_fast(&flow_table->rhashtable,
+-				     &flow->tuplehash[0].node,
++				     &flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].node,
+ 				     nf_flow_offload_rhash_params);
+ 	if (err < 0)
+ 		return err;
+ 
++	/* GC only iterates original-direction entries; publish original last. */
+ 	err = rhashtable_insert_fast(&flow_table->rhashtable,
+-				     &flow->tuplehash[1].node,
++				     &flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].node,
+ 				     nf_flow_offload_rhash_params);
+ 	if (err < 0) {
+ 		rhashtable_remove_fast(&flow_table->rhashtable,
+-				       &flow->tuplehash[0].node,
++				       &flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].node,
+ 				       nf_flow_offload_rhash_params);
+ 		return err;
+ 	}
