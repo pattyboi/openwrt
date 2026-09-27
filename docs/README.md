@@ -600,15 +600,24 @@ and differentiated-load tests showed them inert on this silicon.
   ~26 ms idle baseline, p95 49.0 ms, max 56.6 ms), so this ships as a
   documented tradeoff rather than a defect. The lever, if a real workload
   shows it mattering, is `flow_offloading_hw=0`.
-- Two-client fairness remains the one untested dimension of the queue policy.
-  Every measurement in the record is single-client.
-- Re-derive the WRR weights. `bulk_weight 4` / `priority_weight 12` were
-  chosen when queue 7 carried both directions and a 9.5 Mbit/s scheduler
-  ceiling made the weights binding. With no scheduler cap they only matter
-  once the physical link saturates.
-- Verify the priority path end to end. `qos_prio_map=7 8` is confirmed applied
-  from `qdma_regs`/debugfs, but no EF-marked offloaded flow has been observed
-  landing on queue 8 on hardware yet.
+- Two-client fairness remains untested under controlled, simultaneous
+  saturating load — every measurement in the record is single-client. Real
+  production use now adds a live data point: the RAX70 wireless repeater
+  associates to `wl1-ap0` (5 GHz) as an ordinary station, so its aggregate
+  downstream traffic for every device behind it shares equal per-station
+  airtime (`airtime weight: 256`, unweighted, no hardware airtime fairness —
+  see Closed hardware dead ends) with any single local 5 GHz client. Measured
+  live over one session: that station's own TX duty cycle was ~27% of its
+  connected time, radio-1 channel-busy time was ~20% of total airtime, and no
+  starvation was observed on other 5 GHz clients. This ships as a monitored
+  condition, not a fix, until a concrete concurrent two-client test or a real
+  complaint quantifies actual starvation.
+- Priority-path verification (`qos_prio_map=7 8` landing offloaded EF traffic
+  on queue 8) is closed: reproduced live from a wired LAN client with an
+  `iperf3 -S 0xb8` upload, `ppe0/bind` showed the flow's `ib2` end in `8`
+  (`b87c0438`, TOS byte `b8` visible in the same field) versus `7`
+  (`...c0437`) for unmarked bulk traffic on the same host. Matches the
+  existing EF-probe finding in Operations and needs no further action.
 - A/B the vendor WED busy-poll timeout reduction before deciding whether to
   carry it.
 - Validate power-save buffering and remaining physical recovery cases.
