@@ -548,7 +548,7 @@ This map is by responsibility rather than chronology.
 | QDMA diagnostics/control | `999-qos-01`–`04` | Register, rate, scheduler, and queue controls |
 | Queue classification | `999-qos-07`, `10`, `20` | skb mark, DSCP-to-queue, configurable PPPQ priority queue |
 | PPE/HQoS | `999-ppe-04`, `10`–`17`, `36`, `89`–`94`, `999-zz-*` | PPPQ, flow metadata, bridge offload, hashing, bypass, safety, prefetch |
-| WED recovery | `999-wed-13`, `14` | Correct PSE gating and reset ring indices |
+| WED recovery | `999-wed-13`, `14`, `15` | Correct PSE gating, reset ring indices, shorten busy-poll timeout |
 | Ethernet/DSA | `999-eth-*`, `999-dsa-06` | NAPI, MDIO, RX ring, panic, and VLAN fixes |
 | mt76/mac80211 | package patch directories | Compatibility, empty-queue cleanup, station handling, optional VHT2G |
 | Other | `999-hwrng-*`, `999-xxhash-*` | RNG correctness and selective hashing |
@@ -584,6 +584,14 @@ Do not reopen these without new register-level evidence:
 - no enforcing `HRED2`/flow-control threshold path;
 - no initialized PSE per-port threshold mechanism;
 - no WED path for the integrated 2.4 GHz radio;
+- no per-flow WMM/TID stamping for a WED-offloaded download on NETSYSv1.
+  The vendor's own hwpath-WMM patch (`999-wed-07`) only stores TID in
+  `l2->amsdu`, a field `mtk_foe_entry_set_wdma()`'s NETSYSv2/v3 branches
+  use; this board's NETSYSv1 (`default:`) branch stamps `l2->vlan2`
+  (BSS/WCID/RING only) and has no TID subfield defined at all. Confirmed
+  by reading this tree's built `mtk_ppe.c`/`mtk_ppe.h` directly — extends
+  the Wi-Fi-client download shaping finding below with the specific
+  register reason, not a new limitation;
 - no background DFS CAC with one 5 GHz PHY;
 - no HE160 (MT7915 throughput regression, no DFS-free US channel).
 
@@ -618,8 +626,16 @@ and differentiated-load tests showed them inert on this silicon.
   (`b87c0438`, TOS byte `b8` visible in the same field) versus `7`
   (`...c0437`) for unmarked bulk traffic on the same host. Matches the
   existing EF-probe finding in Operations and needs no further action.
-- A/B the vendor WED busy-poll timeout reduction before deciding whether to
-  carry it.
+- WED busy-poll timeout: ported as `999-wed-15` (vendor's `999-wed-20`,
+  1.5s/15ms poll → 100ms/1ms). `mtk_wed_poll_busy()` carries no chip-version
+  gate and the RAX70 backhaul now keeps `wl1-ap0`'s WED-v1 path in
+  sustained bidirectional traffic — the "heavy bi-di traffic" condition the
+  vendor's commit cites for the 5s L1-SER stall/station-disconnect this
+  shortens. Confirmed clean apply (zero fuzz) and a clean isolated compile
+  of `mtk_wed.o`. Not yet flashed or hardware-verified: this router has
+  produced zero WED/mt7915 SER events in the observed uptime, so the
+  disconnect symptom itself hasn't been locally reproduced. Flash and watch
+  `logread -e mt7915-ser-watchdog` after the next real SER event.
 - Validate power-save buffering and remaining physical recovery cases.
 - Treat a Linux 6.18 move as a separate migration, not a pile of opportunistic
   patch changes.
