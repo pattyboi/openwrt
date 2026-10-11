@@ -197,8 +197,13 @@ are the artifact, not source to hand-patch.
 
 ## Serving a payload we built instead
 
-The upstream revision ships an **unidentified** GoldHEN build. If you've built or verified a
-specific GoldHEN binary yourself and want the chain to install *that* one instead:
+The upstream revision ships GoldHEN **v2.4b18.12** — verified 2026-09-28: the
+served bytes (`goldhen.bin` = `payload2.bin`, sha256 `df3f27c1…ea12`) decompress
+to the in-binary banner ` GoldHEN v2.4b18.12 `, matching the author's v2.4b18.12
+release (13.02/13.04/13.50/13.52 support). As of that date it is the newest
+build in existence (2.4b18.13+ does not exist on any channel). If you've built
+or verified a specific GoldHEN binary yourself and want the chain to install
+*that* one instead:
 
 ```sh
 make package/wrt2jb/compile WRT2JB_PAYLOAD=/path/to/goldhen.bin
